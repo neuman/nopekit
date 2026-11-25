@@ -98,12 +98,22 @@ STOCK_PATHS = (
     r"C:\Program Files\KiCad\9.0\share\kicad\symbols",
 )
 
-#: Where kicad-cli is when it is not on PATH: inside the macOS app bundle.
+#: Where kicad-cli is when it is not on PATH: inside the macOS app bundle, where
+#: kicad.org's installer puts it and puts nothing on PATH
+#: (``references/installing.md``; ``autoroute.py`` finds the bundle's Python the
+#: same way). Rejected: PATH alone (a macOS install nobody edited PATH for would
+#: answer no version, and a KiCad 10 bundle's symbols would be named by KiCad 9's
+#: variable); a search of ``/Applications`` (an older bundle kept beside the new
+#: one could answer first).
 MAC_KICAD_CLI = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
 
 #: KiCad 9's variable, written for a fixed directory when no kicad-cli answers
 #: its version: the release whose schematic format this writer writes, so the
-#: release that can open the file. The summary says it was not read.
+#: release that can open the file. The summary says it was not read. Rejected:
+#: KICAD10_SYMBOL_DIR (KiCad 9 does not define it, so the oldest release that
+#: opens the file would find no symbol); the directory's absolute path in the
+#: table (it names one machine's install, in a file a project tracks); refusing
+#: to write (a person with the symbols and no kicad-cli would get no schematic).
 FALLBACK_VARIABLE = "KICAD9_SYMBOL_DIR"
 
 _RELEASE_DIR = re.compile(r"KiCad[\\/](\d+)\.\d+[\\/]")

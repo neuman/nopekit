@@ -80,9 +80,11 @@ records' skeleton from the boards:
 `nopekit propose pcb.battery_record_draft -- --board <board>`. It fills each
 record's board, ref and value, and the pads that a pin name or the copper shows.
 Every datasheet number, flag and choice is a string that starts `FILL:`, which
-every rule here refuses where it reads a value, so the draft passes nothing until
-a person states each one. PACK.md ("The proposer: `pcb.battery_record_draft`")
-says what it finds and what it cannot see.
+every rule here refuses where it reads a value. Every source is a list, which
+every rule here refuses, since a source must be a string. So the draft passes
+nothing until a person states each value and writes each source. PACK.md ("The
+proposer: `pcb.battery_record_draft`") says what it finds, what it may draft
+wrong and what it cannot see.
 
 ## `pcb.charge_temperature`
 

@@ -14,45 +14,65 @@ rules read (``gates/_power.py``, ``references/battery.md``, ``mismate.md``,
 ``usb-c.md``): objects keyed by id under ``pcb_batteries``, ``pcb_protectors``,
 ``pcb_conductors``, ``pcb_matings``, ``pcb_usbc`` and ``pcb_rails``.
 
-**What it fills, from the boards:** each record's board, ref and value, and the pads
-a part's pin names or its copper identify (a charger's thermistor pin, the resistor
-on its PROG pin, a protector's DO and CO pins and the switch each drives, a fuse's
-two pads). **What it never fills:** every datasheet number, every flag and every
-choice that is the person's word (a chemistry, a cell count, a role, a mating's far
-side and modes). Each is a string that starts ``FILL:`` and says what to state and
-what the board shows beside it. No number and no true or false is anywhere in the
-draft: a guessed value would read as a fact the moment it is adopted. Every power
-rule refuses a ``FILL:`` value where it reads a number, a flag or a word (an error
-naming it), so an adopted draft passes nothing until every one is stated.
+**What it fills, from the boards:** each record's board, ref and value, ``where:
+board`` for a part on a board, and the pads a part's pin names or its copper
+identify (a charger's thermistor pin, the resistor on its PROG pin, a protector's
+DO and CO pins and the switch each drives, a fuse's two pads). **What it never
+fills:** every datasheet number, every flag and every choice that is the person's
+word (a chemistry, a cell count, what kind of element a part is, a role, a
+mating's far side and modes). Each is a string that starts ``FILL:`` and says what
+to state and what the board shows beside it. No number and no true or false is
+anywhere in the draft: a guessed value would read as a fact the moment it is
+adopted. Every power rule refuses a ``FILL:`` value where it reads a number, a
+flag or a word (an error naming it), so an adopted draft passes nothing until
+every one is stated.
+
+**Every record's source is a list** holding one ``FILL:`` that says it is a draft
+(:meth:`Draft.source`). Every power rule refuses a source that is not a string, so
+a record passes only once a person writes, in place of the list, where its
+numbers come from.
 
 **Where candidates come from** (each with its evidence in the summary):
 
 - a battery: a footprint from KiCad's ``Battery*`` libraries or with a ref BT and a
-  number; its pads named ``+`` and ``-`` (KiCad's battery symbols) fill pos and neg;
+  number; its pads named ``+`` and ``-`` (KiCad's battery symbols) fill pos and neg.
+  With no pad named ``-``, a net of its pads that a drafted charger's or
+  protector's ground pin sits on is its return;
 - a charger: a part with a cell pin (:data:`CELL_PINS`) and a charge-current or a
   thermistor pin (:data:`CURRENT_PINS`, :data:`THERM_PINS`);
-- a protector: a part with a cutoff pair (:data:`CUTOFF_PAIRS`);
+- a protector: a part with a cutoff pair (:data:`CUTOFF_PAIRS`) and not the
+  inputs that pair with it on a data line (:data:`CUTOFF_INPUTS`);
 - a fuse: a two-pad part from KiCad's ``Fuse*`` libraries or with a ref F and a
   number, one pad on a battery's net;
-- a conductor: each pin group of a connector on a net a battery drives (its own
-  nets, or the far side of a drafted fuse);
+- a conductor: each pin group of a connector on a net a battery drives: its pads'
+  nets but its ``-``, its thermistor and its return, and the far side of a drafted
+  fuse on one of those;
 - a USB-C receptacle: as ``pcb.usbc_receptacle`` finds one;
-- a rail: a part with a regulator's input and output pins (:data:`RAIL_IN`,
-  :data:`RAIL_OUT`), on its output's net;
-- a mating: every connector ``pcb.mismate``'s coverage rule will ask about (one on a
-  net a battery, a VBUS or a drafted rail drives), and each battery's own.
+- a rail: a part with a regulator's output and input pins (:data:`RAIL_OUT`,
+  :data:`RAIL_IN`), every output pin on one net and every input pin on another,
+  drafted on its output's net and listed under ``keep_or_delete``: a filter, a
+  voltage reference or a driver carries the same names;
+- a mating: every connector on a net a battery, a VBUS or a drafted rail drives
+  (``pcb.mismate``'s coverage rule asks a mating of each), and each battery's own.
 
 **What it cannot see**, said in the summary: an element inside the pack (its
 protection board), a stop that firmware makes, which connector meets which, a cell
-on a board not named, and a part whose pins carry no name.
+on a board not named, a part whose pins carry no name, and each regulator whose
+output or input pins sit on several nets (named). **What it may draft wrong**,
+listed under ``keep_or_delete``: each rail, and the conductors and matings on a
+cell's nets when nothing names or shows which pad is its ``-``.
+
+With more than one board, each id starts with its board's file name, and with the
+folders above it where two boards share a name (:func:`prefixes`).
 
 It refuses, exits 2 and writes nothing when ``$NOPEKIT_PROPOSAL_DIR`` is unset, a
 board is missing, named twice, does not parse, is one the power rules refuse or
 skip (``_kicad.board_problems``), or holds nothing to draft. **What it writes**
 under ``$NOPEKIT_PROPOSAL_DIR``: ``<stem>.power_records.json``, the draft (only the
 six keys), and ``<stem>.power_draft.json``, the summary: each candidate with the
-pins and nets that found it, every ``FILL:`` value's path, what it cannot see, and
-each board's sha256. Standard library and the pack's reader only.
+pins and nets that found it, every ``FILL:`` value's path, the records to keep or
+delete, what it cannot see, and each board's sha256. Standard library and the
+pack's reader only.
 """
 from __future__ import annotations
 
@@ -73,7 +93,9 @@ import _kicad as K                                                 # noqa: E402
 #: How every value this draft leaves to the person starts. A string, never a
 #: number, a flag or null: the power rules read a number with ``_power.num``, a
 #: band with ``band``, a flag with ``flag`` and a word with ``word``, and each
-#: refuses a string, quoting it, so the rule's error names what to fill.
+#: refuses a string, quoting it, so the rule's error names what to fill. A
+#: record's ``source`` holds its FILL in a list (:meth:`Draft.source`): the rule
+#: that reads a source takes any string.
 #: Rejected: null (the design's first word): it says nothing in place, and the
 #: rules' refusal of it ("None: give a number") says nothing either.
 FILL = "FILL: "
@@ -98,29 +120,86 @@ CURRENT_PINS = ("PROG", "PROG1", "ISET", "ISET1")
 #: themselves).
 THERM_PINS = ("THERM", "TS", "NTC", "TEMP")
 
-#: A protector's cutoff pins, ``(discharge, charge)``, by the same survey: a
-#: one-cell protector's DO and CO, another family's DOUT and COUT, and a battery
-#: monitor's DSG and CHG. Only the pair counts: CHG alone is a charger's status
-#: pin on 24 symbols there.
+#: A protector's cutoff pins, ``(discharge, charge)``, by the same survey: 8
+#: symbols carry a pair, a one-cell protector's DO and CO (2), another family's
+#: DOUT and COUT (1), and DSG and CHG (5: a fuel gauge, a FET driver and three
+#: multi-cell monitors, so what kind of element it is stays a FILL). Only the
+#: pair counts: CHG alone is a charger's status pin on 24 symbols there.
 CUTOFF_PAIRS = (("DO", "CO"), ("DOUT", "COUT"), ("DSG", "CHG"))
 
-#: A protector's pin that senses the cell (VDD on the one-cell protectors, BAT
-#: on another family, VCC on older parts).
-SENSE_PINS = ("VDD", "BAT", "VCC")
+#: The inputs beside a cutoff pair's names on a part that is no protector: an
+#: addressable LED (``LED:APA102``), eight line drivers (``Interface:TB5D*``,
+#: ``TB5R*``) and a level shifter (``4xxx:4504``) name their data and clock
+#: outputs DO and CO, or DOUT and COUT, beside inputs DI and CI, or DIN and CIN.
+#: Those are all 10 stock symbols outside ``Battery_Management`` with a cutoff
+#: pair, and none of the 8 inside it has the inputs. A part with both inputs of
+#: its pair is drafted as no protector. (What slipped through, found in review of
+#: P9 while this table's survey was written: a board of addressable LEDs drafted
+#: a protector per LED.)
+CUTOFF_INPUTS = {("DO", "CO"): ("DI", "CI"), ("DOUT", "COUT"): ("DIN", "CIN")}
 
-#: A battery's terminals by pin name: KiCad's battery symbols name them + and -
-#: (``Device:Battery``, ``Device:Battery_Cell``); a connector's pins named so.
+#: A protector's pin that senses the cell, by the same library: of its 8
+#: symbols with a cutoff pair, BAT on 6 and VDD on 2. Rejected: VC1 to VC15 (a
+#: multi-cell monitor's taps, several pins, which the draft asks for as
+#: ``taps``), VSS (its return, on all 8) and VCC (on no protector there: it is
+#: the supply of the LED and the line drivers :data:`CUTOFF_INPUTS` turns away).
+SENSE_PINS = ("VDD", "BAT")
+
+#: A battery's terminals by pin name. + and -: the pins of the two symbols KiCad
+#: 9.0.9 gives a BT reference (``Device:Battery``, ``Device:Battery_Cell``), the
+#: only stock symbols that draw a cell. BAT+, BATT+, B+ and their - forms: a
+#: pack's connector as a person draws it (no stock battery symbol uses them;
+#: BATT+ and BATT- are the cell pins of 10 chargers in ``Battery_Management``,
+#: which this never reads as a battery). Read on a battery's footprint only.
+#: Rejected: P+ and P- (a protection module's pack side, beyond its switch, which
+#: is not the cell's terminal).
 POS_PINS = ("+", "BAT+", "BATT+", "B+")
 NEG_PINS = ("-", "BAT-", "BATT-", "B-")
 
-#: A battery's thermistor pin, by name.
-BATTERY_THERM_PINS = ("T", "TH", "NTC", "THERM", "TEMP")
+#: A battery's thermistor pin, by name. No stock symbol draws a cell with one
+#: (the two above have + and - only), so this reads a pack's connector as a
+#: person draws it: :data:`THERM_PINS`'s names, and T and TH, the short forms a
+#: person writes for a three-wire pack's thermistor lead. Read on a battery's
+#: footprint only, so a T on any other part is never read here. Rejected: the
+#: pad that is neither + nor - (a pack's third pin may be a cell tap or an
+#: identification pin, not a thermistor).
+BATTERY_THERM_PINS = ("T", "TH") + THERM_PINS
 
-#: A regulator, by its pins: an output and an input, on a part that is no charger,
-#: protector or connector. Its output's net is drafted as a rail, its return the
-#: net of its one ground pin.
+#: A regulator, by its pins: an output and an input, on a part that is no
+#: connector and that no other pass drafted. Survey, KiCad 9.0.9's stock symbols:
+#: 2,325 carry a name of each (OUT and IN 1040, VOUT and VIN 638, VO and VI 499,
+#: OUT and VIN 117, others 14, and 17 with two output names). 1,882 of them are in
+#: the regulator libraries (Regulator_Linear 1447, Regulator_Switching 262,
+#: Power_Management 135, Regulator_SwitchedCapacitor 18, Converter_DCDC 17,
+#: Regulator_Controller 3). The rest are no regulator: RF_Filter 199 (IN, OUT,
+#: GND, as an L7805 is), Reference_Voltage 147, Sensor_Current 20, Driver_FET 8,
+#: Timer 4 and others; and Battery_Management 25 and Power_Protection 22, a
+#: charger (drafted as one first) or a switch whose output is a rail. A board
+#: names the footprint's library, never the symbol's, and an LDO shares its
+#: packages with a filter and a reference, so nothing on the board tells them
+#: apart: each rail drafted is listed under ``keep_or_delete``.
+#: An output or an input may span pins (TPS74801: IN on 1 and 2, OUT on 9 and
+#: 10) when they all sit on one net. (What slipped through: the rule took one pin
+#: of each, so it skipped 114 Regulator_Linear, 25 Regulator_Switching and 50
+#: Power_Management symbols, and said nothing.) A part whose output or input pins
+#: sit on several nets (a current sensor's OUT and VOUT) is named in
+#: ``cannot_see``. Rejected: SW (a switching regulator's switch node, which
+#: swings from its input to ground: its rail is beyond the inductor, on no pin of
+#: its own; 289 regulator symbols name SW and no output), VCC and VDD (a supply
+#: input on nearly every part), FB (a feedback input).
 RAIL_OUT = ("VOUT", "VO", "OUT")
 RAIL_IN = ("VIN", "VI", "IN")
+
+#: A part's ground, its return: a rail's return when its pins sit on one net, and
+#: the cell's return when a drafted charger's or protector's sits on a net of the
+#: cell's pads. Survey: of the 1,882 regulator symbols above, GND on 1728, PGND
+#: on 50, VSS on 4 (117 have none: an adjustable regulator's ADJ is no return,
+#: and their return is left to fill); of the 88 ``Battery_Management`` symbols
+#: the draft takes for a charger or a protector, VSS on 50, GND on 33, PGND on 8.
+#: Rejected: SGND and AGND (a quiet ground for a reference, on 28 and 10
+#: regulators: where it sits on a net of its own, the current returns on PGND),
+#: EP and PAD (an exposed pad sits on ground on most parts, on the input or on
+#: nothing on others).
 RETURN_PINS = ("GND", "VSS", "PGND")
 
 #: The connectors ``pcb.mismate``'s coverage rule asks a mating of, as
@@ -129,7 +208,12 @@ RETURN_PINS = ("GND", "VSS", "PGND")
 CONNECTOR_LIBS = ("Connector", "Battery")
 _CONNECTOR_REF = re.compile(r"^(J|P|CN|BT)\d+$")
 
-#: A battery's holder or connector, and a fuse: by library or ref.
+#: A battery's holder or connector, and a fuse, by ref: BT and F, the references
+#: KiCad 9.0.9 gives its stock symbols (BT: ``Device:Battery`` and
+#: ``Device:Battery_Cell``, the two that draw a cell; F: all 31 fuse, polyfuse
+#: and TBU symbols, in ``Device`` and ``Power_Protection``), and IEEE 315's
+#: letters for both. Rejected: B and G (each the reference of one SPICE source in
+#: the stock libraries, and of no cell), FU (of no stock symbol).
 _BATTERY_REF = re.compile(r"^BT\d+$")
 _FUSE_REF = re.compile(r"^F\d+$")
 
@@ -184,6 +268,47 @@ def _ref_order(ref: str) -> tuple:
     return (m.group(1), int(m.group(2)) if m.group(2) else -1, m.group(3))
 
 
+def _slug(text: str) -> str:
+    """``text`` as a piece of a record id: lower case, each run of other
+    characters one underscore."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").lower()
+
+
+def _nets(names) -> str:
+    return ", ".join(names) if names else "no net"
+
+
+def prefixes(rels: list[str]) -> list[str]:
+    """Each board's id prefix, from its path relative to the project: its file
+    name, and where two boards' names make one prefix, the folders above it as
+    well, nearest first, until each is its own; a number after any that still
+    meet (two paths that differ only in case or punctuation). (What slipped
+    through: the prefix was the file name alone, so ``a/main.kicad_pcb`` and
+    ``b/main.kicad_pcb`` drafted one set of ids, and the second board's battery,
+    protectors, receptacle and matings replaced the first's with no word.)"""
+    parts = []
+    for rel in rels:
+        stem = rel[:-len(".kicad_pcb")] if rel.endswith(".kicad_pcb") else rel
+        parts.append([s for s in (_slug(p) for p in stem.split("/")) if s] or ["board"])
+    depth = [1] * len(rels)
+    while True:
+        names = ["_".join(p[-d:]) for p, d in zip(parts, depth)]
+        grow = [i for i, n in enumerate(names)
+                if names.count(n) > 1 and depth[i] < len(parts[i])]
+        if not grow:
+            break
+        for i in grow:
+            depth[i] += 1
+    out: list[str] = []
+    for name in names:
+        got, k = name, 1
+        while got in out:
+            k += 1
+            got = f"{name}_{k}"
+        out.append(got)
+    return out
+
+
 class Board:
     """One board, read with the pack's reader: its fitted parts, and who sits on
     each net."""
@@ -197,6 +322,7 @@ class Board:
             inside = False
         self.rel = (os.path.relpath(path, root) if inside else path).replace(os.sep, "/")
         self.stem = os.path.basename(path)[:-len(".kicad_pcb")]
+        self.prefix = ""                         # set by Draft when there are several
         tree = K.load_tree(path)
         _version, self.problems = K.board_problems(tree)
         self.fps: list = []
@@ -268,21 +394,47 @@ def _one(names: dict, wanted: tuple) -> tuple[str | None, str | None]:
     return hits[0], (pads[0] if len(pads) == 1 else None)
 
 
+class Cell:
+    """A battery the draft found: its record id, its board and footprint (None for
+    a cell no board shows), its pads by role (None where no pin name says), every
+    net its pads are on, and what :meth:`Draft._roles` decides from the copper:
+    the nets it drives, the nets shown as its return (with the pins that show
+    each), and the nets whose role nothing shows."""
+
+    __slots__ = ("id", "b", "fp", "pos", "neg", "therm", "nets", "drives", "returns",
+                 "unknown")
+
+    def __init__(self, bid: str, b: Board, fp=None, pos=None, neg=None, therm=None):
+        self.id, self.b, self.fp = bid, b, fp
+        self.pos, self.neg, self.therm = pos, neg, therm
+        self.nets = ({b.net(fp, n) for n in b.pads_of(fp)} - {""}) if fp is not None else set()
+        self.drives: set[str] = set()
+        self.returns: dict[str, list[str]] = {}
+        self.unknown: set[str] = set()
+
+
 class Draft:
     """The draft records and the summary's candidates, built board by board."""
 
     def __init__(self, boards: list[Board]):
         self.boards = boards
+        if len(boards) > 1:
+            for b, prefix in zip(boards, prefixes([b.rel for b in boards])):
+                b.prefix = prefix
         self.records: dict[str, dict] = {k: {} for k in RECORDS}
         self.candidates: list[dict] = []
         self.unseen: list[str] = []
+        self.doubt: list[str] = []
+        self._parts: dict[str, tuple] = {}       # charger or protector id: (board, fp)
+        self._on: dict[str, tuple] = {}          # conductor id: (board path, net)
+        self._carries: dict[str, set] = {}       # mating id: {(board path, net)}
 
     # -- ids and words --------------------------------------------------- #
     def rid(self, b: Board, *parts: str) -> str:
-        """A record id: the ref (and a net) lower-cased, the board's stem first
-        when there is more than one board."""
-        tail = "_".join(re.sub(r"[^A-Za-z0-9]+", "_", p).strip("_") for p in parts).lower()
-        return f"{b.stem}_{tail}".lower() if len(self.boards) > 1 else tail
+        """A record id: the ref (and a net) lower-cased, the board's prefix first
+        when there is more than one board (:func:`prefixes`)."""
+        tail = "_".join(_slug(p) for p in parts)
+        return f"{b.prefix}_{tail}" if b.prefix else tail
 
     def fresh(self, kind: str, rid: str) -> str:
         """``rid``, or ``rid_2``, ``rid_3`` when ``kind`` holds it already: two
@@ -294,11 +446,19 @@ class Draft:
             out = f"{rid}_{n}"
         return out
 
-    def source(self, b: Board) -> str:
-        return (f"DRAFT by pcb.battery_record_draft from {b.rel}'s pads and pin names: the "
-                f"refs, values and pads are the board's, and each FILL is yours to state from "
-                f"the part's datasheet or the design. Replace this sentence with where each "
-                f"number comes from")
+    def source(self, b: Board) -> list[str]:
+        """A record's source as drafted: a list, which every power rule refuses
+        (``_power.source`` takes a non-empty string), holding the one FILL that
+        says it is a draft. (What slipped through: the source was that sentence
+        as a string, which ``_power.source`` takes, since it checks that a source
+        says something and not what; so a draft with every other FILL stated
+        passed all six rules, with the proposer's words for where its numbers
+        come from.)"""
+        return [FILL + f"DRAFT by pcb.battery_record_draft from {b.rel}'s pads and pin "
+                       f"names: the refs, values and pads are the board's, and each FILL is "
+                       f"yours to state from the part's datasheet or the design. Write in "
+                       f"place of this list one sentence that says where each number comes "
+                       f"from: every power rule refuses a source that is not a string"]
 
     def note(self, record: str, found_by: str, b: Board, fp=None) -> None:
         """A candidate for the summary: the record, what found it, and with a part
@@ -311,23 +471,24 @@ class Draft:
 
     # -- the passes ------------------------------------------------------ #
     def build(self) -> None:
-        batteries = self._batteries()
+        cells = self._batteries()
         protectors = self._chargers() + self._protectors()
-        fuses = self._fuses(batteries)
-        if (protectors or fuses) and not batteries:
-            batteries = [self._unknown_battery()]
-        ids = [bid for bid, _b, _fp, _nets in batteries]
+        self._roles(cells)
+        fuses = self._fuses(cells)
+        if (protectors or fuses) and not cells:
+            cells = [self._unknown_battery()]
+        ids = [c.id for c in cells]
         battery = (ids[0] if len(ids) == 1 else
                    FILL + f"the pcb_batteries id this part serves (one of {', '.join(ids)})")
         for rec in self.records["pcb_protectors"].values():
             rec["battery"] = battery
-        driven = self._conductors(batteries, fuses, battery)
+        driven = self._conductors(cells, fuses, battery)
         vbus = self._usbc()
         rails = self._rails()
-        self._matings(batteries, driven | vbus | rails)
+        self._matings(cells, driven | vbus | set(rails))
+        self._doubts(cells, fuses, rails, driven | vbus)
 
-    def _batteries(self) -> list[tuple]:
-        """``(id, board, footprint or None, the nets a cell drives)`` of each."""
+    def _batteries(self) -> list[Cell]:
         out = []
         for b in self.boards:
             for fp in b.fps:
@@ -353,15 +514,57 @@ class Draft:
                     rec["ntc"] = self._ntc_numbers(f"the pack's NTC, on {fp.ref} pad {therm}")
                 rec["source"] = self.source(b)
                 self.records["pcb_batteries"][bid] = rec
-                # The nets a cell drives: every pad's but its named - pad's.
-                nets = {b.net(fp, n) for n in b.pads_of(fp) if n != neg} - {""}
-                out.append((bid, b, fp, nets))
+                out.append(Cell(bid, b, fp, pos, neg, therm))
                 self.note(f"pcb_batteries.{bid}",
                           f"library {lib}" if lib.startswith("Battery") else f"ref {fp.ref}",
                           b, fp)
         return out
 
-    def _unknown_battery(self) -> tuple:
+    def _roles(self, cells: list[Cell]) -> None:
+        """The nets each cell drives: its pads' nets but its named - pad's and its
+        thermistor pad's, and, where no pad is named -, but a net that a drafted
+        charger's or protector's ground pin sits on: such a pin on the cell's +
+        would short it, so that net is the cell's return. (What slipped through: a
+        cell whose pads carry no + or - name, a two-pin housing's Pin_1 and Pin_2,
+        drove every net of its pads, so with its - on GND the receptacle's and
+        every other connector's GND was drafted as a fault conductor, each with
+        its numbers to state, and a connector carrying GND alone as a mating
+        ``pcb.mismate`` never asks for: its coverage reads a battery's + and taps,
+        never its -.) Where nothing names or shows the -, each net but a named
+        +'s is kept, and ``keep_or_delete`` says so: a conductor drafted on the
+        return is one to delete, while one left out is one no rule asks for."""
+        for c in cells:
+            b, fp = c.b, c.fp
+            if fp is None:
+                continue
+            pos_net = b.net(fp, c.pos) if c.pos else ""
+            if c.neg is None:
+                for pb, pfp in self._parts.values():
+                    if pb is not b:
+                        continue
+                    names = b.names(pfp)
+                    for g in RETURN_PINS:
+                        for n in names.get(g, []):
+                            net = b.net(pfp, n)
+                            if net in c.nets and net != pos_net:
+                                by = c.returns.setdefault(net, [])
+                                if f"{pfp.ref}'s {g}" not in by:
+                                    by.append(f"{pfp.ref}'s {g}")
+            skip = {b.net(fp, p) for p in (c.neg, c.therm) if p} | set(c.returns)
+            c.drives = c.nets - skip
+            if c.neg is not None:
+                continue
+            if c.returns:
+                shown = "; ".join(f"{net}, where {' and '.join(w)} "
+                                  f"{'sits' if len(w) == 1 else 'sit'}"
+                                  for net, w in sorted(c.returns.items()))
+                self.records["pcb_batteries"][c.id]["terminals"]["neg"] = FILL + (
+                    f"the pad of {fp.ref} on the cell's - terminal (pads: {b.said(fp)}; the "
+                    f"copper shows its return on {shown})")
+            else:
+                c.unknown = c.drives - {pos_net}
+
+    def _unknown_battery(self) -> Cell:
         b = self.boards[0]
         self.records["pcb_batteries"]["cell"] = {
             "board": b.rel,
@@ -375,7 +578,7 @@ class Draft:
         self.unseen.append("the cell's own connector: no part from a Battery library and no "
                            "BT ref is on the boards named, so pcb_batteries.cell names none "
                            "(name its board, if it is another, with --board)")
-        return ("cell", b, None, set())
+        return Cell("cell", b)
 
     @staticmethod
     def _cell_words() -> dict:
@@ -437,9 +640,17 @@ class Draft:
                 if therm:
                     functions["charge_temp"] = self._charge_temp(b, fp, names, therm)
                 pid = self.rid(b, fp.ref)
-                self.records["pcb_protectors"][pid] = self._protector(b, fp, "charger",
-                                                                      functions)
                 said = ", ".join(f"{n} ({', '.join(names[n])})" for n in cell + cur + therm)
+                # What a part is, is the person's word: "charger" lets its
+                # charge_temp stand with no acts (power.py), and a gauge with a
+                # BAT and a TS pin is no charger. (What slipped through: the draft
+                # wrote "charger" here, and "protector" for every cutoff pair, a
+                # fuel gauge and a multi-cell monitor included.)
+                kind = FILL + (f"charger when {fp.ref} is the part that charges the cell "
+                               f"(its pins {said} suggest one); else protector, bms or "
+                               f"gauge, from its datasheet")
+                self.records["pcb_protectors"][pid] = self._protector(b, fp, kind, functions)
+                self._parts[pid] = (b, fp)
                 self.note(f"pcb_protectors.{pid}", f"pins {said}", b, fp)
                 if not therm:
                     self.unseen.append(f"{fp.ref}'s charge temperature: it has no "
@@ -515,7 +726,8 @@ class Draft:
                 names = b.names(fp)
                 pair = next(((d, c) for d, c in CUTOFF_PAIRS if d in names and c in names),
                             None)
-                if pair is None:
+                inputs = CUTOFF_INPUTS.get(pair, ()) if pair else ()
+                if pair is None or (inputs and all(i in names for i in inputs)):
                     continue
                 dis, chg = pair
                 sense = self._sense(b, fp, names)
@@ -533,14 +745,19 @@ class Draft:
                                            "the pack",
                         "sense": dict(sense), "acts": self._acts(b, fp, names, dis)}}
                 pid = self.rid(b, fp.ref)
+                pins = f"its {dis} and {chg} pins drive the cell's switches"
                 held = self.records["pcb_protectors"].get(pid)
                 if held is not None:
                     # One element, every function it serves, in one record: a
                     # charger with its own cutoff pins is not drafted twice.
                     held["functions"].update(functions)
+                    held["kind"] += f"; {pins} as well"
                 else:
-                    self.records["pcb_protectors"][pid] = self._protector(b, fp, "protector",
+                    kind = FILL + (f"protector, bms or gauge: what {fp.ref} is, from its "
+                                   f"datasheet ({pins})")
+                    self.records["pcb_protectors"][pid] = self._protector(b, fp, kind,
                                                                           functions)
+                    self._parts[pid] = (b, fp)
                 self.note(f"pcb_protectors.{pid}",
                           f"pins {dis} ({', '.join(names[dis])}) and {chg} "
                           f"({', '.join(names[chg])})", b, fp)
@@ -581,10 +798,12 @@ class Draft:
                              f"{b.around(net, {fp.ref}) if net else 'nothing'})")
         return {"pin": pad, "switch": switch}
 
-    def _fuses(self, batteries: list) -> list[tuple]:
-        """``(id, board, the net it feeds)`` of each fuse on a battery's net."""
+    def _fuses(self, cells: list[Cell]) -> list[tuple]:
+        """``(id, board, the cell's net it sits on, the net it feeds)`` of each
+        fuse with one pad on a net of a cell's pads (its return's too: a low-side
+        fuse guards as a high-side one does)."""
         out = []
-        cell_nets = {(bb.path, n) for _bid, bb, _fp, nets in batteries for n in nets}
+        cell_nets = {(c.b.path, n) for c in cells for n in c.nets}
         for b in self.boards:
             for fp in b.fps:
                 if not (fp.lib_id.split(":")[0].startswith("Fuse") or _FUSE_REF.match(fp.ref)):
@@ -614,19 +833,20 @@ class Draft:
                 by = f"library {lib}" if lib.startswith("Fuse") else f"ref {fp.ref}"
                 self.note(f"pcb_protectors.{pid}",
                           f"{by}, pad {pads[near]} on the battery's {nets[near]}", b, fp)
-                out.append((pid, b, nets[far]))
+                out.append((pid, b, nets[near], nets[far]))
         return out
 
-    def _conductors(self, batteries: list, fuses: list, battery: str) -> set:
-        """Draft a conductor per pin group of a connector on a net a battery drives;
-        return those nets, ``(board path, net)``."""
-        driven = {(bb.path, n) for _bid, bb, _fp, nets in batteries for n in nets}
+    def _conductors(self, cells: list[Cell], fuses: list, battery: str) -> set:
+        """Draft a conductor per pin group of a connector on a net a battery drives
+        (a cell's own, or the far side of a drafted fuse on one); return those
+        nets, ``(board path, net)``."""
+        driven = {(c.b.path, n) for c in cells for n in c.drives}
         feeds = {}
-        for pid, b, far in fuses:
-            if far:
-                driven.add((b.path, far))
+        for pid, b, near, far in fuses:
+            if far and (b.path, near) in driven:
                 feeds.setdefault((b.path, far), []).append(pid)
-        own = {(bb.path, fp.ref) for _bid, bb, fp, _n in batteries if fp is not None}
+        driven |= set(feeds)
+        own = {(c.b.path, c.fp.ref) for c in cells if c.fp is not None}
         for b in self.boards:
             for fp in b.fps:
                 if not connector(fp) or (b.path, fp.ref) in own:
@@ -650,6 +870,7 @@ class Draft:
                                           "short, C",
                         "continuous_a": FILL + "the current it carries continuously, A",
                         "protected_by": guards, "source": self.source(b)}
+                    self._on[cid] = (b.path, net)
                     self.note(f"pcb_conductors.{cid}",
                               f"connector {fp.ref} pin(s) {', '.join(pins)} on {net}, which a "
                               f"battery drives", b)
@@ -695,28 +916,49 @@ class Draft:
                     "source": self.source(b)})
                 uid = self.rid(b, fp.ref)
                 self.records["pcb_usbc"][uid] = rec
-                vbus = sorted({b.net(fp, s) for s in TYPEC_VBUS if s in numbers}
-                              | {b.net(fp, n) for n in names.get("VBUS", [])} - {""})
+                # The union first, then the empty name out: ``-`` binds tighter
+                # than ``|``. (What slipped through: written without the
+                # brackets, a VBUS pad on no net put "" among the sources, and
+                # every connector with a netless pad, a mounting pad included,
+                # was drafted a mating that "carries ," nothing.)
+                vbus = sorted(({b.net(fp, s) for s in TYPEC_VBUS if s in numbers}
+                               | {b.net(fp, n) for n in names.get("VBUS", [])}) - {""})
                 out |= {(b.path, n) for n in vbus}
                 self.note(f"pcb_usbc.{uid}", "a USB-C receptacle, as pcb.usbc_receptacle "
                           "finds one", b, fp)
         return out
 
-    def _rails(self) -> set:
-        out = set()
+    def _rails(self) -> dict:
+        """Draft a rail on the output net of each part with a regulator's output
+        and input pins (:data:`RAIL_OUT`); return ``{(board path, net): (rail
+        id, its part)}``."""
+        out: dict = {}
         drafted = {(r["board"], r["ref"]) for r in self.records["pcb_protectors"].values()}
         for b in self.boards:
             for fp in b.fps:
                 if connector(fp) or (b.rel, fp.ref) in drafted:
                     continue
                 names = b.names(fp)
-                _o, opad = _one(names, RAIL_OUT)
-                _i, ipad = _one(names, RAIL_IN)
-                if opad is None or ipad is None:
+                outs = [n for n in RAIL_OUT if n in names]
+                ins = [n for n in RAIL_IN if n in names]
+                if not outs or not ins:
                     continue
-                net = b.net(fp, opad)
-                if not net:
+                opads = sorted({p for n in outs for p in names[n]}, key=_order)
+                ipads = sorted({p for n in ins for p in names[n]}, key=_order)
+                onets = sorted({b.net(fp, p) for p in opads} - {""})
+                inets = sorted({b.net(fp, p) for p in ipads} - {""})
+                said = (f"pins {'/'.join(outs)} ({', '.join(opads)}) and {'/'.join(ins)} "
+                        f"({', '.join(ipads)})")
+                why = (f"its {'/'.join(outs)} pins sit on {_nets(onets)}" if len(onets) != 1
+                       else f"its {'/'.join(ins)} pins sit on {_nets(inets)}" if len(inets) != 1
+                       else f"its output and its input sit on one net, {onets[0]}"
+                       if onets == inets else None)
+                if why:
+                    self.unseen.append(f"{fp.ref} ({fp.value}) on {b.rel}, a regulator by its "
+                                       f"{said}: {why}, so no pcb_rails record is drafted for "
+                                       f"it; state one for each net it supplies")
                     continue
+                net = onets[0]
                 grounds = sorted({b.net(fp, n) for g in RETURN_PINS for n in names.get(g, [])}
                                  - {""})
                 rid = self.fresh("pcb_rails", self.rid(b, fp.ref, net))
@@ -727,12 +969,12 @@ class Draft:
                     "return": (grounds[0] if len(grounds) == 1 else
                                FILL + f"the net {net} returns on (pads: {b.said(fp)})"),
                     "source": self.source(b)}
-                out.add((b.path, net))
-                self.note(f"pcb_rails.{rid}", f"pins {_o} ({opad}) and {_i} ({ipad})", b, fp)
+                out[(b.path, net)] = (rid, fp)
+                self.note(f"pcb_rails.{rid}", said, b, fp)
         return out
 
-    def _matings(self, batteries: list, sources: set) -> None:
-        own = {(bb.path, fp.ref): bid for bid, bb, fp, _n in batteries if fp is not None}
+    def _matings(self, cells: list[Cell], sources: set) -> None:
+        own = {(c.b.path, c.fp.ref): c.id for c in cells if c.fp is not None}
         modes = (FILL + "the wrong ways it can meet, [] when it cannot (and why in source): "
                         "reversed, rotate, flipped_type, {narrower: N}, {offset: k}, "
                         "{slide: [pins]}, {bridges: [[p, q]]} (references/mismate.md)")
@@ -752,8 +994,9 @@ class Draft:
                         "source": self.source(b)}
                     self.note(f"pcb_matings.{mid}", f"the battery {bid}'s own connector", b)
                     continue
+                # A pad on no net carries nothing.
                 carries = sorted({b.net(fp, n) for n in b.pads_of(fp)
-                                  if (b.path, b.net(fp, n)) in sources})
+                                  if b.net(fp, n) and (b.path, b.net(fp, n)) in sources})
                 if not carries:
                     continue
                 self.records["pcb_matings"][mid] = {
@@ -765,9 +1008,42 @@ class Draft:
                     "map": FILL + "when b is a connector on a board: straight, reversed or "
                                   "{a_pin: b_pin}; drop map otherwise",
                     "modes": modes, "source": self.source(b)}
+                self._carries[mid] = {(b.path, n) for n in carries}
                 self.note(f"pcb_matings.{mid}",
                           f"connector {fp.ref} carries {', '.join(carries)}, which "
                           f"pcb.mismate's coverage rule asks a mating of", b)
+
+    def _doubts(self, cells: list[Cell], fuses: list, rails: dict, other: set) -> None:
+        """``keep_or_delete``: the records drafted on evidence that fits something
+        else as well. Each rail (its pin names are a filter's, a reference's and a
+        driver's too), with the matings drafted only for its net; and, for a cell
+        whose - nothing names or shows, the conductors and matings on its nets."""
+        for (path, net), (rid, fp) in rails.items():
+            mates = [f"pcb_matings.{m}" for m, nodes in self._carries.items()
+                     if (path, net) in nodes and not nodes & other]
+            self.doubt.append(
+                f"pcb_rails.{rid}: {fp.ref} ({fp.value}) was taken for a regulator by its pin "
+                f"names alone, which a filter, a voltage reference or a driver carries too: "
+                f"keep it when {fp.ref} supplies {net}, else delete it"
+                + (f" and the matings drafted only for {net} ({', '.join(mates)})"
+                   if mates else ""))
+        for c in cells:
+            if not c.unknown:
+                continue
+            nodes = {(c.b.path, n) for n in c.unknown}
+            nodes |= {(b.path, far) for _pid, b, near, far in fuses
+                      if far and (b.path, near) in nodes}
+            drafted = ([f"pcb_conductors.{cid}" for cid, node in self._on.items()
+                        if node in nodes]
+                       + [f"pcb_matings.{m}" for m, carried in self._carries.items()
+                          if carried <= nodes])
+            self.doubt.append(
+                f"which of {c.fp.ref}'s pads is the cell's -: no pad is named - and no "
+                f"drafted charger's or protector's {'/'.join(RETURN_PINS)} pin sits on "
+                f"{', '.join(sorted(c.unknown))}, so each is drafted as a net the cell "
+                f"drives. Of what is drafted on them and beyond a fuse on them, keep what is "
+                f"on the cell's + and delete what is on its return: "
+                + (", ".join(drafted) if drafted else "nothing is drafted there"))
 
     # -- the summary ----------------------------------------------------- #
     def fills(self) -> list[str]:
@@ -857,15 +1133,18 @@ def main(argv: list[str]) -> int:
         "boards": {b.rel: _sha256(b.path) for b in boards},
         "candidates": draft.candidates,
         "fill": fills,
+        "keep_or_delete": draft.doubt,
         "not_fitted": {b.rel: b.unfitted for b in boards if b.unfitted},
         "cannot_see": [*draft.unseen, *UNSEEN],
         "judged_by": "nothing: a draft settles nothing. Every power rule refuses a FILL value "
-                     "where it reads a number, a flag or a word, so an adopted draft errors "
-                     "until a person states each one; then the rules bind each record to "
-                     "the boards and judge it",
-        "adopt": "copy the records you keep into the project's params, state every FILL from "
-                 "the part's datasheet or the design, add what this cannot see, and say in "
-                 "each source where its numbers come from"}
+                     "where it reads a number, a flag or a word, and a source that is not a "
+                     "string, so an adopted draft errors until a person states each value "
+                     "and writes each source; then the rules bind each record to the boards "
+                     "and judge it",
+        "adopt": "copy the records you keep into the project's params, keep or delete each "
+                 "record keep_or_delete names, state every FILL from the part's datasheet or "
+                 "the design, add what this cannot see, and write each source, in place of "
+                 "its list, as one sentence that says where its numbers come from"}
     with open(os.path.join(out_dir, f"{stem}.power_records.json"), "w",
               encoding="utf-8") as fh:
         json.dump(draft.records, fh, indent=2)
@@ -874,8 +1153,9 @@ def main(argv: list[str]) -> int:
         json.dump(summary, fh, indent=2, sort_keys=True)
         fh.write("\n")
     counts = ", ".join(f"{k} {len(draft.records[k])}" for k in RECORDS)
+    doubt = (f"; {len(draft.doubt)} to keep or delete (keep_or_delete)" if draft.doubt else "")
     print(f"pcb.battery_record_draft: drafted {counts}; {len(fills)} FILL value(s) are yours "
-          f"to state; a draft settles nothing")
+          f"to state{doubt}; a draft settles nothing")
     return 0
 
 

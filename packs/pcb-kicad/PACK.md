@@ -180,33 +180,44 @@ difference until someone proposes again: tag such claims `netlist`, which binds
 The power records are the heaviest part of first use. This proposer writes a
 draft of them from the boards, in the shapes the rules read: `pcb_batteries`,
 `pcb_protectors`, `pcb_conductors`, `pcb_matings`, `pcb_usbc` and `pcb_rails`,
-each an object keyed by id. It fills each record's board, ref and value, and the
-pads that a part's pin names or its copper show: a charger's thermistor pin and
-the resistor on its PROG pin, a protector's DO and CO pins and the switch each
-drives, a fuse's two pads, a connector's pins on a net a cell drives. It finds a
-battery by KiCad's `Battery*` libraries or a BT ref; a charger by a cell pin
-(BAT, VBAT, BATT) beside a PROG, ISET or thermistor pin; a protector by DO and
-CO (or DOUT and COUT, or DSG and CHG); a fuse by the `Fuse*` libraries or an F
-ref; a USB-C receptacle as `pcb.usbc_receptacle` does; a rail by a regulator's
-input and output pins; and a mating for every connector that `pcb.mismate`'s
-coverage rule will ask about.
+each an object keyed by id. It fills each record's board, ref and value, `where:
+board` for a part on a board, and the pads that a part's pin names or its copper
+show: a charger's thermistor pin and the resistor on its PROG pin, a protector's
+DO and CO pins and the switch each drives, a fuse's two pads, a connector's pins
+on a net a cell drives. It finds a battery by KiCad's `Battery*` libraries or a
+BT ref; a charger by a cell pin (BAT, VBAT, BATT) beside a PROG, ISET or
+thermistor pin; a protector by DO and CO (or DOUT and COUT, or DSG and CHG); a
+fuse by the `Fuse*` libraries or an F ref; a USB-C receptacle as
+`pcb.usbc_receptacle` does; a rail by a regulator's output and input pins, each
+name's pins on one net; and a mating for every connector on a net that a cell, a
+VBUS or a drafted rail drives, as `pcb.mismate`'s coverage rule asks. A cell
+drives the nets of its pads, but not its `-` pad's or its thermistor pad's. When
+no pad is named `-`, a net where a drafted charger's or protector's ground pin
+sits is the cell's return, and drives nothing.
 
 **It never fills a datasheet number, a flag or a choice that is yours** (a
-chemistry, a cell count, a role, a mating's far side and modes). Each is a string
-that starts `FILL:` and says what to state, with what the board shows beside it.
-No number and no true or false is anywhere in the draft, and every source says
+chemistry, a cell count, what kind of element a part is, a role, a mating's far
+side and modes). Each is a string that starts `FILL:` and says what to state,
+with what the board shows beside it. No number and no true or false is anywhere
+in the draft. Every record's source is a list that holds one `FILL:`, which says
 `DRAFT by pcb.battery_record_draft`. It writes `<stem>.power_records.json` and
-`<stem>.power_draft.json`: each candidate with the pins and nets that found it,
-the path of every `FILL:` value, and what it cannot see (an element inside the
-pack, a stop that firmware makes, which connector meets which, a part whose pads
-carry no pin name).
+`<stem>.power_draft.json`. The summary gives each candidate with the pins and
+nets that found it, and the path of every `FILL:` value. Under `keep_or_delete`
+it names the records it may have drafted wrong: each rail (a filter, a voltage
+reference and a driver have the same pin names), and the records on a cell's
+nets when nothing names or shows its `-`. It also says what it cannot see: an
+element inside the pack, a stop that firmware makes, which connector meets
+which, a part whose pads carry no pin name, and a regulator whose output or
+input pins sit on several nets. With more than one board, each id starts with
+its board's file name, and with its folders when two boards have the same name.
 
 A draft settles nothing. Every power rule refuses a `FILL:` value where it reads
-a number, a flag or a word, and names it, so an adopted draft errors until each
-one is stated. Adopting the draft (copying its records into the project's params)
-is a person's decision, and so is each value. Replace each source with where its
-numbers come from: the rules check that a source says something, not what it
-says.
+a number, a flag or a word, and names it. Every rule also refuses a source that
+is not a string. So an adopted draft errors until each value is stated and each
+source is written. Adopting the draft (copying its records into the project's
+params) is a person's decision, and so is each value. Write each source, in
+place of its list, as one sentence that says where its numbers come from: the
+rules check that a source says something, not what it says.
 
 ## What this pack CANNOT settle
 

@@ -4988,12 +4988,17 @@ DRAFT_GATES = POWER_GATES + ("pcb.mismate", "pcb.usbc_receptacle")
 
 class ADraftSettlesNothing(_PowerCase):
     """``pcb.battery_record_draft`` on the power board: every power rule refuses
-    the draft as written, naming a FILL value; nothing in it is a number or a
-    flag; and with each FILL taken from the baseline's own records, and nothing
-    else, the draft reads as the baseline does, so the refs, pads, ids and shapes
-    it wrote are the board's and the rules'. (What it answers: the records are
-    the heaviest part of first use, and a draft that guessed one value would
-    read as a fact once adopted.)"""
+    the draft as written, naming a drafted source, and with each source written,
+    naming a FILL value; nothing in it is a number or a flag; with every FILL
+    stated and the drafted sources kept, every rule still refuses; and with each
+    FILL and each source taken from the baseline's own records, and nothing else,
+    the draft reads as the baseline does, so the refs, pads, ids and shapes it
+    wrote are the board's and the rules'. (What it answers: the records are the
+    heaviest part of first use, and a draft that guessed one value would read as
+    a fact once adopted. What slipped through, in review of P9: the drafted
+    source was a sentence, which ``_power.source`` takes, since it checks that a
+    source says something and not what; so with every number stated the draft
+    passed all six rules, its source the proposer's words.)"""
 
     def setUp(self):
         super().setUp()
@@ -5007,13 +5012,30 @@ class ADraftSettlesNothing(_PowerCase):
         params.update(records)
         return params
 
+    @staticmethod
+    def _sources(records: dict, source) -> dict:
+        """``records`` with each record's source replaced by ``source(kind, id,
+        record)``."""
+        out = copy.deepcopy(records)
+        for kind, recs in out.items():
+            for rid, rec in recs.items():
+                if "source" in rec:
+                    rec["source"] = source(kind, rid, records[kind][rid])
+        return out
+
     def test_every_power_rule_refuses_the_draft_as_written(self):
-        params = self._params(self.records)
-        for gid in DRAFT_GATES:
-            with self.subTest(gate=gid):
-                verdict = _run(self.registry, gid, self.root, params)
-                self.assertEqual(verdict.outcome, "error", verdict.render())
-                self.assertIn("FILL: ", verdict.error)
+        """As written, each rule refuses a drafted source (a list: a source must
+        be a sentence); with every source written, each refuses a FILL value."""
+        for records, said in (
+                (self.records, "source is empty: say where each number comes from"),
+                (self._sources(self.records, lambda k, r, _rec: f"{k}.{r}: a person's words"),
+                 "FILL: ")):
+            params = self._params(records)
+            for gid in DRAFT_GATES:
+                with self.subTest(gate=gid, said=said):
+                    verdict = _run(self.registry, gid, self.root, params)
+                    self.assertEqual(verdict.outcome, "error", verdict.render())
+                    self.assertIn(said, verdict.error)
 
     def test_a_board_with_no_cell_skips_or_refuses(self):
         """The same board with its cell, charger, protector and fuse taken off:
@@ -5054,16 +5076,32 @@ class ADraftSettlesNothing(_PowerCase):
         walk(self.records, "")
         self.assertEqual([(p, v) for p, v in leaves if not isinstance(v, str)], [])
         self.assertEqual(self.summary["fill"], fills)
-        self.assertEqual(len(fills), 64)
+        # 64 datasheet numbers, flags and words; U1's and U2's kind (charger,
+        # protector, bms or gauge is the person's word: in review of P9 the
+        # draft wrote it); and the 11 records' sources.
+        self.assertEqual(len(fills), 77)
         self.assertEqual(sorted(self.records), sorted(DRAFT_RECORDS))
+        sources = 0
         for kind, recs in self.records.items():
             for rid, rec in recs.items():
                 if "source" in rec:
+                    sources += 1
                     with self.subTest(record=f"{kind}.{rid}"):
-                        self.assertTrue(rec["source"].startswith(
-                            "DRAFT by pcb.battery_record_draft"), rec["source"])
+                        self.assertIsInstance(rec["source"], list)
+                        self.assertEqual(len(rec["source"]), 1)
+                        self.assertTrue(rec["source"][0].startswith(
+                            "FILL: DRAFT by pcb.battery_record_draft"), rec["source"])
+        self.assertEqual(sources, 11)
+        for pid, rec in self.records["pcb_protectors"].items():
+            with self.subTest(kind=pid):
+                self.assertTrue(_is_fill(rec["kind"]), rec["kind"])
+        self.assertIn("charger when U1", self.records["pcb_protectors"]["u1"]["kind"])
+        self.assertEqual(self.summary["keep_or_delete"], [])
 
-    def test_filled_from_the_baseline_it_reads_as_the_baseline(self):
+    def _from_baseline(self) -> tuple[dict, dict]:
+        """``(the baseline's params, the draft with each FILL taken from them)``:
+        each record's source the baseline's, a person's words, which is what
+        lets the record pass."""
         base = _power_params(self.path)
         filled, dropped = {}, []
         for kind in DRAFT_RECORDS:
@@ -5078,6 +5116,25 @@ class ADraftSettlesNothing(_PowerCase):
         self.assertEqual(dropped, ["pcb_matings.j11"])
         self.assertEqual(base["pcb_matings"]["flex"]["b"]["ref"], "J11")
         self.assertEqual([p for p in self._fill_paths(filled)], [])
+        return base, filled
+
+    def test_stated_numbers_beside_a_drafted_source_pass_nothing(self):
+        """Every FILL stated from the baseline, and each source left as drafted:
+        every rule refuses the source. Writing it is the person's act that lets
+        the record pass."""
+        _base, filled = self._from_baseline()
+        kept = self._sources(filled, lambda k, r, _rec: self.records[k][r]["source"])
+        self.assertEqual(sorted({p.rsplit(".", 1)[-1] for p in self._fill_paths(kept)}),
+                         ["source[0]"])
+        params = self._params(kept)
+        for gid in DRAFT_GATES:
+            with self.subTest(gate=gid):
+                verdict = _run(self.registry, gid, self.root, params)
+                self.assertEqual(verdict.outcome, "error", verdict.render())
+                self.assertIn("source is empty", verdict.error)
+
+    def test_filled_from_the_baseline_it_reads_as_the_baseline(self):
+        base, filled = self._from_baseline()
         for gid in DRAFT_GATES:
             with self.subTest(gate=gid):
                 want = _run(self.registry, gid, self.root, base)
@@ -5150,6 +5207,188 @@ class ADraftSettlesNothing(_PowerCase):
                 self.assertEqual(proc.returncode, 2, proc.stderr)
                 self.assertIn(said, proc.stderr)
                 self.assertIsNone(records)
+
+
+def _without(*refs: str):
+    """A board edit: the parts ``refs`` taken off."""
+    def edit(tree):
+        tree[:] = [x for x in tree if not (isinstance(x, list) and K.head(x) == "footprint"
+                                           and K.footprint_ref(x)[0] in refs)]
+    return edit
+
+
+def _join_net(tree, gone: str, into: str) -> None:
+    """Every pad on the net ``gone`` moved onto the net ``into``."""
+    code = _net_code(tree, into)
+    for fp in K.children(tree, "footprint"):
+        for pad in K.children(fp, "pad"):
+            net = K.child(pad, "net")
+            if net is not None and len(net) > 2 and str(net[2]) == gone:
+                net[1:] = [code, K.Q(into)]
+
+
+def _pin_names(tree, ref: str, names: dict) -> None:
+    """``ref``'s pads renamed, ``{pad number: pin name}``."""
+    for number, name in names.items():
+        K.child(_pad(tree, ref, number), "pinfunction")[1] = K.Q(name)
+
+
+#: Q1's pads named as a regulator's, on the power board with the cell's parts
+#: taken off: its drains (5 and 6, both on FET_D) the output, a source the input,
+#: the other source the ground, and J6's pin 1 moved onto FET_D.
+def _q1_as_regulator(tree) -> None:
+    _without("BT1", "U1", "U2", "F1")(tree)
+    _pin_names(tree, "Q1", {"5": "VOUT", "6": "VOUT", "1": "VIN", "3": "GND"})
+    _to_net(tree, "J6", "1", "FET_D")
+
+
+class ADraftDraftsWhatTheCopperShows(_PowerCase):
+    """What the review of P9 found the draft writing that the board does not
+    show, each on the power board edited. A cell's return drives no conductor; a
+    VBUS pad on no net puts no mating on a netless pad; two boards of one name
+    keep each its own records; a regulator's output may span pins, one on two
+    nets is named, and each rail is listed to keep or delete; and a data line's
+    DO and CO are no protector's."""
+
+    def test_a_cells_return_drives_nothing(self):
+        """BT1's - on GND (no low-side switch): its pads carry no + or - name,
+        and U1's and U2's VSS on GND show it is the return, so no connector's
+        GND is drafted as a fault conductor. (What slipped through: j1_gnd,
+        j6_gnd, j10_gnd and j11_gnd, each with its numbers to state.)"""
+        board = self.board(lambda t: _join_net(t, "CELL_N", "GND"), stem="low")
+        proc, records, summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(records["pcb_conductors"]), ["j6_vsys"])
+        self.assertEqual(sorted(records["pcb_matings"]), ["bt1", "j1", "j10", "j11", "j6"])
+        self.assertIn("the copper shows its return on GND, where U1's VSS and U2's VSS sit",
+                      records["pcb_batteries"]["bt1"]["terminals"]["neg"])
+        self.assertTrue(_is_fill(records["pcb_batteries"]["bt1"]["terminals"]["neg"]))
+        self.assertEqual(summary["keep_or_delete"], [])
+
+    def test_a_return_nothing_shows_is_kept_and_said(self):
+        """With the charger and the protector off too, nothing shows which pad
+        is the -: both nets are kept, and keep_or_delete names what was drafted
+        on them, since a conductor left out is one no rule asks for."""
+        def edit(tree):
+            _join_net(tree, "CELL_N", "GND")
+            _without("U1", "U2")(tree)
+        board = self.board(edit, stem="bare")
+        proc, records, summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(records["pcb_conductors"]),
+                         ["j10_gnd", "j11_gnd", "j1_gnd", "j6_gnd", "j6_vsys"])
+        self.assertEqual(len(summary["keep_or_delete"]), 1, summary["keep_or_delete"])
+        said = summary["keep_or_delete"][0]
+        self.assertIn("which of BT1's pads is the cell's -", said)
+        self.assertIn("CELL_P, GND", said)
+        for cid in records["pcb_conductors"]:
+            self.assertIn(f"pcb_conductors.{cid}", said)
+
+    def test_a_vbus_pad_on_no_net_drafts_no_mating(self):
+        """J1's A4 on no net, and J6 off every source (pin 1 on VSYS, which no
+        cell drives here, pin 2 on no net): J6 carries nothing, and no mating
+        says it carries an empty name. (What slipped through: ``A | B - {""}``
+        kept the empty name, so J6 and every connector with a netless pad was
+        drafted a mating that "carries , ...".)"""
+        def edit(tree):
+            _without("BT1", "U1", "U2", "F1")(tree)
+            _drop_net(tree, "J1", "A4")
+            _drop_net(tree, "J6", "2")
+        board = self.board(edit, stem="open_vbus")
+        proc, records, summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(records["pcb_matings"]), ["j1", "j10", "j11"])
+        for row in summary["candidates"]:
+            self.assertNotIn("carries ,", row["found_by"])
+
+    def test_a_data_lines_outputs_are_no_cutoff_pair(self):
+        """U2 with DI and CI beside its DO and CO, as an addressable LED or a line
+        driver names its data and clock pins: it is drafted as no protector.
+        (What slipped through, found while the survey for CUTOFF_PAIRS was
+        written in review of P9: every such part was drafted as one.)"""
+        board = self.board(lambda t: _pin_names(t, "U2", {"1": "DI", "3": "CI"}),
+                           stem="led")
+        proc, records, _summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(records["pcb_protectors"]), ["f1", "u1"])
+
+    def test_two_boards_of_one_name_keep_their_own_records(self):
+        """a/main.kicad_pcb and b/main.kicad_pcb, two copies of the power board:
+        each id starts with its folder, so neither board's records replace the
+        other's. (What slipped through: both took the prefix main, and the
+        second board's battery, protectors, receptacle and matings replaced the
+        first's with no word.)"""
+        text = K.dump(K.load_tree(POWER_BOARD)) + "\n"
+        for side in ("a", "b"):
+            os.makedirs(os.path.join(self.root, side))
+            with open(os.path.join(self.root, side, "main.kicad_pcb"), "w",
+                      encoding="utf-8") as fh:
+                fh.write(text)
+        proc, records, _summary = _draft(self.root, "a/main.kicad_pcb", "b/main.kicad_pcb")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual({k: v["board"] for k, v in records["pcb_batteries"].items()},
+                         {"a_main_bt1": "a/main.kicad_pcb", "b_main_bt1": "b/main.kicad_pcb"})
+        self.assertEqual(len(records["pcb_protectors"]), 6)
+        self.assertEqual(len(records["pcb_matings"]), 10)
+        self.assertEqual(sorted(records["pcb_usbc"]), ["a_main_j1", "b_main_j1"])
+        self.assertIn("one of a_main_bt1, b_main_bt1",
+                      records["pcb_protectors"]["a_main_u1"]["battery"])
+
+    def test_the_prefixes_grow_until_each_is_its_own(self):
+        proc = _env.run([sys.executable, "-c", _PREFIXES, os.path.join(PACK, "proposers")],
+                        cwd=REPO)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), [
+            ["power", "main"], ["a_main", "b_main"], ["main", "sub_main"],
+            ["a_x_main", "b_x_main"], ["power_board", "power_board_2"]])
+
+    def test_a_regulators_output_may_span_pins(self):
+        """Q1 named as a regulator, its output on two pads of one net: a rail
+        on FET_D, returning on GND, listed to keep or delete with J6, the mating
+        drafted only for it. (What slipped through: one pad of each name was
+        required, so a regulator whose output spans pins was skipped, and every
+        rail read as sure as a battery's records.)"""
+        board = self.board(_q1_as_regulator, stem="reg")
+        proc, records, summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rail = records["pcb_rails"]["q1_fet_d"]
+        self.assertEqual((rail["net"], rail["return"]), ("FET_D", "GND"))
+        self.assertTrue(_is_fill(rail["nominal_v"]))
+        found = {row["record"]: row["found_by"] for row in summary["candidates"]}
+        self.assertEqual(found["pcb_rails.q1_fet_d"], "pins VOUT (5, 6) and VIN (1)")
+        self.assertEqual(len(summary["keep_or_delete"]), 1)
+        self.assertIn("pcb_rails.q1_fet_d: Q1 (FDS6890A) was taken for a regulator by its "
+                      "pin names alone", summary["keep_or_delete"][0])
+        self.assertIn("the matings drafted only for FET_D (pcb_matings.j6)",
+                      summary["keep_or_delete"][0])
+
+    def test_a_regulator_on_two_nets_is_named(self):
+        """The same, with pad 6 moved to a net of its own: no rail, and
+        cannot_see names Q1 and both nets. (What slipped through: such a part
+        was skipped and nothing said so.)"""
+        def edit(tree):
+            _q1_as_regulator(tree)
+            _move_pad_net(tree, "Q1", "6", "OTHER")
+        board = self.board(edit, stem="reg2")
+        proc, records, summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(records["pcb_rails"], {})
+        self.assertIn("Q1 (FDS6890A) on reg2.kicad_pcb, a regulator by its pins VOUT (5, 6) "
+                      "and VIN (1): its VOUT pins sit on FET_D, OTHER, so no pcb_rails record "
+                      "is drafted for it", " ".join(summary["cannot_see"]))
+
+
+#: A child that prints the proposer's id prefixes for sets of board paths.
+_PREFIXES = r"""
+import json, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+import battery_record_draft as D
+print(json.dumps([D.prefixes(rels) for rels in (
+    ["power.kicad_pcb", "main.kicad_pcb"], ["a/main.kicad_pcb", "b/main.kicad_pcb"],
+    ["main.kicad_pcb", "sub/main.kicad_pcb"], ["a/x/main.kicad_pcb", "b/x/main.kicad_pcb"],
+    ["power-board.kicad_pcb", "Power_Board.kicad_pcb"])]))
+"""
 
 
 DRAFT_RECORDS = ("pcb_batteries", "pcb_protectors", "pcb_conductors", "pcb_matings",
