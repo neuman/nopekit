@@ -2,7 +2,7 @@
 """pcb.battery_record_draft — write a DRAFT of a design's power records from its boards.
 
     nopekit propose pcb.battery_record_draft -- --board hardware/power.kicad_pcb \\
-        [--board hardware/main.kicad_pcb]
+        [--board hardware/main.kicad_pcb] [--battery J1[:4,1]]
 
 A proposer, never an evaluator: it writes a draft, and a draft settles nothing. The
 power rules (``pcb.charge_temperature``, ``pcb.charge_limits``, ``pcb.fault_current``,
@@ -34,8 +34,12 @@ numbers come from.
 
 **Where candidates come from** (each with its evidence in the summary):
 
-- a battery: a footprint from KiCad's ``Battery*`` libraries or with a ref BT and a
-  number; its pads named ``+`` and ``-`` (KiCad's battery symbols) fill pos and neg.
+- a battery: a part named with ``--battery REF`` (``REF:POS,NEG`` gives its pads),
+  a footprint from KiCad's ``Battery*`` libraries or with a ref BT and a number, or
+  a connector whose value or footprint name says battery (:data:`BATTERY_WORDS`:
+  a LiPo's housing valued "Battery", a battery holder) or whose pins are named +
+  and -, listed under ``keep_or_delete``; its pads named ``+`` and ``-`` (KiCad's
+  battery symbols) fill pos and neg.
   With no pad named ``-``, a net of its pads that a drafted charger's or
   protector's ground pin sits on is its return;
 - a charger: a part with a cell pin (:data:`CELL_PINS`) and a charge-current or a
@@ -48,6 +52,8 @@ numbers come from.
   nets but its ``-``, its thermistor and its return, and the far side of a drafted
   fuse on one of those;
 - a USB-C receptacle: as ``pcb.usbc_receptacle`` finds one;
+- another USB connector's VBUS (micro-B, mini-B, a USB-A plug): a rail on the
+  net of its pin named VBUS, returning on its pin named GND;
 - a rail: a part with a regulator's output and input pins (:data:`RAIL_OUT`,
   :data:`RAIL_IN`), every output pin on one net and every input pin on another,
   drafted on its output's net and listed under ``keep_or_delete``: a filter, a
@@ -216,6 +222,19 @@ _CONNECTOR_REF = re.compile(r"^(J|P|CN|BT)\d+$")
 #: the stock libraries, and of no cell), FU (of no stock symbol).
 _BATTERY_REF = re.compile(r"^BT\d+$")
 _FUSE_REF = re.compile(r"^F\d+$")
+
+#: Words in a connector's value or footprint name that say it meets a cell: a
+#: hobby LiPo's two-pin housing valued "Battery", a holder from a local library
+#: valued "1020_battery_holder", a coin-cell or AA holder. Read on a connector
+#: only (:func:`connector`), so a BAT54 diode or a cell-phone part is never
+#: read. What slipped through (two holdout runs): a battery was found by
+#: KiCad's ``Battery*`` libraries or a BT ref alone, so a J1 valued "Battery"
+#: and a J1 holder from a local library were each missed, and one board drafted
+#: nothing at all. *Rejected:* any part whose value holds BAT (BAT54, BAT760
+#: and other diodes); "holder" alone (a card or SIM holder is no cell's); a
+#: vendor's part numbers (a list no one keeps whole).
+BATTERY_WORDS = re.compile(r"(?i)batt|lipo|li-po|li-ion|\bbat\b|\bcell\b|"
+                           r"\baaa?\b|\bcr\d{4}\b|\b1[48]650\b|\b21700\b")
 
 #: ``gates/_power.py``'s USB-C receptacle test (``typec_receptacle``), copied
 #: for the same reason and held equal by the same test.
@@ -416,8 +435,11 @@ class Cell:
 class Draft:
     """The draft records and the summary's candidates, built board by board."""
 
-    def __init__(self, boards: list[Board]):
+    def __init__(self, boards: list[Board], named: dict | None = None):
         self.boards = boards
+        #: ``{ref: (pos pad or None, neg pad or None)}``: the parts a person named
+        #: as a battery with --battery.
+        self.named = named or {}
         if len(boards) > 1:
             for b, prefix in zip(boards, prefixes([b.rel for b in boards])):
                 b.prefix = prefix
@@ -483,22 +505,54 @@ class Draft:
         for rec in self.records["pcb_protectors"].values():
             rec["battery"] = battery
         driven = self._conductors(cells, fuses, battery)
-        vbus = self._usbc()
+        vbus = self._usbc() | self._vbus()
         rails = self._rails()
         self._matings(cells, driven | vbus | set(rails))
         self._doubts(cells, fuses, rails, driven | vbus)
+
+    def found_as_battery(self, b: Board, fp) -> str | None:
+        """How ``fp`` was found as a battery's connector or holder, or None: a
+        part named with --battery, KiCad's ``Battery*`` libraries, a BT ref, or a
+        connector whose value or footprint name says so (:data:`BATTERY_WORDS`)
+        or whose pins are named + and -."""
+        lib = fp.lib_id.split(":")[0]
+        if fp.ref in self.named:
+            return "named with --battery"
+        if lib.startswith("Battery"):
+            return f"library {lib}"
+        if _BATTERY_REF.match(fp.ref):
+            return f"ref {fp.ref}"
+        if connector(fp):
+            if BATTERY_WORDS.search(f"{fp.value} {fp.lib_id.split(':')[-1]}"):
+                return (f"connector {fp.ref}, its value or footprint naming a cell or holder "
+                        f"({fp.value}, {fp.lib_id})")
+            names = b.names(fp)
+            if _one(names, POS_PINS)[1] and _one(names, NEG_PINS)[1]:
+                return f"connector {fp.ref}, its pins named + and -"
+        return None
 
     def _batteries(self) -> list[Cell]:
         out = []
         for b in self.boards:
             for fp in b.fps:
                 lib = fp.lib_id.split(":")[0]
-                if not (lib.startswith("Battery") or _BATTERY_REF.match(fp.ref)):
+                found_by = self.found_as_battery(b, fp)
+                if found_by is None:
                     continue
                 names = b.names(fp)
                 _p, pos = _one(names, POS_PINS)
                 _n, neg = _one(names, NEG_PINS)
                 _t, therm = _one(names, BATTERY_THERM_PINS)
+                if fp.ref in self.named:
+                    pos = self.named[fp.ref][0] or pos
+                    neg = self.named[fp.ref][1] or neg
+                if not (lib.startswith("Battery") or _BATTERY_REF.match(fp.ref)
+                        or fp.ref in self.named):
+                    self.doubt.append(
+                        f"pcb_batteries.{self.rid(b, fp.ref)}: {fp.ref} ({fp.value}) was taken "
+                        f"for the cell's connector for {found_by.split(', ', 1)[-1]}: keep it "
+                        f"when {fp.ref} meets the cell, else delete it and its mating, and "
+                        f"name the part with --battery")
                 pads = b.said(fp)
                 terminals = {
                     "ref": fp.ref, "value": fp.value,
@@ -515,9 +569,7 @@ class Draft:
                 rec["source"] = self.source(b)
                 self.records["pcb_batteries"][bid] = rec
                 out.append(Cell(bid, b, fp, pos, neg, therm))
-                self.note(f"pcb_batteries.{bid}",
-                          f"library {lib}" if lib.startswith("Battery") else f"ref {fp.ref}",
-                          b, fp)
+                self.note(f"pcb_batteries.{bid}", found_by, b, fp)
         return out
 
     def _roles(self, cells: list[Cell]) -> None:
@@ -569,15 +621,17 @@ class Draft:
         self.records["pcb_batteries"]["cell"] = {
             "board": b.rel,
             "terminals": {"ref": FILL + "the ref of the connector or holder the cell meets: "
-                                        "no Battery-library part and no BT ref is on the "
-                                        "boards named",
+                                        "no Battery-library part, no BT ref and no connector "
+                                        "valued or drawn as a battery is on the boards named "
+                                        "(name it with --battery REF and draft again)",
                           "value": FILL + "that part's value on its board",
                           "pos": FILL + "its pad on the cell's + terminal",
                           "neg": FILL + "its pad on the cell's - terminal"},
             **self._cell_words(), "source": self.source(b)}
-        self.unseen.append("the cell's own connector: no part from a Battery library and no "
-                           "BT ref is on the boards named, so pcb_batteries.cell names none "
-                           "(name its board, if it is another, with --board)")
+        self.unseen.append("the cell's own connector: no part from a Battery library, no BT "
+                           "ref and no connector valued or drawn as a battery is on the boards "
+                           "named, so pcb_batteries.cell names none (name the part with "
+                           "--battery REF, and its board, if it is another, with --board)")
         return Cell("cell", b)
 
     @staticmethod
@@ -928,6 +982,35 @@ class Draft:
                           "finds one", b, fp)
         return out
 
+    def _vbus(self) -> set:
+        """A USB connector that is no Type-C receptacle (micro-B, mini-B, a USB-A
+        plug) brings VBUS in on a pad named VBUS: a ``pcb_rails`` record is
+        drafted for its net, so ``pcb.mismate`` reads it as a source, and every
+        connector on it is asked a mating. What slipped through (a holdout run):
+        VBUS was read on Type-C receptacles alone, so a micro-B's was missed and
+        not named in ``cannot_see``. Returns ``{(board path, net)}``."""
+        out = set()
+        for b in self.boards:
+            for fp in b.fps:
+                if not connector(fp) or typec_receptacle(fp):
+                    continue
+                names = b.names(fp)
+                nets = sorted({b.net(fp, n) for n in names.get("VBUS", [])} - {""})
+                grounds = sorted({b.net(fp, n) for n in names.get("GND", [])} - {""})
+                for net in nets:
+                    rid = self.fresh("pcb_rails", self.rid(b, fp.ref, net))
+                    self.records["pcb_rails"][rid] = {
+                        "board": b.rel, "net": net,
+                        "nominal_v": FILL + f"the voltage {fp.ref}'s VBUS carries, V (USB's "
+                                            f"default bus voltage unless a contract raises it)",
+                        "return": (grounds[0] if len(grounds) == 1 else
+                                   FILL + f"the net VBUS returns on (pads: {b.said(fp)})"),
+                        "source": self.source(b)}
+                    out.add((b.path, net))
+                    self.note(f"pcb_rails.{rid}", f"connector {fp.ref}'s pin VBUS on {net}, "
+                              f"a USB connector that is no Type-C receptacle", b, fp)
+        return out
+
     def _rails(self) -> dict:
         """Draft a rail on the output net of each part with a regulator's output
         and input pins (:data:`RAIL_OUT`); return ``{(board path, net): (rail
@@ -1082,6 +1165,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--board", action="append", required=True,
                     help="a .kicad_pcb of the design, relative to the project (repeat for "
                          "each board)")
+    ap.add_argument("--battery", action="append", default=[],
+                    help="REF or REF:POS,NEG: the part the cell meets, when nothing finds it "
+                         "(its + and - pads, when no pin name says; repeat for each cell)")
     args = ap.parse_args(argv)
 
     out_dir = os.environ.get("NOPEKIT_PROPOSAL_DIR")
@@ -1112,18 +1198,35 @@ def main(argv: list[str]) -> int:
                             f"record drafted from it")
             continue
         boards.append(b)
+    named: dict[str, tuple] = {}
+    for given in args.battery:
+        ref, _, pads = given.partition(":")
+        pos, _, neg = pads.partition(",")
+        hits = [b for b in boards for fp in b.fps if fp.ref == ref]
+        if not ref or (pads and not (pos and neg)):
+            problems.append(f"--battery {given}: give REF or REF:POS,NEG")
+        elif len(hits) != 1:
+            problems.append(f"--battery {given}: {'no fitted part' if not hits else 'a part'} "
+                            f"{ref} on {'the boards named' if not hits else 'two boards'}")
+        else:
+            fp = next(f for f in hits[0].fps if f.ref == ref)
+            missing = [p for p in (pos, neg) if p and p not in Board.pads_of(fp)]
+            if missing:
+                problems.append(f"--battery {given}: {ref} has no pad {', '.join(missing)}")
+            named[ref] = (pos or None, neg or None)
     if problems:
         print(f"pcb.battery_record_draft: {len(problems)} problem(s), nothing written:",
               file=sys.stderr)
         for p in problems:
             print(f"  {p}", file=sys.stderr)
         return 2
-    draft = Draft(boards)
+    draft = Draft(boards, named)
     draft.build()
     if not any(draft.records[k] for k in RECORDS):
         print(f"pcb.battery_record_draft: nothing to draft on {', '.join(b.rel for b in boards)}: "
-              f"no battery, charger, protector, fuse, USB-C receptacle or regulator was "
-              f"found by its library, ref or pin names; nothing written", file=sys.stderr)
+              f"no battery, charger, protector, fuse, USB connector or regulator was "
+              f"found by its library, ref, value or pin names; name the cell's connector with "
+              f"--battery REF (or REF:POS,NEG); nothing written", file=sys.stderr)
         return 2
     fills = draft.fills()
     stem = boards[0].stem

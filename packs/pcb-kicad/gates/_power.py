@@ -92,7 +92,11 @@ def keys(rec: dict, label: str, required: tuple = (), optional: tuple = ()) -> d
                               f"{', '.join(known)}")
     missing = [k for k in required if k not in rec]
     if missing:
-        raise RecordError(f"{label} has no {', '.join(missing)}")
+        # Each key quoted: a battery whose id is "cell" read "pcb_batteries.cell
+        # has no cell" (a holdout run), an id and a key of one name, read as "no
+        # datasheet".
+        raise RecordError(f"{label} has no key{'s' if len(missing) > 1 else ''} "
+                          f"{', '.join(repr(k) for k in missing)}")
     return rec
 
 
@@ -463,8 +467,22 @@ MODE_KEYS = ("narrower", "offset", "slide", "bridges")
 #: reversed cell joins nothing, it drives the board backwards. An external side
 #: has no pads this pack reads, so only a plug that bridges a's own contacts can
 #: be judged there.
-MODES_FOR = {"board": MODE_WORDS + MODE_KEYS, "battery": ("reversed",),
+MODES_FOR = {"board": MODE_WORDS + MODE_KEYS, "battery": ("reversed", "cell_reversed"),
              "external": ("bridges",)}
+
+#: The mode a battery of loose cells takes beside ``reversed``: one cell of a
+#: holder of two or more in series put in the wrong way round. The board then
+#: sees the string the right way round, at the voltage of two cells fewer; the
+#: hazard is the cell's own, driven backwards by the others (IEC 60086-5, the
+#: incorrect installation of a primary cell), which nothing on a board blocks.
+#: ``pcb.mismate`` names it and counts it, so a person settles it with a holder
+#: that keys each cell (and states the mode no more). What slipped through (a
+#: holdout run): nothing could state it, so an open two-AAA holder's most
+#: likely wrong way read as no hazard. *Rejected:* judging it as ``reversed``
+#: (that reverses the whole string, and a blocking diode answers it; nothing
+#: answers one cell turned); a lens alone (an open holder's likeliest wrong way
+#: belongs where a claim can fail on it).
+BATTERY_WORDS = ("cell_reversed",)
 
 
 def positions(fp) -> list[str]:
@@ -655,12 +673,13 @@ class Mating:
         for i, mode in enumerate(modes):
             where = f"{label}[{i}]"
             if isinstance(mode, str):
-                if mode not in MODE_WORDS:
-                    near = difflib.get_close_matches(mode, MODE_WORDS + MODE_KEYS, n=1)
+                if mode not in MODE_WORDS + BATTERY_WORDS:
+                    near = difflib.get_close_matches(mode, MODE_WORDS + BATTERY_WORDS
+                                                     + MODE_KEYS, n=1)
                     hint = f" (did you mean {near[0]!r}?)" if near else ""
                     raise RecordError(f"{where} is {mode!r}{hint}: give one of "
-                                      f"{', '.join(MODE_WORDS)}, or {{key: value}} with key "
-                                      f"{', '.join(MODE_KEYS)}")
+                                      f"{', '.join(MODE_WORDS + BATTERY_WORDS)}, or "
+                                      f"{{key: value}} with key {', '.join(MODE_KEYS)}")
                 name, arg = mode, None
             elif isinstance(mode, dict) and mode:
                 name = next((k for k in MODE_KEYS if k in mode), None)

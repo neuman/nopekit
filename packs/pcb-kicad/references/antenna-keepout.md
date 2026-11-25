@@ -82,11 +82,13 @@ cutout, plain DRC clean, the gate 1 item.)
 |---|---|
 | `board` | the board, from the project root (else `pcb_board`) |
 | `ref`, `value` | the part; both held to the board, so a moved or swapped part stales the record |
-| `keepout` | `"footprint"`, `"none"`, `{"drawing": path}` or `{"rule_area": name}` |
+| `keepout` | `"footprint"`, `"none"`, `{"drawing": path}` or `{"rule_area": name}` (or `{"rule_area": {"uuid": id}}`, `{"rule_area": {"covers": ref}}`) |
+| `own_nets` | optional: the antenna's own nets, a printed antenna's feed and ground arm |
 | `source` | where the keep-out comes from, or why there is none |
 
 - `"footprint"`: the part's own rule area, read as a found module's is. A part
-  whose footprint has no such area is an error: give a drawing.
+  whose footprint has no such area is an error, naming each form that fits: a
+  drawing, or a board rule area by name, id or cover.
 - `"none"`: no antenna on the board (one on a cable, a u.FL or an SMA). Listed,
   not judged. A board whose every radio is `"none"` skips.
 - `{"rule_area": name}`: a keep-out rule area the designer drew on the board and
@@ -94,7 +96,30 @@ cutout, plain DRC clean, the gate 1 item.)
   bare SoC, from its datasheet. Its polygon is copied to every copper layer, so
   draw it around the feed line where the vendor lets the feed in, or cut the
   feed out of it (a cutout stays a cutout).
+- `{"rule_area": {"uuid": id}}`: one rule area by its id, named or not.
+  `{"rule_area": {"covers": ref}}`: every rule area on the board whose outline
+  holds a point of that part's own copper (a pad's centre, a corner of a copper
+  drawing), named or not. A printed inverted-F antenna on a bare SoC is often
+  kept clear by several unnamed areas, drawn around its arms, that allow tracks
+  and forbid pour; each one picked is copied to every copper layer and forbids
+  tracks, vias, pads and pours there. A strip beside the feed that holds none of
+  the antenna's copper is not picked. (What slipped through, a holdout run: a
+  rule area was found by its name alone, so such a design's areas could not be
+  named, and the `"footprint"` refusal's one remedy, a drawing, could not be
+  followed for a two-pad antenna.)
 - `{"drawing": path}`: the vendor's drawing, below.
+
+`own_nets` names the antenna's own nets. A printed antenna is copper: its feed
+and its ground arm are tracks, and the added area forbids every track, so
+without this a sound antenna reads as findings of itself. A track of those nets
+that reaches the part's own pads through tracks on the pads' layers is the
+antenna's own copper, and so is a via on such a track: each is listed beside the
+part's own pads and not counted. A zone's fill is never the antenna's own (a
+ground pour under a printed antenna is the defect the rule is for), nor is
+anything beyond a via, nor a track of those nets that touches none of the
+antenna's copper (a ground track that crosses under it still counts). What is
+not judged: a two-pad drawing (two pads cannot show a drawing read mirrored, so
+a drawing still registers on three or more pads off one line).
 
 An unknown key is refused, naming the nearest known one. A record whose part is
 not on its board, or holds another value, is an error ("the record is for

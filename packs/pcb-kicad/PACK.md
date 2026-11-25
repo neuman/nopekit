@@ -26,21 +26,21 @@ has heard its radio.
 | `pcb.board_readable` | 0 | model-only | the board is a KiCad 6-9 file whose every track names a defined net (the guard); nets read by code and by name; a newer file is skipped, never failed |
 | `pcb.pin_names` | 0 | sourced | pins the library gives one name (a TVS array's two `COM`, a part's several `GND`) carry one net, except the ends of a series element stated per ref (`pcb_pin_names_series`); the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` |
 | `pcb.land_pattern` | 0 | model-only | each footprint `pcb_land_drawings` names fits its vendor's drawing: pads paired by pin function (anchored on the pads of a function of their own when the pairings are too many to try), one rigid fit with no mirror, every centre within half its smaller pad's smaller side |
-| `pcb.net_width` | 0 | sourced | every track of each named net stays inside its temperature-rise limit, IPC-2221; the detail names the hottest stretch |
+| `pcb.net_width` | 0 | sourced | every track of each named net stays inside its temperature-rise limit, IPC-2221, at the net's current, or at a route's current on the tracks of its route between two pads and the rest's elsewhere; the detail names the hottest stretch |
 | `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing, at every severity by default, and every custom rule in the board's `.kicad_dru`, and every property its conditions read, is shown to select something |
 | `pcb.unconnected` | 1 | established | KiCad finds no connection the netlist asks for and the copper does not make |
 | `pcb.erc` | 1 | established | `kicad-cli sch erc` finds nothing in the schematic, at every severity by default |
 | `pcb.parity` | 1 | established | KiCad finds no difference between the board and its schematic: parts, values, footprints, pad nets (an open pin on a pad with no net is agreement) |
 | `pcb.fab_rules` | 1 | sourced | KiCad's DRC with the named fab's published minimums, for the service the board is ordered on, as the only custom rules finds nothing past them; a dielectric or via kind the service does not list skips |
 | `pcb.spice` | 1 | established | a `.meas` result of `ngspice -b` on the project's deck stays inside `pcb_spice_min` / `pcb_spice_max`; an option name ngspice does not know (on a `.options` card or an `option` command), a measure two `.meas` cards define, or a `.meas tran` window outside the run, is refused first |
-| `pcb.enclosure_fit` | 1 | established | each board, every part's 3D model (or declared height) in place and turned to any orientation, shares no volume with its enclosure or with another board in it, and each part keeps the clearance of the claim tagged `enclosure-fit`, but against a feature a by-design contact names (OpenCascade) |
-| `pcb.charge_temperature` | 0 | sourced | charging stops outside each cell's charge temperature window at the tolerance corners of its sensing network (the comparator's datasheet trips, the NTC's R/T table or B equation, every resistor), wherever the stop lives: the charger, a protector or BMS that acts on it, or the pack; headroom in K |
+| `pcb.enclosure_fit` | 1 | established | each board, every part's 3D model (any footprint that shows one, whatever its type), or its declared height where its model is not on this host, in place and turned to any orientation, shares no volume with its enclosure or with another board in it, and each part keeps the clearance of the claim tagged `enclosure-fit`, but against a feature a by-design contact names (OpenCascade) |
+| `pcb.charge_temperature` | 0 | sourced | charging stops outside each cell's charge temperature window at the tolerance corners of its sensing network (the comparator's datasheet trips, the NTC's R/T table or B equation, every resistor), wherever the stop lives: the charger, a protector or BMS that acts on it, or the pack; headroom in K. A charger that senses nothing, or whose sense pin sees only a fixed divider, fails without the cell's window |
 | `pcb.charge_limits` | 0 | sourced | the charger's guaranteed maximum charge voltage per cell and current, as one ratio to the cell's datasheet limits, and an overcharge stop independent of the charger that senses the cell and opens its path (per cell for two or more in series) |
-| `pcb.fault_current` | 0 | sourced | every conductor in `pcb_conductors` is guarded across the fault range: its protector's interrupt rating, the overload band (I2 <= 1.45 Iz, by analogy with IEC 60364-4-43) and IEC 60949's adiabatic limit at every trip point the cell can reach; a fuse, PTC, eFuse, protector FETs on either side or an in-pack PCM |
+| `pcb.fault_current` | 0 | sourced | every conductor in `pcb_conductors` is guarded across the fault range: its protector's interrupt rating, the overload band (I2 <= 1.45 Iz, by analogy with IEC 60364-4-43) and IEC 60949's adiabatic limit at every trip point the cell can reach; a fuse, PTC, eFuse, protector FETs on either side or an in-pack PCM. A conductor nothing protects (`protected_by: []`) passes on a source of at most 15 W (IEC 62368-1's PS1) or a rating that carries the whole fault |
 | `pcb.discharge_cutoff` | 0 | sourced | the highest per-cell cutoff that senses the cell (directly, through a named chain, or across a mating) and opens a switch in its path, or sits in the pack, is at or above the cell's minimum voltage |
-| `pcb.mismate` | 0 | model-only | no wrong way a mating's record states (a reversed plug, a narrower cable, an offset header, a rotated header, the other FFC type, a plug slid in, a plug that bridges contacts), nor its own map, joins a source to its return or to another source; a reversed cell is blocked or limited; every connector that carries a source is named by a mating |
+| `pcb.mismate` | 0 | model-only | no wrong way a mating's record states (a reversed plug, a narrower cable, an offset header, a rotated header, the other FFC type, a plug slid in, a plug that bridges contacts), nor its own map, joins a source to its return or to another source; a reversed cell is blocked (behind a stated chain of series parts, a power switch among them) or limited; one loose cell turned in its holder is counted; every connector that carries a source is named by a mating |
 | `pcb.usbc_receptacle` | 0 | sourced | each USB-C receptacle's CC pins are terminated apart, as its role asks (one Rd or Rp each, in the Type-C specification's band, or a named controller), a source switches VBUS through a part with a control pin, each USB 2.0 data pin is on a net with D+ apart from D-, and, where `pcb.pin_names` cannot see them, the VBUS, GND, A6/B6 and A7/B7 pins are each bussed |
-| `pcb.antenna_keepout` | 1 | sourced | no track, via, other part's pad or zone sits on any copper layer in a radio module's antenna keep-out, as the board is stored and as KiCad's next refill pours it (the module's own footprint area, a vendor drawing registered by its pads, or a rule area the designer drew); a module with no keep-out and no record skips by name |
+| `pcb.antenna_keepout` | 1 | sourced | no track, via, other part's pad or zone sits on any copper layer in a radio module's antenna keep-out, as the board is stored and as KiCad's next refill pours it (the module's own footprint area, a vendor drawing registered by its pads, or a rule area the designer drew, picked by name, id or the part it covers); an antenna's own tracks on its named nets are its own copper; a module with no keep-out and no record skips by name |
 
 The tier-0 gates read the board with this pack's own reader (`gates/_kicad.py`,
 standard library only), so they run without KiCad, CI included. The tier-1 gates
@@ -136,16 +136,21 @@ cutout, as KiCad saved them, so a feed track cut out of a chip antenna's
 clearance is not a finding. A project that sets `items_not_allowed` to ignore,
 or excludes a finding, does not hide one: the staged copy sets it back.
 
-A record (`{id: {board?, ref, value, keepout, source}}`, held to the board's ref
-and value) brings in what the library does not: a module from a project's own
-library (`"keepout": "footprint"`), a vendor drawing registered on the footprint
-by three or more numbered pads (`{"drawing": path}`), a rule area the designer
-drew and named, such as a chip antenna's clearance on a bare SoC (`{"rule_area":
-name}`), or a module whose antenna is off the board (`"none"`, listed, not
-judged). A found module with no keep-out in its footprint, and no record, skips
-by name, never passes: 26 of the 57 stock modules carry none (the LoRa modules
-among them, whose antenna is on a pad or a connector), and three carry only an
-area that allows tracks or copper pour. The baseline's record names
+A record (`{id: {board?, ref, value, keepout, own_nets?, source}}`, held to the
+board's ref and value) brings in what the library does not: a module from a
+project's own library (`"keepout": "footprint"`), a vendor drawing registered on
+the footprint by three or more numbered pads (`{"drawing": path}`), a rule area
+the designer drew, such as a chip antenna's clearance on a bare SoC, by its name
+(`{"rule_area": name}`), its id (`{"rule_area": {"uuid": id}}`) or the part whose
+copper it holds (`{"rule_area": {"covers": "AE1"}}`, every such area, named or
+not), or a module whose antenna is off the board (`"none"`, listed, not judged).
+`own_nets` names a printed antenna's own nets (its feed and its ground arm): their
+tracks that reach the part's pads through tracks on the pads' layers, and a via on
+those tracks, are its own copper, listed and not counted, as its pads are. A pour
+is never its own, nor anything beyond a via. A found module with no keep-out in
+its footprint, and no record, skips by name, never passes: 26 of the 57 stock
+modules carry none (the LoRa modules among them, whose antenna is on a pad or a
+connector), and three carry only an area that allows tracks or copper pour. The baseline's record names
 `selftest/assets/radio_board.kicad_pcb` (made by `make_radio_board.py`), which
 only this gate reads. `references/antenna-keepout.md` holds every field, the
 survey and the measurements.
@@ -222,7 +227,7 @@ difference until someone proposes again: tag such claims `netlist`, which binds
 ## The proposer: `pcb.battery_record_draft`
 
     nopekit propose pcb.battery_record_draft -- --board hardware/power.kicad_pcb \
-        [--board hardware/main.kicad_pcb]
+        [--board hardware/main.kicad_pcb] [--battery J1[:4,1]]
 
 The power records are the heaviest part of first use. This proposer writes a
 draft of them from the boards, in the shapes the rules read: `pcb_batteries`,
@@ -231,11 +236,15 @@ each an object keyed by id. It fills each record's board, ref and value, `where:
 board` for a part on a board, and the pads that a part's pin names or its copper
 show: a charger's thermistor pin and the resistor on its PROG pin, a protector's
 DO and CO pins and the switch each drives, a fuse's two pads, a connector's pins
-on a net a cell drives. It finds a battery by KiCad's `Battery*` libraries or a
-BT ref; a charger by a cell pin (BAT, VBAT, BATT) beside a PROG, ISET or
-thermistor pin; a protector by DO and CO (or DOUT and COUT, or DSG and CHG); a
-fuse by the `Fuse*` libraries or an F ref; a USB-C receptacle as
-`pcb.usbc_receptacle` does; a rail by a regulator's output and input pins, each
+on a net a cell drives. It finds a battery by `--battery REF` (or
+`REF:POS,NEG`, its + and - pads), KiCad's `Battery*` libraries, a BT ref, or a
+connector whose value or footprint names a cell (Battery, LiPo, cell, AAA,
+CR2032, 18650) or whose pins are named + and - (each of the last two
+listed under `keep_or_delete`); a charger by a cell pin (BAT, VBAT, BATT) beside a
+PROG, ISET or thermistor pin; a protector by DO and CO (or DOUT and COUT, or DSG
+and CHG); a fuse by the `Fuse*` libraries or an F ref; a USB-C receptacle as
+`pcb.usbc_receptacle` does; another USB connector's VBUS (micro-B, mini-B) as a
+rail on its VBUS pin's net; a rail by a regulator's output and input pins, each
 name's pins on one net; and a mating for every connector on a net that a cell, a
 VBUS or a drafted rail drives, as `pcb.mismate`'s coverage rule asks. A cell
 drives the nets of its pads, but not its `-` pad's or its thermistor pad's. When
@@ -281,7 +290,8 @@ Read this before you write a claim. Every one of these has passed a "0 violation
 - **A board with no schematic.** A netlist built in a script has no ERC and no
   parity to check: `pcb.erc` and `pcb.parity` skip, and the script's dictionary is
   the only record of what connects to what. Tag a claim that every connection is
-  made `copper-connectivity`, not `connectivity`, or `pcb.parity`'s skip holds it.
+  made `copper-connectivity`, not `net-connectivity`, or `pcb.parity`'s skip holds
+  it.
 - **What a written schematic cannot add.** On a schematic `pcb.schematic_from_board`
   wrote, parity checks only the writer's copy of the board's nets, never the
   design's intent; ERC judges nothing for a part on a generic or passive stand-in
@@ -293,6 +303,15 @@ Read this before you write a claim. Every one of these has passed a "0 violation
 - **Current through vias, pads and pours.** `pcb.net_width` judges tracks only. A
   via carries its own current limit; a pour is wider than any track and is not
   judged at all, so a net carried mostly by a pour reads pessimistically.
+- **Which track carries a shared net's current.** A net named with one current is
+  judged at it on every track: a return net named at a cell's current is judged
+  at that current on every stub, a fine-pitch part's fan-out to its vias
+  included, and fails on a sound board. Give the net a route (`{"amps", "from",
+  "to", "rest_a"}`, two pads): its tracks on a route of the copper between them
+  are judged at `amps`, the rest at `rest_a`. The route is read from the copper
+  generously (a pad's circle, a pour's outline), so a track is read onto it, never
+  off it; a pulse (a radio's transmit burst) is not a steady current, and is no
+  `pcb_net_currents_a` value (`references/ipc-2221.md`).
 - **A wrong fit nobody stated.** `pcb.mismate` judges the wrong ways a
   mating's record states (a narrower ribbon in a wider housing that puts the
   cell on ground, a reversed pigtail, a rotated header), and the pinouts on the
@@ -352,7 +371,12 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   reach. That is `lenses.md`, "A part taller than its cavity". Two models that
   overlap by design (a mated pair whose vendor models interpenetrate) read as a
   collision, and no contact excuses one: a wrong FAIL, read against the drawing.
-  One condition judges every board: the claim tagged `enclosure-fit`.
+  One condition judges every board: the claim tagged `enclosure-fit`. A footprint
+  with no type and no model (a mounting hole, a fiducial, a logo) is not asked for,
+  and the verdict names it: a part fitted by hand and drawn so is not fitted until
+  its footprint shows a model or the project states its height. A declared height
+  stands in for a model only where this host does not have the model: on a host
+  that has it, the model is fitted and the height is named unused.
 - **Whether the SPICE deck is the circuit.** ngspice solves the deck it is given.
   The deck is someone's model, typed by hand; `pcb.spice` refuses a run that
   dropped a line, an option name ngspice does not know, a command it does not
@@ -411,6 +435,9 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   - IEC 60364-4-43's I2 <= 1.45 Iz is written for building installations: here it
     is a stated analogy, and `pcb.fault_current` turns on `continuous_a` and
     `limit_c`, so their sources matter most;
+  - a conductor nothing protects passes on a source IEC 62368-1 calls PS1 (at
+    most 15 W into any load): the standard's word that such a source ignites
+    nothing, not a measurement of the conductor;
   - one conductor carries the whole fault: contacts in parallel get no credit;
   - a lithium primary cell charged by another rail (UL 1642): a lens, not a rule.
 - **Everything the fab checks.** `pcb.fab_rules` holds the minimums the fab
@@ -433,12 +460,12 @@ what it asserts.
 | Tag | Bound by |
 |---|---|
 | `pcb` | every gate here (too broad for a claim: use a narrower one) |
-| `design-rules`, `clearance` | `pcb.drc` |
-| `manufacturability` | `pcb.drc`, `pcb.fab_rules` |
+| `design-rules` | `pcb.drc` |
+| `pcb-manufacturability` | `pcb.drc`, `pcb.fab_rules` |
 | `fab-limits` | `pcb.fab_rules` |
 | `circuit-simulation` | `pcb.spice` |
-| `enclosure-fit`, `packaging`, `interference` | `pcb.enclosure_fit` |
-| `connectivity` | `pcb.unconnected`, `pcb.parity` |
+| `enclosure-fit` | `pcb.enclosure_fit` |
+| `net-connectivity` | `pcb.unconnected`, `pcb.parity` |
 | `copper-connectivity` | `pcb.unconnected` |
 | `netlist` | `pcb.unconnected`, `pcb.pin_names`, `pcb.erc`, `pcb.parity` |
 | `land-pattern` | `pcb.land_pattern` |
@@ -457,10 +484,25 @@ what it asserts.
 | `power-integrity` | `pcb.net_width`, `pcb.spice` |
 | `pcb-model-validity` | `pcb.board_readable` |
 
-A claim "every connection is made" tagged `connectivity` stays Checked through a
-silkscreen warning; tagged `pcb`, it would read Failing on it. On a board with no
-schematic, tag it `copper-connectivity`: `connectivity` brings in `pcb.parity`,
-which skips there, so the claim would read Skipped beside a pass.
+A claim "every connection is made" tagged `net-connectivity` stays Checked
+through a silkscreen warning; tagged `pcb`, it would read Failing on it. On a
+board with no schematic, tag it `copper-connectivity`: `net-connectivity` brings
+in `pcb.parity`, which skips there, so the claim would read Skipped beside a pass.
+
+**Every tag here is this pack's own.** Until general-packs H2 five of them were
+words other bundled packs bind too, so a claim tagged with one was held to
+cad-solid's or fdm-print's gates as well. Each moved; a claim that still carries
+the old word reads Gap here (no gate of this pack binds it) or is bound to the
+other pack's gates alone. Retag it:
+
+- `clearance` (cad-solid's `cad.clearance`): `design-rules` for `pcb.drc`;
+- `manufacturability` (cad-solid's mesh gates, every fdm-print gate, sourcing):
+  `pcb-manufacturability` for `pcb.drc` and `pcb.fab_rules`, or `fab-limits`;
+- `connectivity` (cad-solid's `cad.assembly_connected`): `net-connectivity` for
+  `pcb.unconnected` and `pcb.parity`, or `copper-connectivity`;
+- `packaging` (cad-solid's `cad.bounding`): `enclosure-fit` for `pcb.enclosure_fit`;
+- `interference` (cad-solid's `cad.clash`): `enclosure-fit` for
+  `pcb.enclosure_fit`.
 
 ## Units and frames
 
@@ -509,17 +551,22 @@ design: a region of the enclosure (`region_mm`, a box in its frame, that takes
 out material no further than twice the claim's limit past the part's own box) or
 a shape of another board (`<fit>:<ref>`). Its distance to that feature is listed
 and left out; against the rest it keeps the limit, and shared volume still fails
-it.
-`pcb_part_heights_mm` gives a part with no model its courtyard's box, raised to a
-stated height. `references/enclosure-fit.md` has each in full.
+it. The regions are held to that reach in a pass of their own, before the full
+fit, and every region refused is listed in one run with the box to draw.
+`pcb_part_heights_mm` gives a part whose model is not on this host (none named,
+or one found nowhere here) its courtyard's box, or the outline its `box_mm`
+states, raised to a stated height. Each helper call gets `pcb_fit_timeout_s`, or
+120 s and 5 s for each part it handles. `references/enclosure-fit.md` has each in
+full.
 
 ## Pointing a project at its board
 
 ```json
 "pcb_board": "hardware/main.kicad_pcb",
-"pcb_net_currents_a": {"VBUS": 0.5, "VBAT": 1.2, "GND": 1.2},
+"pcb_net_currents_a": {"VBUS": 0.5, "VBAT": 1.2,
+                       "GND": {"amps": 1.2, "from": "BT1.2", "to": "U5.3", "rest_a": 0.3}},
 "pcb_temp_rise_limit_c": 10.0,
-"pcb_copper_oz_outer": 1.0,
+"pcb_copper_oz_outer": 1.0, "pcb_copper_oz_inner": 0.5,
 "pcb_fab": "jlcpcb", "pcb_fab_service": "standard",
 "pcb_spice_deck": "hardware/sim/vbus.cir",
 "pcb_spice_measure": "vbus_min", "pcb_spice_min": 4.75, "pcb_spice_units": "V",
@@ -527,7 +574,9 @@ stated height. `references/enclosure-fit.md` has each in full.
 "pcb_board_placement": {"x": 2.0, "y": 17.0, "z": 4.0, "rot_x_deg": 0, "rot_z_deg": 90},
 "pcb_enclosure_contacts": {"J5": {"cutout": {"region_mm": [[-1, 2, 4], [3, 12, 9]],
                                              "reason": "the receptacle's shell seats in its cutout"}}},
-"pcb_part_heights_mm": {"SW2": {"h": 3.5, "source": "the switch's datasheet, seated height"}},
+"pcb_part_heights_mm": {"SW2": {"h": 3.5, "source": "the switch's datasheet, seated height"},
+                        "LS1": {"h": 2.8, "box_mm": [[-6, -6], [6, 6]],
+                                "source": "the speaker's drawing; its footprint has no courtyard"}},
 "pcb_land_drawings": {"U3": "hardware/lands/u3.json"},
 "pcb_pin_names_series": {"FL1": {"pairs": [["1", "8"], ["2", "7"]],
                                  "source": "the filter array's datasheet, channel table"}},
@@ -553,10 +602,15 @@ stated height. `references/enclosure-fit.md` has each in full.
                           "source": "the module's integration guide, its revision and figure"},
                  "chip": {"ref": "AE1", "value": "CHIP_ANTENNA",
                           "keepout": {"rule_area": "AE1 clearance"},
-                          "source": "the antenna's datasheet, its layout figure"}}
+                          "source": "the antenna's datasheet, its layout figure"},
+                 "printed": {"ref": "AE2", "value": "PIFA",
+                             "keepout": {"rule_area": {"covers": "AE2"}},
+                             "own_nets": ["ANT_FEED", "GND"],
+                             "source": "the inverted-F antenna's design note, its figure"}}
 ```
 
-`selftest/baseline.json`'s `_notes` give every key's fields, and its records
+`references/battery.md` ("Every field") gives each power record's fields, required
+and optional, and `selftest/baseline.json`'s `_notes` give every key's fields; its records
 show a charger, a protector, a PTC, a wire, four matings (a flex a narrower cable
 also fits, the cell's keyed housing, the USB-C receptacle and the wire) and a
 USB-C sink; `references/battery.md`, `references/mismate.md` and

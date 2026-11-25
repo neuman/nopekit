@@ -194,8 +194,9 @@ class Battery:
         need = [self.pos, self.neg, *([self.therm] if self.therm else []), *self.taps]
         self.fp = d.part(self.path, t["ref"], t["value"], f"{label}.terminals", need)
         self.cell = P.keys(rec["cell"], f"{label}.cell", (),
-                           ("upper_charge_v", "discharge_v_min", "charge_a_max",
-                            "charge_temp_c", "short_a", "internal_resistance_ohm"))
+                           ("upper_charge_v", "open_circuit_v", "discharge_v_min",
+                            "charge_a_max", "charge_temp_c", "short_a",
+                            "internal_resistance_ohm"))
         self.ntc = None
         if rec.get("ntc") is not None:
             P.keys(rec["ntc"], f"{label}.ntc", ("r25_ohm", "r25_tol_pct"),
@@ -206,7 +207,9 @@ class Battery:
         """The cell's ``key``, held to its kind; RecordError naming what reads it
         when the record lacks it."""
         if key not in self.cell:
-            raise RecordError(f"{self.label}.cell has no {key}: {why}")
+            # The key quoted: a battery whose id is "cell" read "pcb_batteries.cell
+            # .cell has no cell" (a holdout run), an id and a key of one name.
+            raise RecordError(f"{self.label}.cell has no key {key!r}: {why}")
         where = f"{self.label}.cell.{key}"
         if key in ("charge_temp_c", "short_a", "internal_resistance_ohm"):
             return P.band(self.cell[key], where, positive=key != "charge_temp_c")
@@ -470,7 +473,11 @@ def charge_temperature(ctx: GateContext) -> Verdict:
     T_cold - lo, hi - T_hot)``, in K (a difference, so a claim stated in K is
     compared with it), against 0. An in-pack element counts at its datasheet
     window; firmware is named and skipped. The NTC's thermal coupling to the
-    cell is not judged (PACK.md)."""
+    cell is not judged (PACK.md).
+
+    A defeat fails before the cell's window is read, so without it: no element
+    senses the cell, or a charger whose record names only its sense pin sees
+    only fixed resistors from its own pins (:func:`_sense_only`)."""
     gid = "pcb.charge_temperature"
     try:
         got = _design(ctx, gid)
@@ -519,10 +526,20 @@ def charge_temperature(ctx: GateContext) -> Verdict:
 def _battery_window(ctx, d, b: Battery, protectors: list) -> dict:
     """One battery's window: its worst edges and the elements behind them, or
     why it has none."""
-    lo, hi = b.value("charge_temp_c", "the widest window the cell's datasheet allows any "
-                                      "charge in, in C")
-    row = {"window_c": [lo, hi], "faults": [], "firmware": [], "elements": [],
-           "headroom": None, "line": ""}
+    # The window is read last: a defeat (nothing senses the cell, or the sense
+    # input sees a fixed divider) fails without it. What slipped through (a
+    # holdout run): the window was read first, so a design whose cell has no
+    # datasheet could not be shown to have its charger's thermistor input tied
+    # off by two fixed resistors.
+    try:
+        lo, hi = b.value("charge_temp_c", "the widest window the cell's datasheet allows "
+                                          "any charge in, in C")
+        unstated = ""
+    except RecordError as exc:
+        lo = hi = None
+        unstated = str(exc)
+    row = {"window_c": None if unstated else [lo, hi], "faults": [], "firmware": [],
+           "elements": [], "headroom": None, "line": ""}
     cold, hot, flags = [], [], []
     for p in (p for p in protectors if p.battery is b and "charge_temp" in p.functions):
         if p.where == "firmware":
@@ -554,6 +571,8 @@ def _battery_window(ctx, d, b: Battery, protectors: list) -> dict:
             row["faults"].append("nothing stops charging outside the cell's window: no "
                                  "element senses its temperature")
         return row
+    if unstated:
+        raise RecordError(unstated)
     t_cold, who_cold = max(cold)
     t_hot, who_hot = min(hot)
     row["headroom"] = min(t_cold - lo, hi - t_hot)
@@ -569,9 +588,67 @@ def _battery_window(ctx, d, b: Battery, protectors: list) -> dict:
     return row
 
 
+def _sense_only(ctx, d, p: Protector, b: Battery, label: str, ct: dict) -> str:
+    """Why a charger whose record names only its sense pin enforces no window,
+    or RecordError when the copper and the schematic show an element that may
+    sense the cell (then its record must give the numbers). Fails when the sense
+    pin is tied to the charger's own pad, reaches no other part, or sees only
+    fixed resistors that each run to a pin of the charger or a terminal of the
+    cell: a divider that sits inside the charger's window at every
+    temperature, the datasheets' way to switch the input off. What slipped
+    through (a holdout run): the defeat could be stated only by naming a fixed
+    resistor as the NTC with an NTC's numbers, and only beside the cell's full
+    datasheet window; two 10 kOhm resistors on a charger's TS pin hold it near
+    half its reference, inside the normal-charge zone, whatever the cell's
+    temperature."""
+    sense = P.keys(ct["sense"], f"{label}.sense", ("pin",))
+    if not p.fp.fitted:
+        return P.not_fitted(p.fp)
+    s_net = p.pin(sense["pin"], f"{label}.sense")
+    own = [pad.number for pad in p.fp.pads if pad.number and pad.number != str(sense["pin"])
+           and d.same(d.net(p.path, p.fp, pad.number), s_net)]
+    if own:
+        return (f"{p.fp.ref}'s sense pin (pad {sense['pin']}) is tied to its own pad(s) "
+                f"{', '.join(own)}, which turns the input off")
+    if b.therm is not None and d.same(s_net, b.net(b.therm)):
+        raise RecordError(f"{label}: {p.fp.ref}'s sense pin reaches the pack's thermistor pin: "
+                          f"give ntc {{battery_therm: true}} and the pack's NTC numbers")
+    others = [(path, ref) for path, ref, _pad in d.pads_on(s_net)
+              if not (path == p.path and ref == p.fp.ref)]
+    others = list(dict.fromkeys(others))
+    if s_net is None or not others:
+        return (f"{p.fp.ref}'s sense pin (pad {sense['pin']}) reaches no other part: nothing "
+                f"senses the cell")
+    near = {d.node(p.path, pad.net) for pad in p.fp.pads if pad.net}
+    near |= {n for n in b.nodes if n is not None}
+    fixed = []
+    for path, ref in others:
+        fp = d.part(path, ref, None, f"{label}.sense")
+        lib = _fixed_resistor(ctx, path, ref)
+        far = [d.net(path, fp, pad.number) for pad in fp.pads if pad.number]
+        far = [n for n in far if not d.same(n, s_net)]
+        if (not lib.startswith("FAIL:") or len(far) != 1
+                or not any(d.same(far[0], n) for n in near)):
+            raise RecordError(
+                f"{label}: {ref} on the sense network ({d.label(s_net)}) may sense the cell: "
+                f"give its ntc record (ref, value, r25_ohm, r25_tol_pct and its B or R/T "
+                f"table) and the sense pin's kind and trips, from the datasheets")
+        fixed.append(f"{ref} {fp.value} to {d.label(far[0])}")
+    return (f"{p.fp.ref}'s sense pin (pad {sense['pin']}) sees only fixed resistors "
+            f"({'; '.join(fixed)}), a divider from its own pins inside its window at any "
+            f"temperature: no window is enforced")
+
+
 def _board_ntc(ctx, d, p: Protector, b: Battery) -> dict | str:
     """A board element's worst charge edges, or why it does not count."""
     label = p.fn("charge_temp")
+    if isinstance(p.functions["charge_temp"], dict) and "ntc" not in p.functions["charge_temp"]:
+        ct = P.keys(p.functions["charge_temp"], label, ("sense",), ("acts",))
+        if p.kind != "charger":
+            raise RecordError(f"{label}: only the charger's own sense pin may be named "
+                              f"without its ntc; {p.name} stops a charge through acts, so "
+                              f"give its ntc record")
+        return _sense_only(ctx, d, p, b, label, ct)
     ct = P.keys(p.functions["charge_temp"], label, ("sense", "ntc"), ("network", "acts"))
     sense = P.keys(ct["sense"], f"{label}.sense", ("pin", "kind"),
                    ("i_a", "cold_v", "hot_v", "pullup_ref", "pullup_tol_pct", "cold_frac",
@@ -1125,7 +1202,11 @@ def fault_current(ctx: GateContext) -> Verdict:
     and a FET protector's switch likewise; an in-pack PCM is counted on its
     datasheet's word. A part the record does not declare ``ahead`` that taps
     the terminal net before the element is refused, naming it. One conductor
-    carries the whole fault: contacts in parallel get no credit."""
+    carries the whole fault: contacts in parallel get no credit.
+
+    A conductor ``protected_by: []`` is one nothing protects, and is judged
+    (:func:`_unprotected`): it passes on a source of at most 15 W into any load
+    (IEC 62368-1's PS1) or a continuous rating that carries the whole fault."""
     gid = "pcb.fault_current"
     try:
         got = _design(ctx, gid, conductors=True)
@@ -1164,6 +1245,30 @@ def fault_current(ctx: GateContext) -> Verdict:
                    + " (one conductor carries the whole fault; parallel contacts get no credit)")
 
 
+def _most_v(b: Battery) -> float:
+    """The most voltage one cell of ``b`` reaches: a rechargeable cell's upper
+    charge voltage, or a higher open-circuit voltage stated beside it; a primary
+    cell's fresh open-circuit voltage (``open_circuit_v``), never a charge
+    voltage. What slipped through (a holdout run): the fault range of an
+    alkaline cell asked for its "upper limit charging voltage", which a primary
+    cell has none of, so the rule errored until a person typed a charge voltage
+    no datasheet gives. *Rejected:* one key for both (a charge voltage read as a
+    primary cell's open-circuit one, or the other way, says a number the
+    datasheet does not); a primary cell's nominal voltage (a fresh cell reads
+    above it, and drives more current into a fault)."""
+    why = "the most voltage a fault current is driven by"
+    if b.chemistry in PRIMARY:
+        if "open_circuit_v" not in b.cell:
+            raise RecordError(f"{b.label} is {b.chemistry}, a primary cell, which has no "
+                              f"charge voltage: give cell 'open_circuit_v' (its fresh "
+                              f"open-circuit voltage, V), or its fault current as 'short_a'")
+        return b.value("open_circuit_v", why)
+    v = b.value("upper_charge_v", why)
+    if "open_circuit_v" in b.cell:
+        v = max(v, b.value("open_circuit_v", why))
+    return v
+
+
 def _fault_range(b: Battery) -> tuple[float, float, str]:
     """``(least, most)`` amperes ``b`` can drive into a dead short, and how."""
     if "short_a" in b.cell:
@@ -1172,11 +1277,28 @@ def _fault_range(b: Battery) -> tuple[float, float, str]:
     if "internal_resistance_ohm" in b.cell:
         r = b.value("internal_resistance_ohm", "")
         v_lo = b.value("discharge_v_min", "the least voltage a fault current is driven by")
-        v_hi = b.value("upper_charge_v", "the most voltage a fault current is driven by")
+        v_hi = _most_v(b)
         return (v_lo * b.parallel / r[1], v_hi * b.parallel / r[0],
                 "the cell's voltage over its internal resistance")
-    raise RecordError(f"{b.label}.cell has neither short_a nor internal_resistance_ohm: the "
-                      f"current the cell drives into a fault, as [least, most]")
+    raise RecordError(f"{b.label}.cell has neither 'short_a' nor 'internal_resistance_ohm': "
+                      f"the current the cell drives into a fault, as [least, most]")
+
+
+def _available_w(b: Battery) -> tuple[float, str]:
+    """The most power ``b`` can deliver into any load, W, and how: its
+    open-circuit voltage times its short-circuit current over four, the matched
+    load's power for a source with an internal resistance (``V^2 / 4R``), at the
+    cell's most voltage and least resistance (or most short-circuit current),
+    every cell in series and in parallel counted."""
+    v = _most_v(b) * b.series
+    if "short_a" in b.cell:
+        i = b.value("short_a", "")[1] * b.parallel
+    elif "internal_resistance_ohm" in b.cell:
+        i = v / (b.value("internal_resistance_ohm", "")[0] * b.series / b.parallel)
+    else:
+        raise RecordError(f"{b.label}.cell has neither 'short_a' nor 'internal_resistance_ohm'")
+    return v * i / 4.0, (f"{v:.3g} V open circuit and {i:.4g} A into a short, a quarter of "
+                         f"their product")
 
 
 def _conductor(ctx, d, cid: str, rec: dict, batteries: dict, by_id: dict) -> tuple | str:
@@ -1230,9 +1352,12 @@ def _conductor(ctx, d, cid: str, rec: dict, batteries: dict, by_id: dict) -> tup
         cap = P.num(rec["continuous_a"], f"{label}.continuous_a", gt=0.0)
         what = f"{fp.ref} pin {'/'.join(pins)} ({kind}, {area:g} mm^2)"
     ids = rec["protected_by"]
-    if not isinstance(ids, list) or not ids:
-        raise RecordError(f"{label}.protected_by: give the ids of the protectors that guard it")
+    if not isinstance(ids, list):
+        raise RecordError(f"{label}.protected_by: give the ids of the protectors that guard "
+                          f"it, or [] when nothing does")
     i_lo, i_hi, how = _fault_range(b)
+    if not ids:
+        return _unprotected(cid, b, what, cap, i_lo, i_hi, how)
     interrupt, overload, short, unreached = [], [], [], []
     for pid in ids:
         if pid not in by_id:
@@ -1243,7 +1368,9 @@ def _conductor(ctx, d, cid: str, rec: dict, batteries: dict, by_id: dict) -> tup
             raise RecordError(f"{label}.protected_by names {pid}, which guards "
                               f"{p.battery.id}, not {b.id}")
         if "trip" not in p.functions:
-            raise RecordError(f"{label}.protected_by names {pid}, which states no trip")
+            raise RecordError(f"{label}.protected_by names {pid}, which states no trip: a "
+                              f"part that trips at nothing guards no conductor. When nothing "
+                              f"trips here, give protected_by: [] and it is judged unprotected")
         t = _trip(d, p, b, net, what)
         if isinstance(t, str):
             return f"{cid}: {t}"
@@ -1269,6 +1396,42 @@ def _conductor(ctx, d, cid: str, rec: dict, batteries: dict, by_id: dict) -> tup
     line = (f"{cid}: {what} from {b.id} ({i_lo:.4g}..{i_hi:.4g} A, {how}): "
             + "; ".join(f"{w} ({r:.4f})" for r, w in parts))
     return value, line, {"conductor": cid, "fault_a": [i_lo, i_hi], "least": value,
+                         "checks": [{"ratio": r, "said": w} for r, w in parts]}
+
+
+#: IEC 62368-1 (2018) 6.2.2.4, power source class 1 (PS1): a source that can
+#: deliver no more than 15 W into any load (measured 3 s after the load is
+#: applied). The standard needs no fire enclosure and no fault protection for a
+#: PS1 circuit: what it delivers is held unlikely to ignite anything. A
+#: conductor ``protected_by: []`` passes on a source within it. What slipped
+#: through (a holdout run): an empty ``protected_by`` was refused, so "nothing
+#: protects this conductor", the finding this rule exists for, could not be
+#: stated, and two alkaline AAA cells (about 8.5 W at the most into a matched
+#: load, no fuse by common practice) errored on every run. *Rejected:* failing
+#: every unprotected conductor (a primary-cell handheld needs no fuse, by the
+#: same standard); PS2's 100 W (a lithium pack's short is past it, and the
+#: standard asks protection there); a figure of this pack's own.
+PS1_W = 15.0
+
+
+def _unprotected(cid: str, b: Battery, what: str, cap: float, i_lo: float, i_hi: float,
+                 how: str) -> tuple:
+    """``(ratio, words, evidence)`` for a conductor nothing protects: the better
+    of two, against 1.0. The source's most available power against PS1
+    (:data:`PS1_W`), and the conductor's continuous rating against the most
+    current the cell drives into a fault (a conductor that carries every fault
+    for good needs no protector). Below 1.0, nothing limits the fault."""
+    watts, said = _available_w(b)
+    parts = [(PS1_W / watts, f"at most {watts:.3g} W available ({said}) against IEC "
+                             f"62368-1's PS1 {PS1_W:g} W"),
+             (cap / i_hi, f"its continuous rating {cap:.4g} A against the fault's "
+                          f"{i_hi:.4g} A")]
+    value = max(r for r, _w in parts)
+    line = (f"{cid}: nothing protects {what} from {b.id} ({i_lo:.4g}..{i_hi:.4g} A, {how}): "
+            + "; ".join(f"{w} ({r:.4f})" for r, w in parts)
+            + ("" if value >= 1.0 else ": nothing limits the fault"))
+    return value, line, {"conductor": cid, "fault_a": [i_lo, i_hi], "least": value,
+                         "protected_by": [],
                          "checks": [{"ratio": r, "said": w} for r, w in parts]}
 
 
@@ -1735,11 +1898,27 @@ def _met(d, m, groups, base: _Nets, t1, t2) -> str:
 
 def _reverse_block(d, p: Protector, b: Battery) -> tuple[bool, str]:
     """``(counts, who or why not)`` for ``p``'s ``reverse_block``: on the board,
-    fitted, one path pin on the battery terminal's net and one off it, and no
-    part the record does not declare ``ahead`` on that net before it."""
+    fitted, one path pin on the battery terminal's net (or on the net the
+    ``through`` chain reaches from it) and one off it, and no part the record
+    does not declare ``ahead`` on any net before it.
+
+    ``through`` names the series parts between the terminal and the block, in
+    order, each ``{ref, value, path: [p, q], why}``: a power switch, a fuse.
+    Each is held to the copper, its ``p`` on the net before it and its ``q`` on
+    the next, as ``pcb.discharge_cutoff``'s ``sense.through`` holds a chain. A
+    part in the chain passes the reversed cell on, so it is never credited with
+    blocking; any other part on a net of the chain sees the reversed cell before
+    the block, and is refused until declared ``ahead`` with why. What slipped
+    through (a holdout run): a block had to sit on the terminal's net, so a
+    cell holder, then an on/off switch, then a Schottky diode (a common
+    handheld's power path) could not be stated, and read as a reversed cell
+    that nothing blocks. Naming the switch as the block would have credited a
+    part that blocks nothing. *Rejected:* a ``switch`` as the block (an ideal-
+    diode FET is one; a series power switch is not); skipping the parts
+    between (a part that taps a net of the chain sees the cell backwards)."""
     label = p.fn("reverse_block")
     t = P.keys(p.functions["reverse_block"], label, ("terminal",),
-               ("path_pins", "switch", "ahead"))
+               ("path_pins", "switch", "ahead", "through"))
     if p.where != "board":
         raise RecordError(f"{label}: {p.name} is {p.where}; a reverse block sits on the "
                           f"board, behind the pigtail that reverses (where: board)")
@@ -1754,18 +1933,59 @@ def _reverse_block(d, p: Protector, b: Battery) -> tuple[bool, str]:
     else:
         pins = P.pins(t["path_pins"], f"{label}.path_pins", 2)
         fp = d.part(p.path, p.fp.ref, p.fp.value, label, pins)
+    ahead = t.get("ahead") or []
+    if not isinstance(ahead, list):
+        raise RecordError(f"{label}.ahead: give [{{ref, value, why}}]")
+    declared = set()
+    for i, rec in enumerate(ahead):
+        P.keys(rec, f"{label}.ahead[{i}]", ("ref", "value", "why"))
+        P.text(rec["why"], f"{label}.ahead[{i}].why")
+        declared.add(d.part(p.path, rec["ref"], rec["value"], f"{label}.ahead[{i}]").ref)
+    through = t.get("through") or []
+    if not isinstance(through, list):
+        raise RecordError(f"{label}.through: give [{{ref, value, path: [p, q], why}}], the "
+                          f"series parts from the terminal to the block, in order")
+    term = b.net(b.pos if terminal == "pos" else b.neg)
+    here, chain = term, []
+    for i, rec in enumerate(through):
+        at = f"{label}.through[{i}]"
+        P.keys(rec, at, ("ref", "value", "path", "why"))
+        P.text(rec["why"], f"{at}.why")
+        cpins = P.pins(rec["path"], f"{at}.path", 2)
+        cfp = d.part(p.path, rec["ref"], rec["value"], at, cpins)
+        if cfp.ref in (fp.ref, b.fp.ref) or cfp.ref in (c.ref for c in chain):
+            raise RecordError(f"{at} names {cfp.ref}, which is already the block, the "
+                              f"battery's connector or in the chain")
+        if not cfp.fitted:
+            return False, P.not_fitted(cfp)
+        na, nz = (d.net(p.path, cfp, x) for x in cpins)
+        if not d.same(na, here) or d.same(nz, here):
+            return False, (f"{cfp.ref} is not in series from {d.label(here)}: its path pins "
+                           f"sit on {d.label(na)} and {d.label(nz)}")
+        chain.append(cfp)
+        here = nz
     if not fp.fitted:
         return False, P.not_fitted(fp)
-    term = b.net(b.pos if terminal == "pos" else b.neg)
     a, z = (d.net(p.path, fp, pin) for pin in pins)
-    if not (d.same(a, term) != d.same(z, term)):
-        return False, (f"{fp.ref} is not on {b.id}'s {terminal} terminal: its path pins sit on "
+    if not (d.same(a, here) != d.same(z, here)):
+        where = (f"the end of its chain ({d.label(here)})" if chain else
+                 f"{b.id}'s {terminal} terminal")
+        return False, (f"{fp.ref} is not on {where}: its path pins sit on "
                        f"{d.label(a)} and {d.label(z)}")
-    taps = _ahead(d, p, b, {"label": label, "fp": fp, "record": t, "term": term})
-    if taps:
-        return False, (f"{', '.join(taps)} on {b.id}'s {terminal} net sees the reversed cell "
-                       f"ahead of {fp.ref}")
-    return True, f"{fp.ref} {fp.value}"
+    # Each net from the terminal to the block: the parts on it but the chain's
+    # own and the block, and those declared ahead, see the reversed cell first.
+    nets = [term] + [d.net(p.path, c, P.pins(through[k]["path"], "", 2)[1])
+                     for k, c in enumerate(chain)]
+    for k, net in enumerate(nets):
+        mine = {fp.ref if k == len(chain) else chain[k].ref}
+        if k:
+            mine.add(chain[k - 1].ref)
+        taps = _others(d, p.path, mine | declared, net, b)
+        if taps:
+            return False, (f"{', '.join(taps)} on {d.label(net)} sees the reversed cell ahead "
+                           f"of {fp.ref}")
+    via = f" through {', '.join(c.ref for c in chain)}" if chain else ""
+    return True, f"{fp.ref} {fp.value}{via}"
 
 
 def _reversed(d, m, b: Battery, protectors: list) -> tuple[str, str]:
@@ -1841,9 +2061,12 @@ def mismate(ctx: GateContext) -> Verdict:
     is named as protected, and pcb.fault_current judges that element; it does
     not fail here (:func:`_loop`). A source meeting a signal is listed in
     the evidence and not judged. A battery whose pigtail can be ``reversed`` is
-    a hazard unless a ``reverse_block`` in series counts (on the board, nothing
-    ahead of it that its record does not declare), and protected when a fuse
-    or PTC at its terminal limits the current; an in-pack PCM is neither.
+    a hazard unless a ``reverse_block`` in series counts (on the board, behind
+    the series parts its ``through`` names, nothing ahead of it that its record
+    does not declare), and protected when a fuse or PTC at its terminal limits
+    the current; an in-pack PCM is neither. A battery of loose cells whose one
+    cell can be turned in its holder (``cell_reversed``) is a hazard no board
+    element blocks, counted.
 
     **Coverage.** Every fitted connector (a ``Connector*`` or ``Battery``
     library, or a ref J, P, CN or BT and a number) with a pad on a source's net
@@ -2028,6 +2251,8 @@ def _judge(d, terms: list, batteries: dict, protectors: list) -> dict:
                             signal.add((t.label, _named(d, node)))
         if m.kind == "battery" and ("reversed",) in m.modes:
             ways.append("reversed")
+        if m.kind == "battery" and ("cell_reversed",) in m.modes:
+            ways.append("one cell turned")
         matings.append({"mating": m.id, "kind": m.kind, "a": m.a[1].ref,
                         "modes": [P.describe(x) for x in m.modes], "ways": ways,
                         "source": m.source})
@@ -2040,6 +2265,22 @@ def _judge(d, terms: list, batteries: dict, protectors: list) -> dict:
         rev.append({"mating": m.id, "battery": m.b, "verdict": verdict, "said": said})
         if verdict != "blocked":
             keep(("reversed", m.b), verdict == "open", said, f"{m.id}, reversed")
+    # One loose cell of several turned in its holder (_power.BATTERY_WORDS):
+    # the cell's hazard, which no element on a board blocks.
+    for m in d.mates:
+        if m.kind != "battery" or ("cell_reversed",) not in m.modes:
+            continue
+        b = batteries[m.b]
+        if b.series < 2:
+            raise RecordError(f"{m.label}.modes: cell_reversed turns one cell of several in "
+                              f"series, and {b.id} has {b.series}: state reversed for a "
+                              f"battery turned whole")
+        said = (f"{m.id}: one cell of {b.id} turned in {m.a[1].ref}: the board sees "
+                f"{b.series - 2} cell(s)' voltage the right way round, and the other "
+                f"cell(s) drive the turned one backwards (IEC 60086-5); nothing on a board "
+                f"blocks that, a holder that keys each cell does")
+        rev.append({"mating": m.id, "battery": m.b, "verdict": "cell", "said": said})
+        keep(("cell_reversed", m.b), True, said, f"{m.id}, one cell turned")
     hazards = sorted(found.values(), key=lambda h: (not h["raw"], h["said"]))
     return {"hazards": [{**h, "ways": sorted(set(h["ways"]))} for h in hazards],
             "matings": matings, "reversed": rev,

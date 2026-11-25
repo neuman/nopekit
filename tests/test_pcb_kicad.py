@@ -722,8 +722,11 @@ class ABoardWithNoSchematicCanClaimItsCopper(unittest.TestCase):
         self.assertEqual([s.id for s in registry.for_claim("C1", ["copper-connectivity"])],
                          ["pcb.unconnected"])
         # Why it is needed: the broader tag brings in the gate that needs a schematic.
-        self.assertEqual(sorted(s.id for s in registry.for_claim("C1", ["connectivity"])),
+        # (`net-connectivity` since general-packs H2: `connectivity` is cad-solid's
+        # word too, TheGatesTagsAreThisPacksOwn.)
+        self.assertEqual(sorted(s.id for s in registry.for_claim("C1", ["net-connectivity"])),
                          ["pcb.parity", "pcb.unconnected"])
+        self.assertEqual([s.id for s in registry.for_claim("C1", ["connectivity"])], [])
 
 
 class TheTagTableIsTheGates(unittest.TestCase):
@@ -4394,9 +4397,17 @@ class AFitRecordIsReadStrictly(unittest.TestCase):
                 self.assertIn(said, v.error)
 
     def test_a_height_is_one_body_with_a_source(self):
+        """A height on a part whose model this host has is not used, and one on a
+        part whose model is found nowhere here stands in for it: one body each,
+        never both (general-packs H2; ABodiedPartOfAnyTypeIsFitted runs both).
+        What is refused before any tool runs is a height that is no height."""
         for name, heights, said in (
-                ("a part with a model", {"U1": {"h": 1.0, "source": "datasheet"}},
-                 "U1 names a 3D model"),
+                ("an outline inside out", {"U1": {"h": 1.0, "source": "datasheet",
+                                                  "box_mm": [[1.0, 1.0], [0.0, 0.0]]}},
+                 "each low corner must be below its high one"),
+                ("an outline with a z", {"U1": {"h": 1.0, "source": "datasheet",
+                                                "box_mm": [[0, 0, 0], [1, 1, 1]]}},
+                 "give [[x0, y0], [x1, y1]] in mm, in the footprint's own frame"),
                 ("no source", {"U1": {"h": 1.0, "source": " "}}, "source is empty"),
                 ("no height", {"U1": {"h": 0, "source": "datasheet"}}, "a height is above 0 mm"),
                 ("a flag", {"U1": {"h": True, "source": "datasheet"}}, "give a number")):
@@ -4872,9 +4883,24 @@ def _build_board(root: str, name: str, spec: dict) -> str:
     path = os.path.join(root, name + ".json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(dict(spec, out=out, footprints=FOOTPRINTS), fh)
-    subprocess.run([sys.executable, script, path], check=True, capture_output=True,
-                   timeout=120, cwd=root)
+    # Through _env.run, as every test's child process goes. (What slipped
+    # through P8: a bare subprocess.run here, never imported, so every class
+    # that built a board errored with a NameError where pcbnew is installed, and
+    # test_meta.NoSubprocessOutsideRun went red.)
+    proc = _env.run([sys.executable, script, path], cwd=root, timeout=120)
+    if proc.returncode != 0:
+        raise AssertionError(f"pcbnew did not build {out}: {proc.stderr[-2000:]}")
     return out
+
+
+def _plain_drc(board: str, report: str, cwd: str) -> list:
+    """KiCad's own DRC on ``board``, no override: its report's violations."""
+    proc = _env.run(["kicad-cli", "pcb", "drc", "--severity-all", "--format", "json",
+                     "-o", report, board], cwd=cwd, timeout=120)
+    if proc.returncode not in (0, 5) or not os.path.isfile(report):
+        raise AssertionError(f"kicad-cli pcb drc failed on {board}: {proc.stderr[-2000:]}")
+    with open(report, encoding="utf-8") as fh:
+        return json.load(fh)["violations"]
 
 
 def _keepout_gate():
@@ -5029,11 +5055,7 @@ class TheKeepoutIsJudgedOnEveryLayer(unittest.TestCase):
         kinds = []
         for path in (RADIO_BOARD, board):
             report = os.path.join(self.root, "plain.json")
-            subprocess.run(["kicad-cli", "pcb", "drc", "--severity-all", "--format", "json",
-                            "-o", report, path], capture_output=True, timeout=120,
-                           cwd=self.root, check=True)
-            with open(report, encoding="utf-8") as fh:
-                kinds.append(sorted(v["type"] for v in json.load(fh)["violations"]))
+            kinds.append(sorted(v["type"] for v in _plain_drc(path, report, self.root)))
         self.assertEqual(kinds[0], kinds[1])
         self.assertNotIn("items_not_allowed", kinds[1])
         v = gates_mod.run_gate(self.spec, self.fn, bad)
@@ -5091,11 +5113,8 @@ class TheKeepoutIsJudgedOnEveryLayer(unittest.TestCase):
                       if e.endswith(os.path.join("stored", "drc.json")))
         shutil.copyfile(pro, os.path.join(stored, "radio_board.kicad_pro"))
         report = os.path.join(stored, "hidden.json")
-        subprocess.run(["kicad-cli", "pcb", "drc", "--severity-all", "--format", "json",
-                        "-o", report, os.path.join(stored, "radio_board.kicad_pcb")],
-                       capture_output=True, timeout=120, cwd=stored, check=True)
-        with open(report, encoding="utf-8") as fh:
-            types = {x["type"] for x in json.load(fh)["violations"]}
+        types = {x["type"] for x in _plain_drc(os.path.join(stored, "radio_board.kicad_pcb"),
+                                               report, stored)}
         self.assertNotIn("items_not_allowed", types, "the override is what finds it")
 
     def test_one_board_named_twice_is_judged_once(self):
@@ -5446,12 +5465,9 @@ class ACutoutInAKeepoutStaysACutout(unittest.TestCase):
         # KiCad's own DRC on the board reads the cutout the same way: the area's
         # one item is the track outside it.
         report = os.path.join(self.root, "plain.json")
-        subprocess.run(["kicad-cli", "pcb", "drc", "--severity-all", "--format", "json",
-                        "-o", report, self.board], capture_output=True, timeout=120,
-                       cwd=self.root, check=True)
-        with open(report, encoding="utf-8") as fh:
-            plain = [i["description"].split(",")[0] for x in json.load(fh)["violations"]
-                     if x["type"] == "items_not_allowed" for i in x["items"]]
+        plain = [i["description"].split(",")[0]
+                 for x in _plain_drc(self.board, report, self.root)
+                 if x["type"] == "items_not_allowed" for i in x["items"]]
         self.assertEqual(plain, ["Track [GND] on B.Cu"])
 
 
@@ -6348,6 +6364,682 @@ for path in sys.argv[2:]:
     out["found"][path] = {fp.ref: D.typec_receptacle(fp) for fp in board.footprints}
 print(json.dumps(out))
 """
+
+
+# --------------------------------------------------------------------------- #
+# general-packs H2: what four holdout designs found in the power rules, the
+# mis-mating rule, the fit, the trace heating, the keep-out and the draft
+# --------------------------------------------------------------------------- #
+class ANetsCurrentMayFollowARoute(unittest.TestCase):
+    """``pcb_net_currents_a`` may give a net a route: ``amps`` on the tracks of
+    the copper's routes between two pads, ``rest_a`` on every other track. What
+    slipped through (a holdout run): one current judged every track of a net, so
+    a return net named at a cell's 1 A failed on 0.2 mm stubs that fan a QFN's
+    ground pins out and never carry the cell's current. On the baseline, GND
+    runs J1.2 to J2.2 on two B.Cu tracks; a third B.Cu track leaves their
+    junction for a via to U1, and two F.Cu tracks join U1's other GND pad."""
+
+    def setUp(self):
+        self.registry = _registry()
+        self.g = self.registry.get("pcb.net_width")[1].__globals__
+        self.root = tempfile.mkdtemp(prefix="nopekit-pcb-route-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def _verdict(self, gnd) -> object:
+        """The gate on the baseline board, run from a temporary root, so its
+        evidence is written there and never into the pack."""
+        params = dict(_baseline(), pcb_board=BOARD,
+                      pcb_net_currents_a={"VBUS": 0.5, "GND": gnd})
+        return _run(self.registry, "pcb.net_width", self.root, params)
+
+    def _route(self, a, z) -> set:
+        tree = K.load_tree(BOARD)
+        return self.g["_route_tracks"](tree, K.board_from_tree(tree), "GND", (a, z))
+
+    def test_the_route_takes_the_through_tracks_and_leaves_the_stubs(self):
+        on = self._route(("J1", "2"), ("J2", "2"))
+        tracks = K.load_board(BOARD).tracks
+        gnd = [i for i, t in enumerate(tracks) if t.net == "GND"]
+        self.assertEqual(len(gnd), 5)
+        self.assertEqual(len(on), 2, on)
+        self.assertEqual({tracks[i].layer for i in on}, {"B.Cu"})
+        # The stub off the T where the three B.Cu tracks meet is not on it.
+        self.assertEqual(len([i for i in gnd if tracks[i].layer == "B.Cu" and i not in on]), 1)
+
+    def test_the_route_is_judged_at_its_current_and_the_rest_at_theirs(self):
+        v = self._verdict({"amps": 2.0, "from": "J1.2", "to": "J2.2", "rest_a": 0.1})
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertEqual(v.measured, round(K.temp_rise_c(2.0, 0.25, 1.0, True), 1))
+        self.assertIn("GND: 2 track(s) on its route J1.2 to J2.2 at 2 A, 3 off it at 0.1 A",
+                      v.detail)
+        with open(v.evidence[0], encoding="utf-8") as fh:
+            routes = json.load(fh)["routes"]
+        self.assertEqual(routes["GND"]["tracks_on_route"], 2)
+        # The same net at one current, as before: every track at 2 A.
+        whole = self._verdict(2.0)
+        self.assertEqual(whole.measured, v.measured)
+        self.assertNotIn("route", whole.detail)
+
+    def test_a_route_record_is_read_strictly(self):
+        for name, rec, said in (
+                ("rest above amps", {"amps": 1.0, "from": "J1.2", "to": "J2.2", "rest_a": 2.0},
+                 "rest_a 2 A is above its amps 1 A"),
+                ("a pad off the net", {"amps": 1.0, "from": "J1.1", "to": "J2.2"},
+                 "names J1.1, not on GND: its pad 1 is on DP"),
+                ("no such pad", {"amps": 1.0, "from": "J1.2", "to": "U1.9"},
+                 "names U1.9, not on GND: it has no pad 9"),
+                ("no dot", {"amps": 1.0, "from": "J1", "to": "J2.2"},
+                 "name a pad as REF.PAD"),
+                ("one pad", {"amps": 1.0, "from": "J1.2", "to": "J1.2"}, "one pad"),
+                ("no to", {"amps": 1.0, "from": "J1.2"}, "has no key 'to'")):
+            with self.subTest(case=name):
+                v = self._verdict(rec)
+                self.assertEqual(v.outcome, "error", v.render())
+                self.assertIn(said, v.error)
+
+    def test_a_loop_meeting_the_route_at_one_node_is_off_it(self):
+        """The blocks, on a hand-made graph: s-a-t is the route, a-b-c-a a loop
+        that meets it at a, d a stub off t, and s-e-t a second route."""
+        on_routes = self.g["_on_routes"]
+        edges = {0: ("s", "a"), 1: ("a", "t"), 2: ("a", "b"), 3: ("b", "c"), 4: ("c", "a"),
+                 5: ("t", "d"), 6: ("s", "e"), 7: ("e", "t")}
+        names = sorted({n for pair in edges.values() for n in pair})
+        idx = {n: i for i, n in enumerate(names)}
+        adj = {i: [] for i in idx.values()}
+        for e, (x, y) in edges.items():
+            adj[idx[x]].append((idx[y], e))
+            adj[idx[y]].append((idx[x], e))
+        self.assertEqual(on_routes(adj, idx["s"], idx["t"]), {0, 1, 6, 7})
+        del adj[idx["e"]]
+        adj[idx["s"]] = [x for x in adj[idx["s"]] if x[1] != 6]
+        adj[idx["t"]] = [x for x in adj[idx["t"]] if x[1] != 7]
+        self.assertEqual(on_routes(adj, idx["s"], idx["t"]), {0, 1})
+        self.assertIsNone(on_routes(adj, idx["s"], idx["d"] + 100) if False else
+                          on_routes({**adj, 99: []}, idx["s"], 99))
+
+
+class ThePowerRulesTakeWhatAHoldoutCouldNotState(_PowerCase):
+    """Records a holdout design needed and no record could hold: a reverse block
+    behind a power switch, one loose cell turned, a primary cell's fault range,
+    a conductor nothing protects, and a charger whose thermistor input is tied
+    off by a fixed divider, each judged."""
+
+    def _block_r5(self, through=None, ahead=None):
+        """R5 stated as the block that guards a reversed cell, F1 between it and
+        the cell's + (F1's trip left out, so only the block can answer)."""
+        def records(p):
+            p["pcb_matings"]["cell"]["modes"] = ["reversed"]
+            p["pcb_protectors"].pop("fuse")
+            rb = {"terminal": "pos", "path_pins": ["1", "2"]}
+            if through is not None:
+                rb["through"] = through
+            if ahead is not None:
+                rb["ahead"] = ahead
+            p["pcb_protectors"]["blocker"] = {
+                "battery": "main", "kind": "blocking", "where": "board",
+                "board": POWER_BOARD, "ref": "R5", "value": "330",
+                "functions": {"reverse_block": rb},
+                "source": "test: a series element in R5's place, behind F1"}
+        return records
+
+    def test_a_block_behind_a_series_part_counts_through_its_chain(self):
+        f1 = [{"ref": "F1", "value": "PTC_FIXTURE_0A5", "path": ["1", "2"],
+               "why": "test: the series part between the cell and the block"}]
+        aheads = [{"ref": r, "value": v, "why": "test: on the net behind F1"}
+                  for r, v in (("U1", "MCP73833-AMI/UN"), ("C3", "10uF"), ("J6", "WIRE_OUT"))]
+        for name, through, ahead, outcome, said in (
+                ("no chain", None, None, "fail", "R5 is not on main's pos terminal"),
+                ("taps behind the chain", f1, None, "fail",
+                 "C3, J6, U1 on VSYS sees the reversed cell ahead of R5"),
+                ("declared", f1, aheads, "pass", "is blocked by R5 330 through F1"),
+                ("a chain the copper breaks", [dict(f1[0], path=["2", "1"])], aheads, "fail",
+                 "F1 is not in series from CELL_P")):
+            with self.subTest(case=name):
+                v = self.run_gate("pcb.mismate", records=self._block_r5(through, ahead))
+                self.assertEqual(v.outcome, outcome, v.render())
+                self.assertIn(said, v.detail)
+
+    def test_one_loose_cell_turned_is_a_hazard_of_its_own(self):
+        def cell_turned(series):
+            def records(p):
+                p["pcb_matings"]["cell"]["modes"] = ["cell_reversed"]
+                if series == 2:
+                    p["pcb_batteries"]["main"]["series"] = 2
+                    p["pcb_batteries"]["main"]["terminals"]["taps"] = ["3"]
+            return records
+        v = self.run_gate("pcb.mismate", records=cell_turned(1))
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("cell_reversed turns one cell of several in series, and main has 1",
+                      v.error)
+
+        def third_pad(tree):
+            fp = _footprint(tree, "BT1")
+            pad = copy.deepcopy(_pad(tree, "BT1", "2"))
+            pad[1] = K.Q("3")
+            fp.append(pad)
+            _move_pad_net(tree, "BT1", "3", "CELL_M")
+        board = self.board(third_pad, stem="two_cells")
+        v = self.run_gate("pcb.mismate", records=cell_turned(2), board=board)
+        self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+        self.assertIn("cell: one cell of main turned in BT1: the board sees 0 cell(s)' voltage "
+                      "the right way round", v.detail)
+
+    def test_a_primary_cells_fault_range_takes_its_open_circuit_voltage(self):
+        def alkaline(cell):
+            def records(p):
+                p["pcb_batteries"]["main"]["chemistry"] = "alkaline"
+                p["pcb_batteries"]["main"]["cell"] = cell
+                p["pcb_conductors"]["wire_out"]["protected_by"] = []
+            return records
+        charge_v = {"discharge_v_min": 0.8, "internal_resistance_ohm": [0.15, 0.3],
+                    "upper_charge_v": 1.65}
+        v = self.run_gate("pcb.fault_current", records=alkaline(charge_v))
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("alkaline, a primary cell, which has no charge voltage: give cell "
+                      "'open_circuit_v'", v.error)
+        ocv = {"discharge_v_min": 0.8, "internal_resistance_ohm": [0.15, 0.3],
+               "open_circuit_v": 1.65}
+        v = self.run_gate("pcb.fault_current", records=alkaline(ocv))
+        watts = 1.65 * (1.65 / 0.15) / 4.0
+        self.assertEqual((v.outcome, v.measured), ("pass", round(15.0 / watts, 4)), v.render())
+        self.assertIn("wire_out: nothing protects J6 pin 1", v.detail)
+        self.assertIn(f"at most {watts:.3g} W available", v.detail)
+        self.assertIn("against IEC 62368-1's PS1 15 W", v.detail)
+
+    def test_a_conductor_nothing_protects_is_judged_never_refused(self):
+        """The baseline's 18650 behind no protector: 42.5 W available (4.25 V and
+        40 A, a quarter of their product) and 40 A past the wire's 1 A: nothing
+        limits the fault, a fail."""
+        def bare(p):
+            p["pcb_conductors"]["wire_out"]["protected_by"] = []
+        v = self.run_gate("pcb.fault_current", records=bare)
+        self.assertEqual((v.outcome, v.measured), ("fail", round(15.0 / 42.5, 4)), v.render())
+        self.assertIn("nothing limits the fault", v.detail)
+
+        def block_named(p):
+            p["pcb_protectors"]["blocker"] = {
+                "battery": "main", "kind": "blocking", "where": "board",
+                "board": POWER_BOARD, "ref": "F1", "value": "PTC_FIXTURE_0A5",
+                "functions": {"reverse_block": {"terminal": "pos", "path_pins": ["1", "2"]}},
+                "source": "test: a block named as if it protected the wire"}
+            p["pcb_conductors"]["wire_out"]["protected_by"] = ["blocker"]
+        v = self.run_gate("pcb.fault_current", records=block_named)
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("give protected_by: [] and it is judged unprotected", v.error)
+
+    def test_a_defeat_fails_without_the_cells_window(self):
+        """A cell with no datasheet window: a charger with no temperature
+        function fails (nothing senses the cell), where it errored on the
+        missing window."""
+        def no_window(p):
+            p["pcb_batteries"]["main"]["cell"].pop("charge_temp_c")
+            p["pcb_protectors"]["charger"]["functions"].pop("charge_temp")
+        v = self.run_gate("pcb.charge_temperature", records=no_window)
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("no element senses its temperature", v.detail)
+
+        def window_only(p):
+            p["pcb_batteries"]["main"]["cell"].pop("charge_temp_c")
+        v = self.run_gate("pcb.charge_temperature", records=window_only)
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("has no key 'charge_temp_c'", v.error)
+
+    def test_a_sense_pin_alone_is_judged_on_the_schematic(self):
+        """The charger's record names only its THERM pin. On a schematic that
+        draws TH1 as a fixed resistor (to GND, where the charger's VSS sits), the
+        input sees a fixed divider: a fail, with no window and no NTC numbers.
+        Drawn as a thermistor, or with no schematic, the rule asks for the
+        numbers."""
+        def sense_only(p):
+            p["pcb_batteries"]["main"]["cell"].pop("charge_temp_c")
+            p["pcb_protectors"]["charger"]["functions"]["charge_temp"] = {"sense": {"pin": "8"}}
+        board = self.board(stem="sense_only")
+        for lib_id, outcome, said in (
+                ("Device:R", "fail", "U1's sense pin (pad 8) sees only fixed resistors (TH1 "
+                                     "NTC 10k B4250 to GND)"),
+                ("Device:Thermistor_NTC", "error", "TH1 on the sense network (THERM) may "
+                                                   "sense the cell"),
+                (None, "error", "may sense the cell")):
+            with self.subTest(lib_id=lib_id):
+                sch = board[:-len(".kicad_pcb")] + ".kicad_sch"
+                if lib_id is None:
+                    os.remove(sch)
+                else:
+                    with open(sch, "w", encoding="utf-8") as fh:
+                        fh.write(_ONE_SYMBOL_SCH.format(lib_id=lib_id))
+                v = self.run_gate("pcb.charge_temperature", records=sense_only, board=board)
+                self.assertEqual(v.outcome, outcome, v.render())
+                self.assertIn(said, v.detail if outcome == "fail" else v.error)
+
+
+class TheGatesTagsAreThisPacksOwn(unittest.TestCase):
+    """No tag of this pack's gates is another bundled pack's: a claim tagged
+    with a shared word was bound to cad-solid's and fdm-print's gates beside
+    this pack's (holdout D04: `manufacturability` bound pcb.drc beside every fdm
+    gate). The words moved, and PACK.md names each move."""
+
+    def test_no_tag_is_bound_by_another_bundled_pack(self):
+        mine = {s.id: set(s.claims) for s in _registry().specs()}
+        tags = set().union(*mine.values())
+        reg = gates_mod.Registry()
+        for name in sorted(os.listdir(os.path.join(REPO, "packs"))):
+            if name == "pcb-kicad" or not os.path.isfile(
+                    os.path.join(REPO, "packs", name, "pack.json")):
+                continue
+            packs_mod.load_gates(name, reg, root=REPO, include_env=False, include_user=False)
+        shared = {t: sorted(s.id for s in reg.specs() if t in s.claims)
+                  for t in tags - {"pcb"}}
+        self.assertEqual({t: g for t, g in shared.items() if g}, {})
+
+    def test_pack_md_names_each_move(self):
+        with open(os.path.join(PACK, "PACK.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        for old, new in (("clearance", "design-rules"), ("manufacturability",
+                                                        "pcb-manufacturability"),
+                         ("connectivity", "net-connectivity"), ("packaging", "enclosure-fit"),
+                         ("interference", "enclosure-fit")):
+            with self.subTest(tag=old):
+                self.assertRegex(text, rf"(?s)\n- `{old}`(?:(?!\n- ).)*`{new}`")
+
+
+class ThePartSetHasNoTypeFilter(unittest.TestCase):
+    """``_parts_and_models``, ``_model_file`` and the fit's timeouts and region
+    refusals, without KiCad."""
+
+    def setUp(self):
+        self.g = _registry().get("pcb.enclosure_fit")[1].__globals__
+
+    def test_a_footprint_that_shows_a_model_is_a_part_whatever_its_type(self):
+        tree = K.load_tree(BOARD)
+        K.child(_footprint(tree, "U1"), "attr")[1:] = ["exclude_from_pos_files",
+                                                       "exclude_from_bom"]
+        parts, models, unasked = self.g["_parts_and_models"](tree)
+        self.assertIn("U1", parts)
+        self.assertEqual(models["U1"], ["${KIPRJMOD}/3d/SOT-23-6.step"])
+        self.assertEqual(unasked, [])
+        _drop_model("U1")(tree)
+        parts, _models, unasked = self.g["_parts_and_models"](tree)
+        self.assertNotIn("U1", parts)
+        self.assertEqual(unasked, ["U1"], "named, never silently dropped")
+        K.child(_footprint(tree, "U1"), "attr")[1:] = ["smd", "dnp"]
+        parts, _models, unasked = self.g["_parts_and_models"](tree)
+        self.assertEqual(("U1" in parts, unasked), (False, []))
+
+    def test_a_model_is_found_as_kicad_cli_would(self):
+        model_file = self.g["_model_file"]
+        here = os.path.join(ASSETS, "3d")
+        self.assertEqual(model_file("${KIPRJMOD}/3d/SOT-23-6.step", ASSETS),
+                         os.path.join(here, "SOT-23-6.step"))
+        self.assertEqual(model_file("3d/SOT-23-6.step", ASSETS),
+                         os.path.join(ASSETS, "3d/SOT-23-6.step"))
+        # A VRML model counts by the STEP beside it, as --subst-models reads it.
+        self.assertEqual(model_file("${KIPRJMOD}/3d/SOT-23-6.wrl", ASSETS),
+                         os.path.join(here, "SOT-23-6.step"))
+        self.assertIsNone(model_file("${KIPRJMOD}/3d/not-installed.step", ASSETS))
+        self.assertIsNone(model_file("${NOT_A_KICAD_VARIABLE}/x.step", ASSETS))
+        with mock.patch.dict(os.environ, {"KICAD9_3DMODEL_DIR": ASSETS}):
+            self.assertEqual(model_file("${KICAD9_3DMODEL_DIR}/3d/SOT-23-6.step", ASSETS),
+                             os.path.join(ASSETS, "3d/SOT-23-6.step"))
+
+    def test_the_default_timeout_grows_with_the_parts_and_says_so(self):
+        timeout = self.g["_fit_timeout"]
+        ctx = _fit_ctx(tempfile.mkdtemp(prefix="nopekit-fit-t-"), {})
+        seconds, how = timeout(ctx, 74)
+        self.assertEqual(seconds, 120.0 + 5.0 * 74)
+        self.assertIn("74 part(s), the default 120 s and 5 s a part: set pcb_fit_timeout_s",
+                      how)
+        ctx = _fit_ctx(tempfile.mkdtemp(prefix="nopekit-fit-t-"), {"pcb_fit_timeout_s": 30})
+        self.assertEqual(timeout(ctx, 74), (30.0, "74 part(s), pcb_fit_timeout_s"))
+        # A run killed at its limit says how long it ran and why.
+        root = tempfile.mkdtemp(prefix="nopekit-fit-t-")
+        self.addCleanup(shutil.rmtree, root, True)
+        request = os.path.join(root, "r.json")
+        with open(request, "w", encoding="utf-8") as fh:
+            json.dump({"boxes": []}, fh)
+        answer, why = self.g["_helper"]("boxes", request, root, 0.001, os.path.join(root, "l"),
+                                        how)
+        self.assertIsNone(answer)
+        self.assertEqual(why[0], "skip")
+        self.assertIn("ran 0.001 s (74 part(s), the default", why[1])
+
+    def test_every_refused_region_is_listed(self):
+        Fit, contacts = self.g["_Fit"], self.g["_contacts"]
+        everything = [[-50.0, -50.0, -50.0], [50.0, 50.0, 50.0]]
+        fit = Fit("", "b.kicad_pcb", "e.step", {}, set(), contacts(
+            {"J1": {"all": {"reason": "x", "region_mm": everything}},
+             "J2": {"all": {"reason": "x", "region_mm": everything}}}, "c"), {})
+        enclosure = [[-4.0, -19.0, -2.0], [34.0, 4.0, 18.5]]
+        found = self.g["_region_refusals"](fit, {}, enclosure, 1.0)
+        self.assertEqual([w for _e, _d, w in found], ["J1 against all", "J2 against all"])
+        out = tempfile.mkdtemp(prefix="nopekit-fit-r-")
+        self.addCleanup(shutil.rmtree, out, True)
+        v = self.g["_refused"]("pcb.enclosure_fit", found, [], out)
+        self.assertIn("J1 against all: its region holds the whole enclosure", v.error)
+        self.assertTrue(v.detail.startswith("2 contact regions refused, each with its box to "
+                                            "draw in regions_refused.json: J1 against all, "
+                                            "J2 against all; first: "), v.detail)
+        with open(v.evidence[0], encoding="utf-8") as fh:
+            self.assertEqual(len(json.load(fh)), 2)
+
+    def test_a_height_on_a_part_with_no_courtyard_takes_its_outline(self):
+        root = tempfile.mkdtemp(prefix="nopekit-fit-outline-")
+        self.addCleanup(shutil.rmtree, root, True)
+
+        def bare(tree):
+            _drop_model("U1")(tree)
+            fp = _footprint(tree, "U1")
+            fp[:] = [x for x in fp if not (isinstance(x, list)
+                                          and K.value(x, "layer") == "F.CrtYd")]
+        board = _variant_board(root, bare)
+        ctx = _fit_ctx(tempfile.mkdtemp(dir=root), dict(_baseline(), pcb_board=board))
+        Fit, heights = self.g["_Fit"], self.g["_heights"]
+        place = {"x": 0.0, "y": 0.0, "z": 0.0, "rot_x_deg": 0.0, "rot_y_deg": 0.0,
+                 "rot_z_deg": 0.0}
+        fit = Fit("", board, "e.step", place, set(), {},
+                  heights({"U1": {"h": 1.0, "source": "datasheet"}}, "h"))
+        with self.assertRaises(self.g["_FitError"]) as raised:
+            self.g["_read_board"](ctx, "pcb.enclosure_fit", fit)
+        self.assertIn("give its outline as box_mm", str(raised.exception))
+        fit = Fit("", board, "e.step", place, set(), {}, heights(
+            {"U1": {"h": 1.0, "source": "datasheet",
+                    "box_mm": [[-1.5, -1.45], [1.5, 1.45]]}}, "h"))
+        self.assertIsNone(self.g["_read_board"](ctx, "pcb.enclosure_fit", fit))
+        self.assertEqual(fit.heights["U1"]["box"], (-1.5, -1.45, 1.5, 1.45))
+
+    def test_parts_with_no_model_and_a_lost_one_are_named_in_one_skip(self):
+        root = tempfile.mkdtemp(prefix="nopekit-fit-lost-")
+        self.addCleanup(shutil.rmtree, root, True)
+
+        def edit(tree):
+            _drop_model("U1")(tree)
+            _lose_model("J1")(tree)
+        board = _variant_board(root, edit)
+        v = _registry().get("pcb.enclosure_fit")[1](
+            _fit_ctx(tempfile.mkdtemp(dir=root), dict(_baseline(), pcb_board=board)))
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertIn("1 part(s) name no 3D model (U1), 1 one not found here (J1)",
+                      v.skip_reason)
+        self.assertLessEqual(len(v.skip_reason), 200)
+        self.assertTrue(v.skip_reason.endswith("pcb_enclosure_bodiless"), v.skip_reason)
+
+
+@unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
+class ABodiedPartOfAnyTypeIsFitted(unittest.TestCase):
+    """U1 under a block 0.8 mm above its model's top. A part with no type that
+    shows its model is fitted (it failed silently before: the model was not
+    staged, and the pass said nothing collides); one with neither is named. A
+    declared height stands in for a model found nowhere here, and is named
+    unused beside a model that is found."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="nopekit-fit-anytype-")
+        top = 1.595 + 1.55 + 0.8
+        cls.block = _enclosure_step(os.path.join(cls.tmp, "block.step"), "block",
+                                    (13.0, -9.5, top), (17.0, -6.2, top + 2.0))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, True)
+
+    def _run(self, edit, heights=None):
+        root = tempfile.mkdtemp(dir=self.tmp)
+        params = dict(_baseline(), pcb_board=_variant_board(root, edit),
+                      pcb_enclosure_step=self.block,
+                      pcb_board_placement={"x": 0.0, "y": 0.0, "z": 0.0})
+        if heights is not None:
+            params["pcb_part_heights_mm"] = heights
+        return gates_mod.run_gate(*_registry().get("pcb.enclosure_fit"),
+                                  _fit_ctx(tempfile.mkdtemp(dir=root), params))
+
+    @staticmethod
+    def _untyped(tree):
+        K.child(_footprint(tree, "U1"), "attr")[1:] = ["exclude_from_pos_files",
+                                                       "exclude_from_bom"]
+
+    def test_an_untyped_part_with_a_model_is_fitted(self):
+        v = self._run(self._untyped)
+        self.assertEqual((v.outcome, v.measured), ("fail", 0.8), v.render())
+        self.assertIn("nearest U1 is 0.8 mm", v.detail)
+
+    def test_an_untyped_part_with_no_model_is_named(self):
+        v = self._run(lambda t: (self._untyped(t), _drop_model("U1")(t)))
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertIn("not fitted (no type, no 3D model): U1", v.detail)
+
+    def test_a_lost_model_takes_its_declared_height(self):
+        low = self._run(_lose_model("U1"), {"U1": {"h": 1.0, "source": "seated height"}})
+        self.assertEqual((low.outcome, low.measured), ("pass", 1.35), low.render())
+        self.assertIn("at its declared height, its model not found here: U1", low.detail)
+        tall = self._run(_lose_model("U1"), {"U1": {"h": 1.55, "source": "seated height"}})
+        self.assertEqual((tall.outcome, tall.measured), ("fail", 0.8), tall.render())
+
+    def test_a_found_model_leaves_its_height_unused(self):
+        v = self._run(lambda t: None, {"U1": {"h": 1.0, "source": "seated height"}})
+        self.assertEqual((v.outcome, v.measured), ("fail", 0.8), v.render())
+        self.assertIn("declared height not used, its model found: U1", v.detail)
+
+
+@unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
+class ARefusedRegionCostsNoFullFit(unittest.TestCase):
+    """Two regions drawn too wide, refused together, before the full fit runs:
+    the evidence holds the refusals and no fit.json. What slipped through (a
+    holdout run): each refusal came after a full fit, one at a time."""
+
+    def test_both_are_refused_before_the_fit(self):
+        out = tempfile.mkdtemp(prefix="nopekit-fit-early-")
+        self.addCleanup(shutil.rmtree, out, True)
+        region = [[-4.0, -19.0, -2.0], [34.0, 4.0, 18.4]]
+        contacts = {r: {"lid": {"reason": "seats on it", "region_mm": region}}
+                    for r in ("J1", "J2")}
+        params = dict(_baseline(), pcb_board_placement={"x": 0.0, "y": 0.0, "z": 5.8},
+                      pcb_enclosure_contacts=contacts)
+        v = gates_mod.run_gate(*_registry().get("pcb.enclosure_fit"), _fit_ctx(out, params))
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("J1 against lid: the region reaches more than 2 mm past J1's own box",
+                      v.error)
+        self.assertIn("2 contact regions refused", v.detail)
+        self.assertIn("J1 against lid, J2 against lid", v.detail)
+        names = [os.path.basename(e) for e in v.evidence]
+        self.assertIn("regions_refused.json", names)
+        self.assertNotIn("fit.json", names)
+
+
+class TheKeepoutReadsAPrintedAntenna(unittest.TestCase):
+    """A printed antenna's own copper and an unnamed rule area, without KiCad:
+    the area picked by its id or by the part it covers, the antenna's own tracks
+    found through its pads, and the refusal that names every form."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-keepout-printed-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.spec, self.fn = _keepout_gate()
+        self.g = self.fn.__globals__
+
+    def test_the_footprint_refusal_names_every_form(self):
+        v = self.fn(_keepout_ctx(self.root, _radio_record(_radio_copy(
+            self.root, _no_footprint_keepout("U1")))))
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("give a drawing, or a board rule area by name, {\"uuid\": id} or "
+                      "{\"covers\": \"U1\"}", v.error)
+        self.assertLessEqual(len(v.error), 200)
+
+    def test_a_pick_is_read_strictly(self):
+        for keepout, said in (({"rule_area": {"name": "x"}}, "unknown key 'name'"),
+                              ({"rule_area": {"uuid": "a", "covers": "U1"}}, "give one of"),
+                              ({"rule_area": {"covers": "U9"}}, "has no U9 for a rule area")):
+            with self.subTest(keepout=keepout):
+                v = self.fn(_keepout_ctx(self.root, _radio_record(RADIO_BOARD,
+                                                                  keepout=keepout)))
+                self.assertEqual(v.outcome, "error", v.render())
+                self.assertIn(said, v.error)
+        v = self.fn(_keepout_ctx(self.root, _radio_record(RADIO_BOARD, own_nets="GND")))
+        self.assertIn("own_nets is 'GND'", v.error)
+
+    def test_the_antenna_owns_the_tracks_its_pads_reach_and_no_more(self):
+        """U1's GND pad 1 with a track from it, a track from that one's end, a
+        via there, and beyond the via a B.Cu track: the two front tracks and the
+        via are U1's own copper by the copper; the back track, a GND track that
+        touches none of them, and a pour are not."""
+        tree = K.load_tree(RADIO_BOARD)
+        fp = _footprint(tree, "U1")
+        pad = _pad(tree, "U1", "1")
+        cx, cy = self.g["_footprint_to_board_raw"](fp)(
+            (float(K.child(pad, "at")[1]), float(K.child(pad, "at")[2])))
+        layer = next(str(x) for x in K.child(pad, "layers")[1:] if str(x).endswith(".Cu")
+                     and "*" not in str(x))
+        for edit in (_track(layer, (cx, cy), (cx, cy - 3)),
+                     _track(layer, (cx, cy - 3), (cx + 2, cy - 3)),
+                     _via((cx + 2, cy - 3)),
+                     _track("B.Cu", (cx + 2, cy - 3), (cx + 2, cy - 6)),
+                     _track(layer, (cx + 10, cy - 10), (cx + 12, cy - 10))):
+            edit(tree)
+        board = K.board_from_tree(tree)
+        own = self.g["_antenna_own_items"](tree, board, fp, ["GND"])
+        ids = {K.kiid(_uid(name)) for name in (
+            f"{layer}{(cx, cy)}{(cx, cy - 3)}", f"{layer}{(cx, cy - 3)}{(cx + 2, cy - 3)}",
+            f"via{(cx + 2, cy - 3)}")}
+        self.assertEqual(own, ids)
+        self.assertEqual(self.g["_antenna_own_items"](tree, board, fp, []), set())
+        self.assertEqual(self.g["_antenna_own_items"](tree, board, fp, ["RF"]), set())
+
+
+class TheKeepoutPicksAnUnnamedArea(unittest.TestCase):
+    """A chip antenna (KiCad's stock Johanson 2450AT18) with its feed drawn as a
+    track on its own net into a rule area the designer left unnamed, and a GND
+    track in the same area. Picked by the part it covers or by its id: the GND
+    track is found; the antenna's feed is its own copper only when the record
+    names its net."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not KEEPOUT_TOOLS or FOOTPRINTS is None:
+            raise unittest.SkipTest(KEEPOUT_SKIP)
+        cls.root = tempfile.mkdtemp(prefix="nopekit-keepout-unnamed-")
+        cls.spec, fn = _keepout_gate()
+        cls.fn = staticmethod(fn)
+        cls.board = _build_board(cls.root, "chip", {
+            "layers": 2, "outline": [100, 40],
+            "parts": [{"lib": "RF_Antenna", "name": "Johanson_2450AT18x100", "ref": "AE1",
+                       "value": "2450AT18A100", "at": [75, 12], "nets": {"1": "RF"}}],
+            "areas": [{"name": "", "layers": ["F.Cu", "B.Cu"],
+                       "pts": [[60, 5], [90, 5], [90, 25], [60, 25]]},
+                      {"name": "", "layers": ["F.Cu"],
+                       "pts": [[5, 30], [15, 30], [15, 38], [5, 38]]}],
+            "tracks": [{"layer": "F.Cu", "net": "RF", "pts": [[73.55, 12], [66, 12]]},
+                       {"layer": "B.Cu", "net": "GND", "pts": [[62, 22], [68, 22]]}]})
+        tree = K.load_tree(cls.board)
+        cls.area = next(str(K.value(z, "uuid")) for z in K.children(tree, "zone")
+                        if K.child(z, "keepout") is not None
+                        and float(K.child(K.child(K.child(z, "polygon"), "pts"), "xy")[1]) >= 60)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, True)
+
+    def _run(self, keepout, own_nets=None):
+        rec = {"ref": "AE1", "value": "2450AT18A100", "keepout": keepout,
+               "source": "test: the antenna's datasheet clearance"}
+        if own_nets is not None:
+            rec["own_nets"] = own_nets
+        return gates_mod.run_gate(self.spec, self.fn, _keepout_ctx(self.root, {
+            "pcb_board": self.board, "pcb_antennas": {"chip": rec}}))
+
+    def test_the_area_over_the_part_is_picked_by_cover_or_id(self):
+        for keepout in ({"rule_area": {"covers": "AE1"}}, {"rule_area": {"uuid": self.area}}):
+            with self.subTest(keepout=keepout):
+                v = self._run(keepout)
+                self.assertEqual((v.outcome, v.measured), ("fail", 2), v.render())
+                ev = _keepout_evidence(v)
+                self.assertEqual(sorted(f["item"].split(",")[0] for f in ev["findings"]),
+                                 ["Track [GND] on B.Cu", "Track [RF] on F.Cu"])
+                [judged] = ev["judged"]
+                self.assertEqual(judged["polygons_board_mm"],
+                                 [[[60, 5], [90, 5], [90, 25], [60, 25]]])
+
+    def test_the_antennas_own_net_is_its_own_copper(self):
+        v = self._run({"rule_area": {"covers": "AE1"}}, own_nets=["RF"])
+        self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+        ev = _keepout_evidence(v)
+        self.assertEqual([f["item"].split(",")[0] for f in ev["findings"]],
+                         ["Track [GND] on B.Cu"])
+        self.assertIn("Track [RF] on F.Cu",
+                      [o["item"].split(",")[0] for o in ev["own_items_left_out"]])
+        v = self._run({"rule_area": {"covers": "AE1"}}, own_nets=["GND"])
+        self.assertEqual(v.measured, 2, "a net named whose copper reaches no pad of AE1 "
+                                         "excuses nothing")
+
+
+def _draft_args(root: str, *argv: str):
+    """``(process, records, summary)`` of the record draft run with ``argv``."""
+    out = tempfile.mkdtemp(prefix="draft-", dir=root)
+    proc = _env.run([sys.executable, DRAFTER, *argv], cwd=root,
+                    env={"NOPEKIT_PROPOSAL_DIR": out})
+    names = sorted(os.listdir(out))
+    if not names:
+        return proc, None, None
+    with open(os.path.join(out, names[1]), encoding="utf-8") as fh:
+        records = json.load(fh)
+    with open(os.path.join(out, names[0]), encoding="utf-8") as fh:
+        summary = json.load(fh)
+    return proc, records, summary
+
+
+class ADraftFindsTheCellAPersonWouldName(_PowerCase):
+    """The draft finds a battery's connector by its value or its + and - pins,
+    or as a person names it, and drafts a micro-B's VBUS as a rail. What
+    slipped through (two holdout runs): a J1 valued "Battery" and a holder from
+    a local library were missed, one board drafted nothing, and a micro-B's
+    VBUS went unnamed."""
+
+    def _renamed(self, ref: str, value: str, stem: str) -> str:
+        def edit(tree):
+            fp = _footprint(tree, "BT1")
+            for prop in K.children(fp, "property"):
+                if prop[1] == "Reference":
+                    prop[2] = K.Q(ref)
+            _set_value(tree, ref, value)
+        return self.board(edit, stem=stem)
+
+    def test_a_connector_valued_as_a_battery_is_found(self):
+        board = self._renamed("J9", "Battery", "valued")
+        proc, records, summary = _draft_args(self.root, "--board", os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("j9", records["pcb_batteries"])
+        found = next(c for c in summary["candidates"] if c["record"] == "pcb_batteries.j9")
+        self.assertIn("its value or footprint naming a cell or holder (Battery, "
+                      "Connector_Molex:", found["found_by"])
+        self.assertTrue(any(d.startswith("pcb_batteries.j9: J9 (Battery) was taken for the "
+                                         "cell's connector") for d in summary["keep_or_delete"]))
+
+    def test_a_part_a_person_names_is_drafted_with_its_pads(self):
+        board = self._renamed("J9", "HDR", "named")
+        name = os.path.basename(board)
+        proc, records, summary = _draft_args(self.root, "--board", name)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("j9", records["pcb_batteries"])
+        proc, records, summary = _draft_args(self.root, "--board", name, "--battery", "J9:1,2")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        terminals = records["pcb_batteries"]["j9"]["terminals"]
+        self.assertEqual((terminals["pos"], terminals["neg"]), ("1", "2"))
+        for given, said in (("J8", "--battery J8: no fitted part J8"),
+                            ("J9:1,7", "--battery J9:1,7: J9 has no pad 7"),
+                            ("J9:1", "give REF or REF:POS,NEG")):
+            with self.subTest(given=given):
+                proc, records, _s = _draft_args(self.root, "--board", name, "--battery", given)
+                self.assertEqual((proc.returncode, records), (2, None))
+                self.assertIn(said, proc.stderr)
+
+    def test_a_micro_b_vbus_is_drafted_as_a_rail(self):
+        def micro_b(tree):
+            for number, name in (("1", "VBUS"), ("2", "GND")):
+                K.child(_pad(tree, "J6", number), "pinfunction")[1] = K.Q(name)
+        board = self.board(micro_b, stem="micro_b")
+        proc, records, _summary = _draft_args(self.root, "--board", os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rail = records["pcb_rails"]["j6_vsys"]
+        self.assertEqual((rail["net"], rail["return"]), ("VSYS", "GND"))
+        self.assertTrue(rail["nominal_v"].startswith("FILL: "))
 
 
 if __name__ == "__main__":

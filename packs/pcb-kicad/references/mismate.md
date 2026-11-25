@@ -55,6 +55,7 @@ Each mode is a physical event. The rule enumerates every placement it allows.
 | `{offset: k}` | a's unshrouded header off by up to k positions | shifts of -k..k but 0; `rows: 2` shifts by columns, on KiCad's zigzag numbering only |
 | `{slide: [pins]}` | an audio plug on its way in | a's contacts, the deepest first: each plug contact passes the shallower ones |
 | `{bridges: [[p, q]]}` | a wrong plug that shorts two of a's contacts | p and q joined, beside the nominal map |
+| `cell_reversed` | one loose cell of a holder turned (a battery mating only) | counted as the cell's hazard ("A reversed cell") |
 
 The modes that act on one housing act on `a`. When `b` can be off or slid too,
 state the mating a second time with its ends swapped. `slide` and `bridges`
@@ -133,6 +134,13 @@ backwards, through every diode and body diode on it.
 - **Blocked**: a `reverse_block` in series counts (a diode or an ideal-diode
   FET: on the board, fitted, one path pin on the terminal's net, and no part on
   that net ahead of it that its `ahead` list does not name with why). No hazard.
+  A block behind series parts (the cell holder, then an on/off switch, then a
+  Schottky diode) names them in `through`, in order from the terminal: `[{ref,
+  value, path: [p, q], why}]`, each held to the copper, its `p` on the net
+  before it and its `q` on the next, and the block's path pin on the chain's
+  last net. A part in the chain passes the reversed cell on and is never
+  credited with blocking it; any other part on a net of the chain sees the
+  reversed cell first, and is refused until `ahead` names it with why.
 - **Limited**: a fuse or PTC at the terminal, with nothing ahead of it, opens on
   the reversed current. A protected hazard, named.
 - **Open**: anything else. A raw hazard.
@@ -140,6 +148,16 @@ backwards, through every diode and body diode on it.
 An element in the pack is neither: it sits before the pigtail that reverses.
 Protector FETs do not count (their controller runs from the cell, now
 backwards). An eFuse that blocks reverse current is stated as a `reverse_block`.
+
+**One loose cell turned.** A holder of loose cells, two or more in series, can
+take one of them the wrong way round. The mode is `cell_reversed`, on a battery
+mating only. The board then sees the string the right way round, at two cells'
+voltage fewer (none, for two cells), so nothing on the board is driven
+backwards; the turned cell is, by the others (IEC 60086-5, the incorrect
+installation of a primary cell). No element on a board blocks that, so the rule
+counts it as a raw hazard and says so: a holder that keys each cell is the
+remedy, and a record for such a holder states the mode no more. A one-cell
+battery is refused: `reversed` turns it whole.
 
 ## The baseline, worked
 
