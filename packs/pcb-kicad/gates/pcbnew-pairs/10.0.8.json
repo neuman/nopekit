@@ -1,0 +1,10 @@
+{
+  "release": "10.0.8",
+  "kicad_cli": [],
+  "measured": "2026-11-25",
+  "on": "the kicad/kicad:10.0 container image: its python3 (3.13) imports pcbnew 10.0.8, beside the image's own kicad-cli 10.0.8, the project mounted at its own path",
+  "shown": [
+    "beside kicad-cli 10.0.8: the chip antenna's board of TheKeepoutPicksAnUnnamedArea (made with pcbnew 9.0.9) read pass at 0, where kicad-cli 9.0.9 beside pcbnew 9.0.9 reads fail at 2: kicad-cli 10.0.8 writes \"Items not allowed\" for a track in the added area, naming no area, on the stored copy as on the refilled one",
+    "kicad-cli 10.0.8 names the area for a pad, a via and a zone fill (the radio board's tests through the wrapper)"
+  ]
+}

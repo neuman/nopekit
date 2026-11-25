@@ -13,9 +13,17 @@ Skipped, never passed.
 KiCad 10 is the current release. Check: `kicad-cli version` prints `10.0.x` (or
 `9.0.x`). The gates were measured on 9.0.9 and 10.0.8 (`gates/kicad-cli/`): each
 verdict names the release that ran, and a release the pack has no record of
-still runs, and says so. A kicad-cli reads the files of its own release and older
-ones: kicad-cli 9 skips a board or schematic KiCad 10 saved, naming the release,
-so a KiCad 10 design needs KiCad 10's kicad-cli.
+still runs, and says so. `pcb.antenna_keepout` is the exception. It runs only on
+a pair of kicad-cli and pcbnew releases it was measured on, and today that is
+kicad-cli 9.0.9 with pcbnew 9.0.9 ("The pair", below). Under any other pair it
+skips: a KiCad 10 install, the image's wrapper and a KiCad 9 patch release other
+than 9.0.9 included. There, `nopekit pack validate pcb-kicad` and
+`nopekit gate selftest --pack pcb-kicad` read the keep-out unqualified and exit
+1 (measured through the wrapper: the other 17 gates qualify). For every gate to
+qualify, install KiCad 9.0.9, with kicad-cli and pcbnew from the same install. A
+kicad-cli reads the files of its own release and older ones: kicad-cli 9 skips a
+board or schematic KiCad 10 saved, naming the release, so a KiCad 10 design
+needs KiCad 10's kicad-cli.
 
 | Platform | How |
 |---|---|
@@ -40,7 +48,11 @@ system temporary directory if the project's out directory is under it):
 
 Check: the wrapper's `kicad-cli version --format plain` prints `10.0.8` or later.
 A container start costs about 0.9 s a run. `pcb.antenna_keepout`'s refill needs
-`pcbnew` in nopekit's own Python (below), which a wrapper does not give.
+`pcbnew` in nopekit's own Python (below), which a wrapper does not give, and the
+keep-out runs only on a pair of releases it was measured on: the wrapper's
+kicad-cli 10 beside the host's pcbnew is not one, and it skips (below, "The
+pair"). A folder `pcb_model_dirs` names (below) is read by kicad-cli by its
+absolute path: mount it too.
 
 The full KiCad install is about 1-2 GB with its libraries. The libraries matter for
 `pcb.pin_names` only at design time: the names are copied onto the board, and the
@@ -85,10 +97,17 @@ variable of the KiCad its library came from: `${KICAD6_3DMODEL_DIR}`,
 `${KICAD6_3DMODEL_DIR}/...wrl`). kicad-cli takes the value from the environment or
 from KiCad's own configuration, and a host where KiCad was never opened has no
 configuration: there the model is not found, and kicad-cli leaves the part out of
-the export. So set, in the environment nopekit runs in, each variable your boards'
-footprints name, to the 3D library's directory (`/usr/share/kicad/3dmodels` from
-the Debian and Ubuntu package), for example
-`export KICAD6_3DMODEL_DIR=/usr/share/kicad/3dmodels`. Keep the file the footprint
+the export. The gate itself reads no environment variable: it looks for KiCad's
+own variables where KiCad's installers put the library
+(`/usr/share/kicad/3dmodels` from the Debian and Ubuntu package, the macOS
+bundle's, the Windows installer's). Where the library is anywhere else, or where
+kicad-cli has no configuration to find it by, state the folder in the project, for
+each variable your boards' footprints name:
+`"pcb_model_dirs": {"KICAD6_3DMODEL_DIR": "/opt/kicad/3dmodels"}` (from the
+project root, or absolute). The gate then looks for that variable's models there
+alone, and the staged board names the folder in the variable's place, so
+kicad-cli reads the same file whatever its own environment says. The value is
+part of the verdict's key, as every parameter is. Keep the file the footprint
 names and its `.step` beside it: the export reads the STEP of the same name in
 place of a `.wrl` (`--subst-models`), and in the holdout run a part whose named
 `.wrl` was missing was left out though its `.step` was there (reported there, not
@@ -108,6 +127,15 @@ yet run on a KiCad 10 board under pcbnew 10, so for now it skips a KiCad 10
 board under any `pcbnew`, saying "this gate was checked through board format
 20241229 (KiCad 9.0)" (PACK.md, "A KiCad 10 board in the fit and the keep-out").
 `pcb.enclosure_fit` skips one too, for its STEP export.
+
+**The pair.** The keep-out runs only where the kicad-cli on PATH and the pcbnew
+this Python imports are a pair it was measured on (`gates/pcbnew-pairs/`):
+today kicad-cli 9.0.9 with pcbnew 9.0.9. Any other pair skips, naming both releases.
+kicad-cli 10.0.8 names no keep-out area for a track ("Items not allowed"), and the
+gate ties each finding to its part by that name: beside pcbnew 9.0.9, and beside
+pcbnew 10.0.8 in the image, it read pass on a board with two tracks in the
+keep-out (measured). So the image's kicad-cli wrapper beside the host's pcbnew 9
+skips the keep-out, and so does a KiCad 10 install.
 
 | Platform | How |
 |---|---|

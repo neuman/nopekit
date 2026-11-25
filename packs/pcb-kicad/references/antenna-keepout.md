@@ -161,8 +161,24 @@ polygon onto the board. Registration only: a land is judged by function in
 
 ## How KiCad judges it
 
-For each board with a keep-out to judge, on a copy staged under the gate's out
-directory:
+First, once, before any board is staged, **the pair**: the gate asks `kicad-cli
+version --format plain` and the refill's child (`_keepout_fill.py --version`)
+which releases they are, and runs only on a pair a record in
+`gates/pcbnew-pairs/<release>.json` names: kicad-cli 9.0.9 with pcbnew 9.0.9.
+Any other pair skips, naming both releases and the pairs measured. Each release is asked
+for by its record's path, found or not, so the verdict's key holds both. (What
+slipped through, in the merge of the holdout fixes: kicad-cli 10.0.8 writes
+"Items not allowed" for a track in the added area and names no area, where 9.0.9
+writes "Items not allowed (keepout area 'nopekit_antenna_AE1')"; it names the
+area for a pad, a via and a zone fill. Beside pcbnew 9.0.9, and beside pcbnew
+10.0.8 in the kicad/kicad:10.0 image, a chip antenna's keep-out with a GND track
+and an RF track in it read pass at 0, where the 9.0.9 pair reads fail at 2. The
+stored copy, which pcbnew never touches, read the same: the cause is kicad-cli's
+words. The selftest read qualified under 10.0.8: its control is a zone fill.)
+An exact pair, not a series: a patch release can move the words.
+
+Then, for each board with a keep-out to judge, on a copy staged under the gate's
+out directory:
 
 1. **The refill.** `gates/_keepout_fill.py`, in a child process under nopekit's
    own Python, loads the staged board with its project and custom rules beside
@@ -185,7 +201,9 @@ directory:
    with the report is an error.
 4. **The count.** Each `items_not_allowed` item that names one of the gate's
    areas, once over both copies (by its id and its words), with which copy found
-   it. An item of the area's own part ("Pad 1 [GND] of U1") is its own copper,
+   it. An `items_not_allowed` item that names none of them is an error, never
+   passed over: the copy holds no other keep-out, so it lies in one of the gate's
+   areas, and the gate cannot say whose. An item of the area's own part ("Pad 1 [GND] of U1") is its own copper,
    listed and never counted. So is a hole with no copper: the added area forbids
    pads, so KiCad reports another part's non-plated hole ("NPTH pad of H1"), and
    the refill's child asks KiCad which of the board's non-plated pads it flashes
@@ -200,7 +218,8 @@ directory:
 
 The verdict is that count against 0. A fail counts beside a part not judged;
 a part not judged beside no fail is a skip. A refill or DRC past
-`pcb_drc_timeout_s` is a skip; a refill that crashes is an error.
+`pcb_drc_timeout_s` is a skip; a refill that crashes is an error, and so is a
+pcbnew that cannot be imported to name its release.
 
 ## What it cannot see
 
@@ -224,3 +243,7 @@ a part not judged beside no fail is a skip. A refill or DRC past
   it is read as the antenna's. Give a record.
 - A board newer than the reader (KiCad 10): skipped, in the guard's own words,
   as the power rules skip it.
+- Any board under a pair of releases it was not measured on (kicad-cli 10.0.8
+  among them, beside any pcbnew): skipped, naming both. The move: run every
+  keep-out test on the pair, tie a finding kicad-cli names no area for to its
+  part, and add the pair to its pcbnew record.

@@ -4836,6 +4836,50 @@ KEEPOUT_SKIP = ("needs kicad-cli and pcbnew: the gate refills the board's zones 
                 "pcbnew and judges each copy with kicad-cli")
 PCBNEW_SKIP = "needs pcbnew: the test board is built with KiCad's own placement"
 
+#: The gate's own answer, asked once: "" when the kicad-cli on PATH and the
+#: pcbnew this Python imports are a pair pcb.antenna_keepout was measured on,
+#: or when the gate errors on asking; else its skip reason (``_keepout_pair``).
+_PAIR: dict[str, str] = {}
+
+
+def _pair_skip(refused) -> str:
+    """The skip reason of a class that judges a board with KiCad's own tools,
+    from ``_keepout_pair``'s answer: its skip alone, for a pair the gate was not
+    measured on. An error is no reason to skip: the class runs, and goes red on
+    the gate's error as it did before the pair was asked. (What slipped through,
+    in review of general-packs R1: every answer but None read as a skip, so a
+    pcbnew that could not be imported, or a pair record not of its shape, skipped
+    the five classes where they had failed.)"""
+    if refused is None or refused.outcome != "skipped":
+        return ""
+    return (f"needs kicad-cli and pcbnew of a pair the gate was measured on, where it "
+            f"judges a board: {refused.skip_reason}")
+
+
+def _unmeasured_pair() -> str:
+    if "why" not in _PAIR:
+        spec, fn = _keepout_gate()
+        root = tempfile.mkdtemp(prefix="nopekit-keepout-pair-")
+        try:
+            refused = fn.__globals__["_keepout_pair"](_keepout_ctx(root, {}), spec.id)
+        finally:
+            shutil.rmtree(root, True)
+        _PAIR["why"] = _pair_skip(refused)
+    return _PAIR["why"]
+
+
+def _keepout_tools_skip(*, footprints: bool = False) -> str:
+    """Why a class that runs pcb.antenna_keepout with KiCad's own tools cannot
+    run here, or "". Under a pair of releases the gate was not measured on it
+    skips every board, by design (TheKeepoutRunsOnlyOnAMeasuredPair holds that),
+    so a class that waits for its pass or its fail cannot be shown there. (What
+    slipped through, in the merge of general-packs H1 and H2: through the
+    kicad/kicad:10.0 wrapper, beside pcbnew 9.0.9, TheKeepoutPicksAnUnnamedArea
+    read a pass where it waited for a fail at 2, and the gate passed.)"""
+    if not KEEPOUT_TOOLS or (footprints and FOOTPRINTS is None):
+        return KEEPOUT_SKIP
+    return _unmeasured_pair()
+
 #: KiCad 9.0.9's ESP32-S3-WROOM-1 keep-out, in its library frame (y down):
 #: ``RF_Module.pretty/ESP32-S3-WROOM-1.kicad_mod``'s rule area, as the library
 #: writes it. A test reads the library itself where it is installed.
@@ -5026,8 +5070,9 @@ class TheKeepoutIsJudgedOnEveryLayer(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        if not KEEPOUT_TOOLS:
-            raise unittest.SkipTest(KEEPOUT_SKIP)
+        why = _keepout_tools_skip()
+        if why:
+            raise unittest.SkipTest(why)
         cls.root = tempfile.mkdtemp(prefix="nopekit-keepout-")
         cls.spec, fn = _keepout_gate()
         cls.fn = staticmethod(fn)
@@ -5351,8 +5396,9 @@ class EachRadioIsReadByItsOwnKeepout(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        if not KEEPOUT_TOOLS or FOOTPRINTS is None:
-            raise unittest.SkipTest(KEEPOUT_SKIP)
+        why = _keepout_tools_skip(footprints=True)
+        if why:
+            raise unittest.SkipTest(why)
         cls.root = tempfile.mkdtemp(prefix="nopekit-keepout-radios-")
         cls.spec, fn = _keepout_gate()
         cls.fn = staticmethod(fn)
@@ -5458,8 +5504,9 @@ class ACutoutInAKeepoutStaysACutout(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        if not KEEPOUT_TOOLS or FOOTPRINTS is None:
-            raise unittest.SkipTest(KEEPOUT_SKIP)
+        why = _keepout_tools_skip(footprints=True)
+        if why:
+            raise unittest.SkipTest(why)
         cls.root = tempfile.mkdtemp(prefix="nopekit-keepout-cutout-")
         cls.spec, fn = _keepout_gate()
         cls.fn = staticmethod(fn)
@@ -5517,8 +5564,9 @@ class AHoleWithNoCopperIsListedNotCounted(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        if not KEEPOUT_TOOLS or FOOTPRINTS is None:
-            raise unittest.SkipTest(KEEPOUT_SKIP)
+        why = _keepout_tools_skip(footprints=True)
+        if why:
+            raise unittest.SkipTest(why)
         cls.root = tempfile.mkdtemp(prefix="nopekit-keepout-holes-")
         cls.spec, fn = _keepout_gate()
         cls.fn = staticmethod(fn)
@@ -5638,7 +5686,9 @@ class AFindingIsTiedToItsAreaAndItsPart(unittest.TestCase):
 
 class TheKeepoutsToolsAreHeldToTheirWord(unittest.TestCase):
     """A refill that crashes, and a DRC whose exit code and report disagree,
-    are errors. Stand-ins, so no KiCad is needed."""
+    are errors. Stand-ins, so no KiCad is needed. Each stand-in names its release
+    as kicad-cli 9.0.9 and pcbnew 9.0.9 do, a pair the gate was measured on: the
+    gate asks both before it stages a board (TheKeepoutRunsOnlyOnAMeasuredPair)."""
 
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="nopekit-keepout-tools-")
@@ -5652,18 +5702,31 @@ class TheKeepoutsToolsAreHeldToTheirWord(unittest.TestCase):
         return path
 
     def test_a_crash_in_the_refill_is_an_error(self):
-        crash = self.helper("import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n")
-        with mock.patch.dict(self.fn.__globals__, {"KEEPOUT_FILL_HELPER": crash}):
+        crash = self.helper("import os, signal, sys\n"
+                            "if sys.argv[1:] == ['--version']:\n"
+                            "    print('9.0.9'); sys.exit(0)\n"
+                            "os.kill(os.getpid(), signal.SIGSEGV)\n")
+        bin_dir = os.path.join(self.root, "bin")
+        os.makedirs(bin_dir)
+        _stand_in(bin_dir, "kicad-cli", "print('9.0.9')\n")
+        with mock.patch.dict(self.fn.__globals__, {"KEEPOUT_FILL_HELPER": crash}), \
+                mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}):
             v = self.fn(_keepout_ctx(self.root, _radio_record(RADIO_BOARD)))
         self.assertIn("the zone refill (KiCad's pcbnew, in a child) failed (exit -11)", v.error)
 
     def test_an_exit_code_that_disagrees_with_its_report_is_an_error(self):
-        copy = self.helper("import json, shutil, sys\nshutil.copyfile(sys.argv[1], sys.argv[2])\n"
+        copy = self.helper("import json, shutil, sys\n"
+                           "if sys.argv[1:] == ['--version']:\n"
+                           "    print('9.0.9'); sys.exit(0)\n"
+                           "shutil.copyfile(sys.argv[1], sys.argv[2])\n"
                            "print(json.dumps({'zones': 4, 'filled': True}))\n")
         bin_dir = os.path.join(self.root, "bin")
         os.makedirs(bin_dir)
         _stand_in(bin_dir, "kicad-cli",
-                  "import json, sys\nout = sys.argv[sys.argv.index('-o') + 1]\n"
+                  "import json, sys\n"
+                  "if sys.argv[1:2] == ['version']:\n"
+                  "    print('9.0.9'); sys.exit(0)\n"
+                  "out = sys.argv[sys.argv.index('-o') + 1]\n"
                   "json.dump({'violations': [{'type': 'items_not_allowed', 'description': "
                   "\"Items not allowed (keepout area 'nopekit_antenna_U1')\", 'items': "
                   "[{'description': 'Track [GND] on In2.Cu', 'uuid': 'x'}]}]}, open(out, 'w'))\n"
@@ -7890,8 +7953,9 @@ class TheKeepoutPicksAnUnnamedArea(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        if not KEEPOUT_TOOLS or FOOTPRINTS is None:
-            raise unittest.SkipTest(KEEPOUT_SKIP)
+        why = _keepout_tools_skip(footprints=True)
+        if why:
+            raise unittest.SkipTest(why)
         cls.root = tempfile.mkdtemp(prefix="nopekit-keepout-unnamed-")
         cls.spec, fn = _keepout_gate()
         cls.fn = staticmethod(fn)
@@ -8017,6 +8081,453 @@ class ADraftFindsTheCellAPersonWouldName(_PowerCase):
         rail = records["pcb_rails"]["j6_vsys"]
         self.assertEqual((rail["net"], rail["return"]), ("VSYS", "GND"))
         self.assertTrue(rail["nominal_v"].startswith("FILL: "))
+
+
+
+# --------------------------------------------------------------------------- #
+# general-packs R1: the keep-out runs only on a pair of releases it was
+# measured on, and the fit reads a model folder the project states
+# --------------------------------------------------------------------------- #
+PAIRS = os.path.join(PACK, "gates", "pcbnew-pairs")
+
+#: An item kicad-cli finds in one of the keep-out gate's areas, in the words of
+#: each release (measured on the staged copies of TheKeepoutPicksAnUnnamedArea's
+#: board): kicad-cli 9.0.9 names the area; 10.0.8 names none for a track.
+NAMED_WORDS = "Items not allowed (keepout area 'nopekit_antenna_U1')"
+UNNAMED_WORDS = "Items not allowed"
+
+
+def _keepout_report(release: str, words: str) -> dict:
+    """A DRC report with one GND track in U1's added area, as ``release`` wrote it."""
+    return {"$schema": "https://schemas.kicad.org/drc.v1.json", "coordinate_units": "mm",
+            "kicad_version": release, "source": "radio_board.kicad_pcb",
+            "violations": [{"type": "items_not_allowed", "severity": "error",
+                            "description": words,
+                            "items": [{"description": "Track [GND] on In2.Cu, length 4.0000 mm",
+                                       "pos": {"x": 1.0, "y": 10.0},
+                                       "uuid": "11111111-2222-4333-8444-555555555555"}]}],
+            "unconnected_items": [], "schematic_parity": []}
+
+
+@unittest.skipIf(os.name == "nt", "the stand-in kicad-cli is a #! script")
+class TheKeepoutRunsOnlyOnAMeasuredPair(unittest.TestCase):
+    """pcb.antenna_keepout asks the kicad-cli on PATH and the pcbnew its refill
+    imports which releases they are, before it stages a board, and runs only on
+    a pair a record in ``gates/pcbnew-pairs/`` names: kicad-cli 9.0.9 with pcbnew
+    9.0.9. Any other pair skips, naming both. An item not allowed in a keep-out
+    that names none of the gate's areas is an error, never passed over.
+
+    What slipped through, in the merge of general-packs H1 and H2: through the
+    kicad/kicad:10.0 wrapper (kicad-cli 10.0.8) beside the host's pcbnew 9.0.9,
+    TheKeepoutPicksAnUnnamedArea read pass at 0 where kicad-cli 9.0.9 reads fail
+    at 2. kicad-cli 10.0.8 writes "Items not allowed" for a track in the added
+    area and names no area, and the gate passed over every item whose words name
+    none of its areas. The stand-ins below write those words; the last test runs
+    the image itself."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-keepout-pair-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.spec, self.fn = _keepout_gate()
+        self.bin = os.path.join(self.root, "bin")
+        os.makedirs(self.bin)
+        self.calls = os.path.join(self.root, "calls.log")
+
+    def tools(self, cli: str, pcbnew: str, report: dict | None = None):
+        """A stand-in kicad-cli of release ``cli`` that writes ``report`` for a
+        DRC and logs every call, and a stand-in refill of pcbnew ``pcbnew`` that
+        copies the board; the patches that put both in place."""
+        path = os.path.join(self.root, "report.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(report or _keepout_report(cli, NAMED_WORDS), fh)
+        _stand_in(self.bin, "kicad-cli",
+                  "import shutil, sys\n"
+                  f"open({self.calls!r}, 'a').write(' '.join(a for a in sys.argv[1:3] "
+                  "if not a.startswith('-')) + '\\n')\n"
+                  "if sys.argv[1:2] == ['version']:\n"
+                  f"    print({cli!r}); sys.exit(0)\n"
+                  f"shutil.copyfile({path!r}, sys.argv[sys.argv.index('-o') + 1])\n"
+                  "sys.exit(5)\n")
+        helper = os.path.join(self.root, "fill.py")
+        with open(helper, "w", encoding="utf-8") as fh:
+            fh.write("import json, shutil, sys\n"
+                     "if sys.argv[1:] == ['--version']:\n"
+                     f"    print({pcbnew!r}); sys.exit(0)\n"
+                     "shutil.copyfile(sys.argv[1], sys.argv[2])\n"
+                     "print(json.dumps({'zones': 1, 'filled': True, 'bare_holes': []}))\n")
+        return (mock.patch.dict(self.fn.__globals__, {"KEEPOUT_FILL_HELPER": helper}),
+                mock.patch.dict(os.environ,
+                                {"PATH": self.bin + os.pathsep + os.environ["PATH"]}))
+
+    def run_with(self, cli: str, pcbnew: str, report: dict | None = None):
+        helper, path = self.tools(cli, pcbnew, report)
+        with helper, path:
+            return self.fn(_keepout_ctx(self.root, _radio_record(RADIO_BOARD)))
+
+    def asked(self) -> list[str]:
+        if not os.path.isfile(self.calls):
+            return []
+        with open(self.calls, encoding="utf-8") as fh:
+            return fh.read().split()
+
+    def test_a_pair_never_measured_skips_naming_both(self):
+        """kicad-cli 10.0.8's own words, beside pcbnew 9.0.9: the mix the merge
+        ran. Before the pair was asked, this read pass at 0. Every other pair no
+        record names skips too, and no DRC runs under it."""
+        for cli, pcbnew in (("10.0.8", "9.0.9"), ("10.0.8", "10.0.8"), ("9.0.9", "10.0.8"),
+                            ("9.0.10", "9.0.9"), ("9.0.9", "9.0.10")):
+            with self.subTest(cli=cli, pcbnew=pcbnew):
+                if os.path.exists(self.calls):
+                    os.remove(self.calls)
+                v = self.run_with(cli, pcbnew, _keepout_report(cli, UNNAMED_WORDS))
+                self.assertEqual(v.outcome, "skipped", v.render())
+                self.assertEqual(
+                    v.skip_reason,
+                    f"kicad-cli {cli} beside pcbnew {pcbnew}: not a pair this gate was "
+                    f"measured on (kicad-cli 9.0.9 with pcbnew 9.0.9; gates/pcbnew-pairs/)")
+                self.assertEqual(self.asked(), ["version"], "nothing but the release is asked")
+
+    def test_a_measured_pair_judges_the_board(self):
+        v = self.run_with("9.0.9", "9.0.9")
+        self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+        self.assertIn("Track [GND] on In2.Cu", v.detail)
+        self.assertEqual(self.asked(), ["version", "pcb", "drc", "pcb", "drc"])
+
+    def test_an_item_no_area_names_is_an_error_under_a_measured_pair(self):
+        """kicad-cli 10.0.8's words from a release the pair admits: the staged
+        copy holds no keep-out but the gate's own, so the item is in one of them,
+        and the gate cannot say whose. Before this, it read pass at 0."""
+        v = self.run_with("9.0.9", "9.0.9", _keepout_report("9.0.9", UNNAMED_WORDS))
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertTrue(v.error.startswith(
+            "kicad-cli 9.0.9 named no keep-out area for 1 item(s) not allowed ('Track [GND] "
+            "on In2.Cu, length 4.0000 mm', the stored copy)"), v.error)
+        self.assertLessEqual(len(v.error), 200, v.error)
+        read = self.fn.__globals__["_antenna_untied"]
+        report = _keepout_report("9.0.9", "Items not allowed (keepout area 'theirs')")
+        self.assertEqual(read(report, {"nopekit_antenna_U1": "U1"}),
+                         ["Track [GND] on In2.Cu, length 4.0000 mm"])
+        self.assertEqual(read(_keepout_report("9.0.9", NAMED_WORDS),
+                              {"nopekit_antenna_U1": "U1"}), [])
+
+    def test_a_pcbnew_that_cannot_be_imported_is_an_error(self):
+        helper, path = self.tools("9.0.9", "9.0.9")
+        broken = os.path.join(self.root, "broken.py")
+        with open(broken, "w", encoding="utf-8") as fh:
+            fh.write("raise ImportError('libkicad_3dsg.so.2.0.0: cannot open shared object')\n")
+        with helper, path, mock.patch.dict(self.fn.__globals__, {"KEEPOUT_FILL_HELPER": broken}):
+            v = self.fn(_keepout_ctx(self.root, _radio_record(RADIO_BOARD)))
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("pcbnew could not name its release (_keepout_fill.py --version exited 1)",
+                      v.error)
+
+    def test_no_tool_runs_before_a_board_is_to_be_judged(self):
+        """A board with no radio module skips in its own words, and a record's
+        error stays an error: neither asks a release."""
+        helper, path = self.tools("10.0.8", "9.0.9")
+        with helper, path:
+            v = self.fn(_keepout_ctx(self.root, {"pcb_board": BOARD}))
+            self.assertEqual(v.outcome, "skipped", v.render())
+            self.assertIn("no radio module on esd_guard.kicad_pcb", v.skip_reason)
+            v = self.fn(_keepout_ctx(self.root, _radio_record(RADIO_BOARD, ref="U9")))
+            self.assertEqual(v.outcome, "error", v.render())
+        self.assertEqual(self.asked(), [])
+
+    def test_both_releases_are_keyed(self):
+        """Each release is asked for by its record's path, found or not, so a
+        control under another pcbnew is another control entry."""
+        from nopekit import verdicts
+        registry = _registry()
+
+        def reads(cli: str, pcbnew: str):
+            helper, path = self.tools(cli, pcbnew)
+            trace = verdicts.GateTrace()
+            ctx = _keepout_ctx(self.root, _radio_record(RADIO_BOARD))
+            with helper, path, mock.patch.object(gates_mod, "availability",
+                                                 return_value=(True, "")):
+                gates_mod.run_gate(self.spec, self.fn, ctx, trace=trace)
+            anchors = verdicts.anchors_for(self.root, registry, out_dir=ctx.out_dir)
+            return verdicts.Reads.from_trace(trace, anchors=anchors)
+
+        measured, other = reads("9.0.9", "9.0.9"), reads("9.0.9", "9.0.10")
+        self.assertIn("<pack:pcb-kicad>/gates/pcbnew-pairs/9.0.9.json", measured.files)
+        self.assertIn("<pack:pcb-kicad>/gates/kicad-cli/9.0.9.json", measured.files)
+        self.assertIsNone(other.files.get("<pack:pcb-kicad>/gates/pcbnew-pairs/9.0.10.json",
+                                          "x"))
+        self.assertNotEqual(verdicts.rho_control(self.spec.id, "static", measured),
+                            verdicts.rho_control(self.spec.id, "static", other))
+
+    def test_each_pair_record_names_releases_this_pack_measured(self):
+        names = sorted(n for n in os.listdir(PAIRS) if n.endswith(".json"))
+        self.assertEqual(names, ["10.0.8.json", "9.0.9.json"])
+        pairs = []
+        for name in names:
+            with open(os.path.join(PAIRS, name), encoding="utf-8") as fh:
+                record = json.load(fh)
+            self.assertEqual(sorted(record), sorted(["release", "kicad_cli", "measured", "on",
+                                                     "shown"]))
+            self.assertEqual(record["release"] + ".json", name)
+            for cli in record["kicad_cli"]:
+                self.assertTrue(os.path.isfile(os.path.join(RELEASES, cli + ".json")),
+                                f"{name} pairs kicad-cli {cli}, which has no record")
+                pairs.append((cli, record["release"]))
+        self.assertEqual(pairs, [("9.0.9", "9.0.9")])
+
+    def test_a_record_not_of_its_shape_is_an_error(self):
+        bad = os.path.join(self.root, "pairs")
+        os.makedirs(bad)
+        with open(os.path.join(bad, "9.0.9.json"), "w", encoding="utf-8") as fh:
+            json.dump({"release": "9.0.9", "kicad_cli": "9.0.9", "measured": "", "on": "",
+                       "shown": []}, fh)
+        helper, path = self.tools("9.0.9", "9.0.9")
+        with helper, path, mock.patch.dict(self.fn.__globals__, {"PCBNEW_DIR": bad}):
+            v = self.fn(_keepout_ctx(self.root, _radio_record(RADIO_BOARD)))
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("gates/pcbnew-pairs/9.0.9.json is not a pair record", v.error)
+
+    def test_a_missing_pcbnew_reads_as_missing(self):
+        """The refill's child, with no pcbnew on its path, says no pcbnew is
+        there. (What slipped through, in review of general-packs R1: the pair
+        records' folder was ``gates/pcbnew/``. Run as a script, the child has
+        ``gates/`` first on its path, and ``import pcbnew`` loaded the folder as a
+        namespace package: "module 'pcbnew' has no attribute 'Version'".) Run with
+        ``-E -s -S``, so no site folder gives a pcbnew; not ``-I``, which keeps the
+        script's folder off the path and would hide the fault. The second run puts
+        a folder named ``pcbnew`` beside a copy of the child: its guard keeps its
+        own folder off its path."""
+        helper = self.fn.__globals__["KEEPOUT_FILL_HELPER"]
+        beside = os.path.join(self.root, "gates")
+        os.makedirs(os.path.join(beside, "pcbnew"))
+        shutil.copy(helper, beside)
+        for script in (helper, os.path.join(beside, os.path.basename(helper))):
+            with self.subTest(script=script):
+                proc = _env.run([sys.executable, "-E", "-s", "-S", script, "--version"],
+                                cwd=self.root)
+                if proc.returncode == 0:
+                    self.skipTest(f"this Python imports pcbnew {proc.stdout.strip()} with no "
+                                  f"site folder: no missing pcbnew to show")
+                self.assertIn("No module named 'pcbnew'", proc.stderr)
+                self.assertNotIn("has no attribute", proc.stderr)
+
+    def test_the_classes_that_judge_a_board_skip_only_on_an_unmeasured_pair(self):
+        """The five classes that judge a board with KiCad's own tools skip on the
+        gate's skip for an unmeasured pair, and on nothing else it answers: a
+        pcbnew that cannot be imported is the gate's error, and the classes go
+        red on it, as they did before the pair was asked. (What slipped through,
+        in review of general-packs R1: every answer but None read as a skip.)"""
+        from nopekit.models import Verdict
+        gid = self.spec.id
+        self.assertEqual(_pair_skip(None), "")
+        broken = Verdict(gate=gid, passed=False,
+                         error="pcbnew could not name its release (_keepout_fill.py "
+                               "--version exited 1): ImportError")
+        self.assertEqual(broken.outcome, "error")
+        self.assertEqual(_pair_skip(broken), "")
+        refused = self.fn.__globals__["_skip"](
+            gid, "kicad-cli 10.0.8 beside pcbnew 9.0.9: not a pair this gate was measured on")
+        self.assertEqual(
+            _pair_skip(refused),
+            "needs kicad-cli and pcbnew of a pair the gate was measured on, where it judges "
+            "a board: kicad-cli 10.0.8 beside pcbnew 9.0.9: not a pair this gate was "
+            "measured on")
+
+    def test_kicad_cli_10_in_its_image_beside_the_hosts_pcbnew_skips(self):
+        """The mix itself: the kicad/kicad:10.0 image's kicad-cli through a
+        wrapper, as installing.md gives it, beside the pcbnew this Python
+        imports, on the radio board with a GND track on In2.Cu under the
+        antenna. Before the pair was asked it read pass at 0 (kicad-cli 10.0.8
+        names no area for the track)."""
+        if shutil.which("docker") is None:
+            self.skipTest("needs docker and the kicad/kicad:10.0 image: the mix is "
+                          "kicad-cli 10.0.8 in the image beside this host's pcbnew")
+        if _env.run(["docker", "image", "inspect", "kicad/kicad:10.0"], cwd=self.root,
+                    timeout=60).returncode != 0:
+            self.skipTest("needs the kicad/kicad:10.0 image (docker pull kicad/kicad:10.0)")
+        if importlib.util.find_spec("pcbnew") is None:
+            self.skipTest("needs pcbnew in this Python: the mix is the image's kicad-cli "
+                          "beside it")
+        helper = self.fn.__globals__["KEEPOUT_FILL_HELPER"]
+        pcbnew = _env.run([sys.executable, helper, "--version"], cwd=self.root).stdout.strip()
+        if pcbnew.startswith("10.0.8"):
+            self.skipTest(f"this Python's pcbnew is {pcbnew}, the image's own release: no mix")
+        tmp = os.path.realpath(tempfile.gettempdir())
+        _stand_in(self.bin, "kicad-cli",
+                  "import os, sys\n"
+                  "os.execvp('docker', ['docker', 'run', '--rm', '--user', "
+                  "f'{os.getuid()}:{os.getgid()}', "
+                  f"'-v', {tmp + ':' + tmp!r}, '-w', {tmp!r}, 'kicad/kicad:10.0', "
+                  "'kicad-cli', *sys.argv[1:]])\n")
+        board = _radio_copy(self.root, _track("In2.Cu", (1.0, 10.0), (5.0, 10.0)))
+        with mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ["PATH"]}):
+            v = gates_mod.run_gate(self.spec, self.fn,
+                                   _keepout_ctx(self.root, _radio_record(board)))
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertTrue(v.skip_reason.startswith(
+            f"kicad-cli 10.0.8 beside pcbnew {_release(pcbnew)}: not a pair this gate was "
+            f"measured on (kicad-cli 9.0.9 with pcbnew 9.0.9"), v.skip_reason)
+
+
+def _release(text: str) -> str:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    return ".".join(match.groups()) if match else ""
+
+
+def _model_tree(*paths: str) -> list:
+    """A board tree with one footprint whose models are ``paths``."""
+    return K.parse("(kicad_pcb (version 20241229) (footprint \"R:R\" "
+                   + " ".join(f'(model "{p}")' for p in paths) + "))")
+
+
+class TheFitReadsTheModelFolderTheProjectStates(unittest.TestCase):
+    """``pcb_model_dirs`` names the folder a 3D model path variable stands for.
+    A model naming the variable is looked for there alone, the staged board names
+    the folder in its place, and the gate reads it through its context, so it is
+    in the key. No environment variable is read. Without KiCad.
+
+    What slipped through, in the merge of general-packs H2 after H3: the merge
+    made ``_model_file`` read no environment variable (test_doctor's zero
+    bundled reads), so a host whose ``KICAD9_3DMODEL_DIR`` points at a folder of
+    its own got a declared height where kicad-cli would find the model, and
+    nothing the project could state moved it."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-fit-dirs-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.spec, self.fn = _registry().get("pcb.enclosure_fit")
+        self.g = self.fn.__globals__
+        self.empty = os.path.join(self.root, "empty")
+        os.makedirs(self.empty)
+
+    def test_a_named_variable_is_found_in_its_folder_alone(self):
+        model_file = self.g["_model_file"]
+        step = os.path.join(ASSETS, "3d", "SOT-23-6.step")
+        with mock.patch.dict(self.g, {"STOCK_MODEL_DIRS": (self.empty,)}), \
+                mock.patch.dict(os.environ, {"KICAD9_3DMODEL_DIR": ASSETS, "MY_3D": ASSETS}):
+            self.assertIsNone(model_file("${KICAD9_3DMODEL_DIR}/3d/SOT-23-6.step", self.root))
+            self.assertEqual(model_file("${KICAD9_3DMODEL_DIR}/3d/SOT-23-6.step", self.root,
+                                        {"KICAD9_3DMODEL_DIR": ASSETS}), step)
+            self.assertEqual(model_file("$(MY_3D)/3d/SOT-23-6.step", self.root,
+                                        {"MY_3D": ASSETS}), step)
+            self.assertIsNone(model_file("${MY_3D}/3d/SOT-23-6.step", self.root),
+                              "a variable of the project's own, not named, is found nowhere")
+        # Named, the stock folders are not searched for it.
+        with mock.patch.dict(self.g, {"STOCK_MODEL_DIRS": (ASSETS,)}):
+            self.assertEqual(model_file("${KICAD9_3DMODEL_DIR}/3d/SOT-23-6.step", self.root),
+                             step)
+            self.assertIsNone(model_file("${KICAD9_3DMODEL_DIR}/3d/SOT-23-6.step", self.root,
+                                         {"KICAD9_3DMODEL_DIR": self.empty}))
+
+    def test_the_record_is_read_strictly(self):
+        def dirs(value):
+            return self.g["_model_dirs"](_fit_ctx(self.root, {"pcb_model_dirs": value}))
+        self.assertEqual(dirs({"KICAD9_3DMODEL_DIR": "selftest/assets",
+                               "MY_3D": self.empty}),
+                         {"KICAD9_3DMODEL_DIR": ASSETS, "MY_3D": self.empty})
+        self.assertEqual(self.g["_model_dirs"](_fit_ctx(self.root, {})), {})
+        for value, said in (("hardware/3d", "give {variable: folder}"),
+                            ({"MY-3D": "x"}, "letters, digits and '_'"),
+                            ({"KIPRJMOD": "x"}, "KIPRJMOD is the board's own folder"),
+                            ({"MY_3D": ""}, "give the folder"),
+                            ({"MY_3D": 3}, "give the folder")):
+            with self.subTest(value=value):
+                with self.assertRaises(self.g["_FitError"]) as raised:
+                    dirs(value)
+                self.assertIn(said, str(raised.exception))
+        # The gate errors on it before any tool would run.
+        v = self.fn(_fit_ctx(self.root, dict(_baseline(), pcb_model_dirs={"KIPRJMOD": "x"})))
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("pcb_model_dirs['KIPRJMOD']", v.error)
+
+    def test_the_staged_board_names_the_folder(self):
+        tree = _model_tree("${KICAD9_3DMODEL_DIR}/a.step", "$(MY_3D)/b.wrl",
+                           "${KIPRJMOD}/3d/c.step", "${OTHER}/d.step")
+        named = self.g["_named_dirs"]
+        self.assertTrue(named(tree, {"KICAD9_3DMODEL_DIR": "/k9", "MY_3D": "/mine"}))
+        [fp] = K.children(tree, "footprint")
+        self.assertEqual([str(m[1]) for m in K.children(fp, "model")],
+                         ["/k9/a.step", "/mine/b.wrl", "${KIPRJMOD}/3d/c.step",
+                          "${OTHER}/d.step"])
+        self.assertFalse(named(_model_tree("${KIPRJMOD}/3d/c.step"), {"MY_3D": "/mine"}))
+
+    def test_the_folder_is_in_the_key(self):
+        from nopekit import verdicts
+        registry = _registry()
+        other = os.path.join(self.root, "other")
+        os.makedirs(other)
+
+        def reads(folder: str):
+            trace = verdicts.GateTrace()
+            # A claim in other units: the gate errors after it reads the folder,
+            # before any tool would run.
+            ctx = _fit_ctx(self.root, dict(_baseline(),
+                                           pcb_model_dirs={"KICAD9_3DMODEL_DIR": folder}),
+                           _fit_claim(units="um"))
+            with mock.patch.object(gates_mod, "availability", return_value=(True, "")):
+                v = gates_mod.run_gate(self.spec, self.fn, ctx, trace=trace)
+            self.assertEqual(v.outcome, "error", v.render())
+            self.assertIn("this gate judges the least gap", v.error)
+            anchors = verdicts.anchors_for(PACK, registry, out_dir=ctx.out_dir)
+            return verdicts.Reads.from_trace(trace, anchors=anchors)
+
+        a, b = reads(self.empty), reads(other)
+        self.assertTrue(any(row[0][0] == "pcb_model_dirs" for row in a.params), a.params)
+        self.assertNotEqual(verdicts.rho_control(self.spec.id, "static", a),
+                            verdicts.rho_control(self.spec.id, "static", b))
+
+
+@unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
+class AModelInTheProjectsFolderIsFittedByKiCad(unittest.TestCase):
+    """U1 named through ``${KICAD9_3DMODEL_DIR}``, under a block 0.8 mm above its
+    model's top, with a declared height of 1.0 mm. With the folder unstated, the
+    model is found nowhere here and the box stands in (pass at 1.35 mm). Stated
+    in ``pcb_model_dirs``, from the project root or absolute, the model is found,
+    the height named unused, and kicad-cli fits the model itself (fail at 0.8 mm):
+    the staged board named the folder, whatever kicad-cli's environment says."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="nopekit-fit-modeldirs-")
+        top = 1.595 + 1.55 + 0.8
+        cls.block = _enclosure_step(os.path.join(cls.tmp, "block.step"), "block",
+                                    (13.0, -9.5, top), (17.0, -6.2, top + 2.0))
+        cls.lib = os.path.join(cls.tmp, "library")
+        shutil.copytree(os.path.join(ASSETS, "3d"), os.path.join(cls.lib, "3d"))
+
+        def stock(tree):
+            for item in _footprint(tree, "U1"):
+                if isinstance(item, list) and K.head(item) == "model":
+                    item[1] = K.Q("${KICAD9_3DMODEL_DIR}/3d/SOT-23-6.step")
+        cls.board = _variant_board(tempfile.mkdtemp(dir=cls.tmp), stock)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, True)
+
+    def _run(self, dirs=None):
+        params = dict(_baseline(), pcb_board=self.board, pcb_enclosure_step=self.block,
+                      pcb_board_placement={"x": 0.0, "y": 0.0, "z": 0.0},
+                      pcb_part_heights_mm={"U1": {"h": 1.0, "source": "seated height"}})
+        if dirs is not None:
+            params["pcb_model_dirs"] = dirs
+        spec, fn = _registry().get("pcb.enclosure_fit")
+        empty = tempfile.mkdtemp(dir=self.tmp)
+        with mock.patch.dict(fn.__globals__, {"STOCK_MODEL_DIRS": (empty,)}), \
+                mock.patch.dict(os.environ, {"KICAD9_3DMODEL_DIR": empty}):
+            return gates_mod.run_gate(spec, fn, _fit_ctx(tempfile.mkdtemp(dir=self.tmp),
+                                                         params))
+
+    def test_unstated_the_box_stands_in(self):
+        v = self._run()
+        self.assertEqual((v.outcome, v.measured), ("pass", 1.35), v.render())
+        self.assertIn("at its declared height, its model not found here: U1", v.detail)
+
+    def test_stated_kicad_fits_the_model(self):
+        for dirs in ({"KICAD9_3DMODEL_DIR": self.lib},
+                     {"KICAD9_3DMODEL_DIR": os.path.relpath(self.lib, PACK)}):
+            with self.subTest(dirs=dirs):
+                v = self._run(dirs)
+                self.assertEqual((v.outcome, v.measured), ("fail", 0.8), v.render())
+                self.assertIn("declared height not used, its model found: U1", v.detail)
 
 
 if __name__ == "__main__":

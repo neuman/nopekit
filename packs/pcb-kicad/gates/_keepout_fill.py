@@ -2,8 +2,13 @@
 """``pcb.antenna_keepout``'s refill, run by the gate in a child process:
 
     python3 _keepout_fill.py <board.kicad_pcb> <refilled.kicad_pcb>
+    python3 _keepout_fill.py --version
 
-It loads the board with KiCad's own ``pcbnew`` (the project file beside it gives
+The second form prints ``pcbnew.Version()`` and nothing else: the gate asks it
+before any board is staged, to hold the pair of releases it runs (pcbnew here,
+kicad-cli for the DRC) to a pair it was measured on (``pcb._keepout_pair``).
+
+The first form loads the board with KiCad's own ``pcbnew`` (the project file beside it gives
 the net classes' clearances, and the board file its zones' settings), refills
 every zone with ``pcbnew.ZONE_FILLER``, as KiCad's "Fill All Zones" does, and
 saves the copy. It prints one JSON line: ``{"zones": <count>, "filled": <bool>,
@@ -41,12 +46,33 @@ Python; on macOS and Windows nopekit runs under KiCad's own Python
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 
+def _own_folder_off_path() -> None:
+    """Drop this file's folder from the path before anything imports pcbnew. Run
+    as a script, the folder is the first entry of the path, and it holds the
+    pack's own modules and record folders, none of which this child imports: so
+    nothing beside this file can stand in for pcbnew, or for a module pcbnew
+    imports. (What slipped through, in review of general-packs R1: the pair
+    records' folder was ``gates/pcbnew/``, and where the child's own path held no
+    pcbnew, ``import pcbnew`` loaded that folder as a namespace package, so the
+    gate's error read "module 'pcbnew' has no attribute 'Version'" in place of
+    the missing module. The folder is ``gates/pcbnew-pairs/`` now, a name no
+    import can load, and this guard keeps the next one from doing the same.)"""
+    here = os.path.dirname(os.path.realpath(__file__))
+    sys.path[:] = [p for p in sys.path if os.path.realpath(p or os.curdir) != here]
+
+
 def main(argv: list[str]) -> int:
+    if argv == ["--version"]:
+        import pcbnew
+        print(pcbnew.Version())
+        return 0
     if len(argv) != 2:
-        print("usage: _keepout_fill.py <board.kicad_pcb> <refilled.kicad_pcb>", file=sys.stderr)
+        print("usage: _keepout_fill.py <board.kicad_pcb> <refilled.kicad_pcb> | --version",
+              file=sys.stderr)
         return 2
     src, dst = argv
     import pcbnew
@@ -64,4 +90,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    _own_folder_off_path()
     sys.exit(main(sys.argv[1:]))
