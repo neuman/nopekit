@@ -30,7 +30,16 @@ and a warning elsewhere on the board is not its business.
 Each item: `type` (`clearance`, `shorting_items`, `silk_edge_clearance`,
 `courtyards_overlap`, `unconnected_items`, ...), `severity`, `description`, and the
 `items` it names, each with a position and a description such as `Track [DM] on
-F.Cu`. `schematic_parity` is filled only with `--schematic-parity` (`pcb.parity`).
+F.Cu`. An item a person excluded in KiCad also carries `"excluded": true` and the
+exclusion's `comment` (below). `schematic_parity` is filled only with
+`--schematic-parity` (`pcb.parity`).
+
+The verdict's line gives each severity's count, then the kinds, errors first and
+the most numerous first within one severity, five kinds and how many more:
+`334 finding(s), 16 error, 318 warning: 5x shorting_items (error), ...`. (Before
+the holdout run it named the four most numerous kinds, and 16 errors under 318
+warnings were in no word of it.) It ends with the release `kicad_version` names
+(below).
 
 ## ERC: what `pcb.erc` runs
 
@@ -49,7 +58,24 @@ Each violation has `type` (`pin_not_connected`, `global_label_dangling`,
 `description` and `items`. `lib_symbol_issues` ("the current configuration does not
 include the symbol library") depends on the machine unless the project carries its
 own `sym-lib-table`: keep one. With the libraries found, ERC also compares each
-symbol's copy in the schematic with the library's (`lib_symbol_mismatch`).
+symbol's copy in the schematic with the library's (`lib_symbol_mismatch`), and DRC
+each footprint's (`lib_footprint_mismatch`): against the host's own library when
+the table names it through `${KICADn_...}`, so keep the libraries a design uses in
+the project, as the baseline does (`selftest/assets/lib/`, its tables naming
+`${KIPRJMOD}/lib/...`).
+
+## The libraries a table names
+
+The stage takes each library a table names through `${KIPRJMOD}` that is inside
+the project, at its place relative to the board (a library one directory up puts
+the staged board one directory down), so `${KIPRJMOD}/library/...` and
+`${KIPRJMOD}/../kicad-library/...` resolve in the stage as in the project. A run
+takes the libraries its findings read: the footprint table's for `pcb.drc` and
+`pcb.fab_rules`, both tables' for `pcb.erc`. An entry with nothing at its path, or
+outside the project, is named in the verdict ("not staged with the board"), and
+KiCad then reports it not found. (What slipped through, in the holdout run: the
+stage copied the tables alone, and ERC called a design's own libraries "not
+found".)
 
 ## Parity: what `pcb.parity` runs
 
@@ -57,22 +83,59 @@ symbol's copy in the schematic with the library's (`lib_symbol_mismatch`).
 
 KiCad loads the root schematic of the board's project, the board's name with
 `.kicad_sch`, beside it; there is no flag to name another. It matches footprints to
-symbols and lists, under `schematic_parity`: `missing_footprint`, `extra_footprint`,
-`footprint_symbol_mismatch` (the footprint the symbol names is not the one on the
-board; a board whose footprints carry no library name, as `pcbnew.FootprintLoad`
-leaves them, fails here), `net_conflict` (a pad on a net the schematic does not
-give it), and value differences. They are warnings, so the run is at every
-severity. The gate counts `schematic_parity` only: the same run's copper findings
-are `pcb.drc`'s. `--exit-code-violations` counts parity items too (exit 5).
+symbols and lists, under `schematic_parity` (the types KiCad 9.0.9 and 10.0.8
+report, read off both builds):
+
+| Type | What differs | `pcb.parity` |
+|---|---|---|
+| `missing_footprint` | a part in the schematic has no footprint | counted |
+| `extra_footprint` | a footprint has no part in the schematic | counted, unless board-only drawing |
+| `duplicate_footprints` | two footprints for one part | counted, unless board-only drawing |
+| `footprint_symbol_mismatch` | a value, the footprint (a board whose footprints carry no library name, as `pcbnew.FootprintLoad` leaves them, fails here) or a fitting attribute ("Exclude from bill of materials" settings differ) | counted |
+| `net_conflict` | a pad on a net the schematic does not give it | counted, unless an open pin on a pad with no net |
+| `footprint_symbol_field_mismatch` | a symbol field, "Missing symbol field 'manf#' in footprint" (KiCad 10 only) | said apart |
+| `footprint_filters_mismatch` | a footprint outside its symbol's footprint filters | said apart |
+
+Board-only drawing is a footprint with no numbered pad that no bill of materials
+takes (no reference, an unannotated one such as `REF**` or `G***`, or
+`exclude_from_bom`): a mounting hole, a logo, an outline not marked "Not in
+schematic". A footprint with a numbered pad, one a BOM would take, and one the
+report names by an id the board does not keep, all count. A type not in the table
+is named; with nothing counted beside it the gate errors, since it cannot say
+whether a new check of a later KiCad is a difference in what is built. The gate
+quotes KiCad's own words for the first three counted items, as they are: KiCad
+9.0.9's for a value reads "Value (C7) doesn't match symbol value (TBD)", where the
+first parentheses hold the reference and the second the board's value, and the
+schematic's value is not printed (seen in the holdout run). (What
+slipped through, in the holdout run: under KiCad 10.0.8, 32 of a board's 33 parity
+items were BOM fields, and on another board all 16 were mounting holes, each
+counted as a difference.) They are warnings, so the run is at every severity. The
+gate counts `schematic_parity` only: the same run's copper findings are
+`pcb.drc`'s. `--exit-code-violations` counts parity items too (exit 5).
 
 ## Waivers
 
 KiCad stores DRC exclusions in the `.kicad_pro` (`board.design_settings.drc_exclusions`)
-and ERC exclusions beside them (`erc.erc_exclusions`), each naming the violation and
-the items. `kicad-cli` honours them unless `--severity-exclusions` is given. That
-makes a waiver a reviewable line in a tracked file. The gates copy the `.kicad_pro`,
-any `.kicad_dru` and the library tables beside the board into their stage, so the
-rules, exclusions and libraries they ran under are the project's.
+and ERC exclusions beside them (`erc.erc_exclusions`), each a pair of a key and a
+comment. A DRC key is `<type>|<x>|<y>|<item uuid>|<other item uuid>`, the
+position the marker's own, in nanometres (an item with no other names
+`00000000-0000-0000-0000-000000000000`). That makes a waiver a reviewable line in
+a tracked file. kicad-cli 9.0.9 and 10.0.8 both still list an excluded finding,
+with `"excluded": true` and the comment, and both exit 5 when it is the only one
+(measured: a dangling via on the baseline, excluded); a DRC exclusion that matches
+nothing is dropped. kicad-cli 9.0.9's ERC is not the same: an ERC exclusion whose
+key matches no finding is listed as an excluded item of its own, beside the live
+finding it was meant for (measured with a key in the DRC form on a dangling
+label), so a stale ERC waiver reads as one more excluded finding, and the finding
+still counts. So the gates count what no exclusion waives, say the excluded
+apart, by kind, with the first comment, and hold the exit code to the report with
+the excluded findings in it. (What slipped through, in the holdout run: they said
+exclusions are honoured and counted every item, so a design's two waived
+courtyard overlaps would have failed it.) `pcb.fab_rules` counts a fab finding the
+project excludes: the fab's minimum is not the project's to waive. The gates copy
+the `.kicad_pro`, any `.kicad_dru`, the library tables and the project libraries
+beside the board into their stage, so the rules, exclusions and libraries they ran
+under are the project's.
 
 A `.kicad_dru` rule can also relax a constraint. Read its `condition` before you
 trust it: a rule written for one connector's shield pads with the condition
@@ -131,6 +194,24 @@ it does not.
 
 ## Versions
 
-Written against kicad-cli 9.0.9. KiCad 8 has the same `pcb drc` flags. KiCad 7's
-kicad-cli has no `pcb drc` at all, so these gates error there rather than skip:
-upgrade.
+Measured on kicad-cli 9.0.9 and 10.0.8 (the kicad/kicad:10.0 image): one record of
+each in `gates/kicad-cli/<release>.json`, with the newest board and schematic
+format it reads and what was shown on it. KiCad 8 has the same `pcb drc` flags.
+KiCad 7's kicad-cli has no `pcb drc` at all, so these gates error there rather
+than skip: upgrade.
+
+- **The release is part of what a gate read.** After each run the gate asks for
+  the record of the release its report names (`kicad_version`), by that file's
+  path, found or not, and the spine keys a path a gate asked about. A control run
+  under 9.0.9 and one under 10.0.8 are two qualifications, never "two outcomes
+  for identical inputs". (What slipped through, in the holdout run: they were
+  one, and `pcb.drc` read unqualified on every KiCad 10 host.) The verdict's line
+  ends with the release, and a release with no record is said: `kicad-cli 10.0.9
+  (no record of it in this pack: measured 9.0.9, 10.0.8)`. It still runs: the
+  exit code is KiCad's verdict, and its report must agree with it.
+- **A file newer than the release reads.** kicad-cli 9.0.9 prints "Failed to load
+  board" (or "schematic") and exits 3 on a file KiCad 10 saved. After such a
+  failure the gate asks `kicad-cli version --format plain`, compares the file's
+  `(version N)` with what that release (or the newest record of its series) reads,
+  and skips, naming the release: a tool limit, not a defect, as a missing tool is.
+  Any other failure stays an error.

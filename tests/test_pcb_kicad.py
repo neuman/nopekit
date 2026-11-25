@@ -42,6 +42,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -143,13 +144,35 @@ def _text_height() -> dict:
                        "uuid": SILK_REF}]}
 
 
-def _board_copy(root: str, text: str, stem: str = "b") -> str:
-    """``text`` as ``<root>/<stem>.kicad_pcb``, with the baseline's project file
-    and library tables beside it, as the gate stages them."""
-    shutil.copyfile(os.path.join(ASSETS, "esd_guard.kicad_pro"),
-                    os.path.join(root, stem + ".kicad_pro"))
+def _library_tables(root: str) -> None:
+    """The baseline's library tables in ``root``, with the pack's library copies
+    they name (``${KIPRJMOD}/lib``) beside them."""
     for name in ("sym-lib-table", "fp-lib-table"):
         shutil.copyfile(os.path.join(ASSETS, name), os.path.join(root, name))
+    if not os.path.isdir(os.path.join(root, "lib")):
+        shutil.copytree(os.path.join(ASSETS, "lib"), os.path.join(root, "lib"))
+
+
+def _stock_footprint_table(root: str) -> None:
+    """An ``fp-lib-table`` in ``root`` that names the host's stock footprint
+    libraries through ``${KICAD9_FOOTPRINT_DIR}``, as the baseline's did before
+    the pack kept its own copies: for a board whose footprints are more of those
+    libraries' entries than the pack copies (the power board's J6 and U2), where
+    the copies would read each one as missing (``footprint_link_issues``)."""
+    with open(os.path.join(root, "fp-lib-table"), "w", encoding="utf-8") as fh:
+        fh.write("(fp_lib_table\n\t(version 7)\n" + "".join(
+            f'\t(lib (name "{lib}")(type "KiCad")(uri "${{KICAD9_FOOTPRINT_DIR}}/{lib}.pretty")'
+            f'(options "")(descr ""))\n'
+            for lib in ("Connector_PinHeader_2.54mm", "Package_TO_SOT_SMD")) + ")\n")
+
+
+def _board_copy(root: str, text: str, stem: str = "b") -> str:
+    """``text`` as ``<root>/<stem>.kicad_pcb``, with the baseline's project file,
+    library tables and the libraries they name beside it, as the gate stages
+    them."""
+    shutil.copyfile(os.path.join(ASSETS, "esd_guard.kicad_pro"),
+                    os.path.join(root, stem + ".kicad_pro"))
+    _library_tables(root)
     path = os.path.join(root, stem + ".kicad_pcb")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
@@ -721,9 +744,11 @@ class ABoardWithNoSchematicCanClaimItsCopper(unittest.TestCase):
         registry = _registry()
         self.assertEqual([s.id for s in registry.for_claim("C1", ["copper-connectivity"])],
                          ["pcb.unconnected"])
-        # Why it is needed: the broader tag brings in the gate that needs a schematic.
-        self.assertEqual(sorted(s.id for s in registry.for_claim("C1", ["connectivity"])),
-                         ["pcb.parity", "pcb.unconnected"])
+        # Why it was needed: the broader tag brought in the gate that needs a
+        # schematic. Since the holdout run the broader tag binds no gate here at
+        # all: cad-solid's assembly check lists it too (PACK.md, "Tags this pack
+        # no longer lists").
+        self.assertEqual(sorted(s.id for s in registry.for_claim("C1", ["connectivity"])), [])
 
 
 class TheTagTableIsTheGates(unittest.TestCase):
@@ -1722,8 +1747,8 @@ class ThePowerRulesReadTheirRecords(_PowerCase):
             with self.subTest(gate=gid, board="newer than the reader"):
                 verdict = self.run_gate(gid, board=newer)
                 self.assertEqual(verdict.outcome, "skipped", verdict.render())
-                self.assertIn("this reader was checked through board format 20241229 "
-                              "(KiCad 9.0); the file is format 20991231",
+                self.assertIn("this reader was checked through board format 20260206 "
+                              "(KiCad 10.0); the file is format 20991231",
                               verdict.skip_reason)
 
     def test_no_battery_skips_and_says_so(self):
@@ -1824,16 +1849,15 @@ class ThePowerBaselineHasItsSchematic(_PowerCase):
                 for ext in (".kicad_pcb", ".kicad_sch"):
                     shutil.copyfile(src[:-len(".kicad_pcb")] + ext,
                                     os.path.join(root, "power_board" + ext))
-                for table in ("sym-lib-table", "fp-lib-table"):
-                    shutil.copyfile(os.path.join(ASSETS, table), os.path.join(root, table))
+                _library_tables(root)
                 params = dict(_baseline(), pcb_board=os.path.join(root, "power_board.kicad_pcb"))
                 parity = _run(registry, "pcb.parity", root, params)
                 self.assertEqual(parity.outcome, "pass", parity.render())
                 erc = _run(registry, "pcb.erc", root, params)
                 if erc.outcome != "pass":
                     self.assertEqual(erc.outcome, "fail", erc.render())
-                    self.assertRegex(erc.detail, r"(\d+) finding\(s\): \1x lib_symbol_issues "
-                                                 r"\(warning\) \(")
+                    self.assertRegex(erc.detail, r"(\d+) finding\(s\), \1 warning: "
+                                                 r"\1x lib_symbol_issues \(warning\) \(")
 
 
 class ChargingStopsOutsideTheWindow(_PowerCase):
@@ -2608,9 +2632,10 @@ def _by_name(text: str, version: str = "20260206") -> str:
     """The board as KiCad 10 writes it from format 20251028 (its 10.0 source,
     ``pcb_io_kicad_sexpr.cpp``: every pad, track, via and zone writes ``(net
     "<name>")``, and the board writes no net table): the table dropped, every
-    code replaced by its name, a zone's ``net_name`` dropped. No KiCad 10 is
-    installed where this pack was written, so this is the source's form, not a
-    saved file: the reason the reader's ceiling stays at KiCad 9."""
+    code replaced by its name, a zone's ``net_name`` dropped. The source's form,
+    for a variant of the baseline at any format; the board KiCad 10.0.8 itself
+    saved is ``selftest/assets/kicad10/`` (AKiCad10BoardReadsAsItsKiCad9Original),
+    on which the reader's ceiling moved to KiCad 10."""
     tree = K.parse(text)
     codes = {str(n[1]): str(n[2]) for n in K.children(tree, "net") if len(n) >= 3}
     tree[:] = [x for x in tree if not (isinstance(x, list) and K.head(x) == "net")]
@@ -2664,15 +2689,15 @@ class ANewerBoardIsSkippedNeverFailed(unittest.TestCase):
         return _board_copy(self.root, text, stem=stem)
 
     def test_the_guard_skips_and_its_dependents_are_not_established(self):
-        board = self._board(_by_name(_board_text()))
+        board = self._board(_by_name(_board_text(), "20991231"))
         verdicts = gates_mod.run_all(
             self.registry, _ctx(self.root, dict(_baseline(), pcb_board=board)), max_tier=0,
             only=["pcb.pin_names", "pcb.net_width", "pcb.land_pattern"])
         by_id = {v.gate: v for v in verdicts}
         guard = by_id["pcb.board_readable"]
         self.assertEqual(guard.outcome, "skipped", guard.render())
-        self.assertIn("this reader was checked through board format 20241229 (KiCad 9.0); "
-                      "the file is format 20260206", guard.skip_reason)
+        self.assertIn("this reader was checked through board format 20260206 (KiCad 10.0); "
+                      "the file is format 20991231", guard.skip_reason)
         self.assertIn("not a defect in the board", guard.skip_reason)
         for gid in ("pcb.pin_names", "pcb.net_width", "pcb.land_pattern"):
             with self.subTest(gate=gid):
@@ -2705,18 +2730,20 @@ class ANewerBoardIsSkippedNeverFailed(unittest.TestCase):
         self.assertTrue(any("does not define" in p for p in problems), problems)
         K.child(tree, "version")[1] = str(K.NET_CODES_DROPPED)
         _v, problems = K.board_problems(tree)
-        self.assertEqual(problems, [K.reader_ceiling(K.NET_CODES_DROPPED)])
-        self.assertEqual(K.board_problems(K.parse(_by_name(_board_text())))[1],
-                         [K.reader_ceiling(20260206)])
+        self.assertEqual(problems, [])
+        self.assertEqual(K.board_problems(K.parse(_by_name(_board_text())))[1], [])
+        self.assertEqual(K.board_problems(K.parse(_by_name(_board_text(), "20991231")))[1],
+                         [K.reader_ceiling(20991231)])
 
-    def test_the_ceiling_stays_at_kicad_9_until_a_kicad_10_board_is_committed(self):
-        """Only KiCad 9.0.9 was installed where this reader was written, so no
-        board KiCad 10 saved could be checked against it: an accepted gap
-        (PACK.md). Raise the ceiling with such a board as a fixture, never on the
-        10.0 source alone."""
-        self.assertEqual(K.MAX_BOARD_VERSION, 20241229)
-        self.assertEqual(K.reader_ceiling(20241229), "")
+    def test_the_ceiling_is_kicad_10_since_a_kicad_10_board_was_committed(self):
+        """KiCad 9's format until the holdout run, when a board KiCad 10.0.8
+        saved was committed and read the same as its KiCad 9 original
+        (AKiCad10BoardReadsAsItsKiCad9Original). The next move is the same: a
+        board the next KiCad saved, never that release's source alone."""
+        self.assertEqual(K.MAX_BOARD_VERSION, 20260206)
+        self.assertEqual(K.reader_ceiling(20260206), "")
         self.assertEqual(K.reader_ceiling(None), "")
+        self.assertTrue(os.path.isfile(K10_BOARD))
 
 
 class NetsAreReadByNameAsByCode(unittest.TestCase):
@@ -3087,15 +3114,16 @@ class AFabServiceListsWhatItBuilds(unittest.TestCase):
         """The guard reads the stackup and vias with the pack's reader, so a file
         newer than it was checked through skips as at pcb.board_readable, and
         kicad-cli never runs (the review of P4: the guard read it on trust)."""
-        for name, text in (("KiCad 10, a polyimide stackup", _by_name(_stackup("Polyimide"))),
-                           ("KiCad 10, no stackup", _by_name(_board_text()))):
+        for name, text in (("past KiCad 10, a polyimide stackup",
+                            _by_name(_stackup("Polyimide"), "20991231")),
+                           ("past KiCad 10, no stackup", _by_name(_board_text(), "20991231"))):
             with self.subTest(board=name):
-                board = _board_copy(self.dir, text, stem="k10")
+                board = _board_copy(self.dir, text, stem="k11")
                 verdict = self._fab([], board=board, runs=0)
                 self.assertEqual(verdict.outcome, "skipped", verdict.render())
                 self.assertTrue(verdict.skip_reason.startswith(
-                    "this reader was checked through board format 20241229 (KiCad 9.0); "
-                    "the file is format 20260206: the service guard reads the board's "
+                    "this reader was checked through board format 20260206 (KiCad 10.0); "
+                    "the file is format 20991231: the service guard reads the board's "
                     "stackup and vias with this pack's reader"), verdict.skip_reason)
                 self.assertNotIn("the board has", verdict.skip_reason)
 
@@ -4441,11 +4469,11 @@ class AFitRecordIsReadStrictly(unittest.TestCase):
         review of P4: this gate read a newer file's footprints on trust)."""
         root = tempfile.mkdtemp(prefix="nopekit-fit-newer-")
         self.addCleanup(shutil.rmtree, root, True)
-        board = _board_copy(root, _version(_board_text(), "20260206"))
+        board = _board_copy(root, _version(_board_text(), "20991231"))
         v = self._verdict(pcb_board=board)
         self.assertEqual(v.outcome, "skipped", v.render())
-        self.assertIn("this reader was checked through board format 20241229 (KiCad 9.0); "
-                      "the file is format 20260206", v.skip_reason)
+        self.assertIn("this reader was checked through board format 20260206 (KiCad 10.0); "
+                      "the file is format 20991231", v.skip_reason)
         self.assertIn("not a defect in the board", v.skip_reason)
 
     def test_a_part_with_neither_model_nor_height_still_skips_named(self):
@@ -5184,11 +5212,11 @@ class TheKeepoutRecordsAreReadStrictly(unittest.TestCase):
         self.assertIn("radio_board.kicad_pcb has no rule area named 'AE1 clearance'", v.error)
 
     def test_a_newer_board_skips_with_the_guards_words(self):
-        board = _radio_copy(self.root, lambda t: K.child(t, "version").__setitem__(1, "20260206"))
+        board = _radio_copy(self.root, lambda t: K.child(t, "version").__setitem__(1, "20991231"))
         v = self.call(_radio_record(board))
         self.assertTrue(v.skipped, v)
-        self.assertIn("this reader was checked through board format 20241229 (KiCad 9.0); the "
-                      "file is format 20260206", v.skip_reason)
+        self.assertIn("this reader was checked through board format 20260206 (KiCad 10.0); the "
+                      "file is format 20991231", v.skip_reason)
 
     def test_no_board_and_no_record_skips(self):
         v = self.call({})
@@ -5734,6 +5762,7 @@ class AMultiUnitPartIsPlacedWhole(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, True)
         with open(POWER_BOARD, encoding="utf-8") as fh:
             self.board = _board_copy(self.root, fh.read(), stem="p")
+        _stock_footprint_table(self.root)
 
     def _adopt(self, out: str) -> None:
         for name in ("p.kicad_sch", "sym-lib-table"):
@@ -6348,6 +6377,637 @@ for path in sys.argv[2:]:
     out["found"][path] = {fp.ref: D.typec_receptacle(fp) for fp in board.footprints}
 print(json.dumps(out))
 """
+
+
+
+# --------------------------------------------------------------------------- #
+# general-packs H1: the holdout run on outside designs. KiCad 10 boards, a
+# control sealed against the host's library, the release in what a gate reads,
+# the libraries a project's tables name, KiCad's exclusions, the parity types
+# that are built, and a DRC line that names its errors first.
+# --------------------------------------------------------------------------- #
+K10 = os.path.join(ASSETS, "kicad10")
+K10_BOARD = os.path.join(K10, "esd_guard.kicad_pcb")
+K10_READER = os.path.join(K10, "reader.kicad_pcb")
+RELEASES = os.path.join(PACK, "gates", "kicad-cli")
+
+
+def _kicad_cli_release() -> str:
+    """The release of the kicad-cli on PATH, or "" where there is none."""
+    if shutil.which("kicad-cli") is None:
+        return ""
+    proc = _env.run(["kicad-cli", "version", "--format", "plain"], cwd=REPO)
+    return proc.stdout.strip()
+
+
+def _pack_params(**over) -> dict:
+    """The baseline with every path in it made absolute against the pack, so a
+    test whose root is a temporary directory runs it there."""
+    params = _baseline()
+    for key in ("pcb_board", "pcb_spice_deck", "pcb_enclosure_step"):
+        params[key] = os.path.join(PACK, params[key])
+    params["pcb_land_drawings"] = {ref: os.path.join(PACK, rel)
+                                   for ref, rel in params["pcb_land_drawings"].items()}
+    params.update(over)
+    return params
+
+
+def _footprints(board) -> list:
+    return [(f.ref, f.value, f.lib_id, f.attrs,
+             [(p.number, p.net, p.pinfunction, p.pintype) for p in f.pads])
+            for f in board.footprints]
+
+
+def _tracks(board) -> list:
+    return sorted((t.net, t.layer, t.width_mm, t.shape, round(t.length_mm, 9), t.kind)
+                  for t in board.tracks)
+
+
+class AKiCad10BoardReadsAsItsKiCad9Original(unittest.TestCase):
+    """The reader's ceiling is KiCad 10's board format because a board KiCad
+    10.0.8 saved (selftest/assets/kicad10/, make_kicad10.py) reads the same as
+    the KiCad 9 board it came from, and a second one holds what the baseline does
+    not. (What slipped through: KiCad 10 is the current release, and every
+    pcb-kicad gate skipped or errored on the holdout's two KiCad 10 boards.)"""
+
+    def test_the_files_are_ones_kicad_10_wrote(self):
+        for path, head, fmt in ((K10_BOARD, "kicad_pcb", 20260206),
+                                (K10_READER, "kicad_pcb", 20260206),
+                                (os.path.join(K10, "esd_guard.kicad_sch"), "kicad_sch", 20260306)):
+            with self.subTest(file=os.path.basename(path)):
+                tree = K.load_tree(path)
+                self.assertEqual(K.head(tree), head)
+                self.assertEqual(K.header_version(path), fmt)
+                self.assertEqual(str(K.value(tree, "generator_version")), "10.0")
+                if head == "kicad_pcb":
+                    self.assertEqual(K.children(tree, "net"), [],
+                                     "KiCad 10 writes no net table: nets by name only")
+        self.assertEqual(K.MAX_BOARD_VERSION, K.header_version(K10_BOARD),
+                         "the ceiling is the format of the newest board committed and read")
+
+    def test_every_reader_reads_the_same_board(self):
+        t9, t10 = K.load_tree(BOARD), K.load_tree(K10_BOARD)
+        b9, b10 = K.board_from_tree(t9), K.board_from_tree(t10)
+        self.assertEqual(K.board_problems(t10), (20260206, []))
+        self.assertEqual(b10.net_names, ["DM", "DP", "GND", "VBUS"])
+        self.assertEqual(_footprints(b10), _footprints(b9))
+        self.assertEqual(_tracks(b10), _tracks(b9))
+        self.assertEqual(b10.vias, b9.vias)
+        self.assertEqual(K.pad_nets_by_id(t10), K.pad_nets_by_id(t9))
+        self.assertEqual(K.pad_ids(t10), K.pad_ids(t9))
+        self.assertEqual(sorted(K.footprints_by_id(t10)), sorted(K.footprints_by_id(t9)))
+        for ref in ("J1", "U1", "J2"):
+            with self.subTest(land=ref):
+                self.assertEqual(K.footprint_land(t10, ref), K.footprint_land(t9, ref))
+        self.assertEqual(K.pin_name_conflicts(b10), K.pin_name_conflicts(b9))
+        self.assertEqual(K.via_kinds(t10), K.via_kinds(t9))
+        self.assertEqual(K.stackup_dielectrics(t10), K.stackup_dielectrics(t9))
+        self.assertEqual(K.copper_layer_count(t10), K.copper_layer_count(t9))
+
+    def test_the_second_board_holds_what_the_baseline_does_not(self):
+        tree = K.load_tree(K10_READER)
+        board = K.board_from_tree(tree)
+        self.assertEqual(K.board_problems(tree), (20260206, []))
+        self.assertEqual(dict(K.via_kinds(tree)),
+                         {"through": 1, "blind": 1, "buried": 1, "micro": 1})
+        self.assertEqual(K.stackup_dielectrics(tree), (["FR4", "FR408-HR"], True))
+        self.assertEqual(K.copper_layer_count(tree), 4)
+        self.assertEqual(sorted(board.zone_nets), ["", "GND"], "a GND pour and a keep-out")
+        self.assertEqual(_footprints(board), _footprints(K.load_board(BOARD)))
+        self.assertTrue(all(t.net for t in board.tracks))
+
+    def test_the_tier0_gates_judge_it_as_they_judge_the_kicad9_board(self):
+        """pcb.pin_names reads the KiCad 10 schematic beside it for the names."""
+        registry = _registry()
+        root = tempfile.mkdtemp(prefix="nopekit-pcb-k10-")
+        self.addCleanup(shutil.rmtree, root, True)
+        for gid in ("pcb.board_readable", "pcb.pin_names", "pcb.net_width",
+                    "pcb.land_pattern"):
+            with self.subTest(gate=gid):
+                nine = _run(registry, gid, root, _pack_params(pcb_board=BOARD))
+                ten = _run(registry, gid, root, _pack_params(pcb_board=K10_BOARD))
+                self.assertEqual(ten.outcome, "pass", ten.render())
+                self.assertEqual((ten.outcome, ten.measured), (nine.outcome, nine.measured))
+                self.assertEqual(ten.detail.replace("20260206", "20241229"), nine.detail)
+
+
+class TheControlReadsThePacksOwnLibraries(unittest.TestCase):
+    """The baseline's tables name the pack's copies of the stock entries it was
+    drawn from, so its known-good DRC and ERC read the same library on every
+    host. (What slipped through: the tables named ${KICAD9_FOOTPRINT_DIR}, and
+    under KiCad 10.0.8, whose own library is newer, the known-good DRC read
+    3x lib_footprint_mismatch: no KiCad 10 design could get a DRC verdict.)"""
+
+    def _rows(self, folder: str, table: str) -> list[tuple[str, str]]:
+        tree = K.load_tree(os.path.join(folder, table))
+        return [(str(K.value(r, "name")), str(K.value(r, "uri")))
+                for r in K.children(tree, "lib")]
+
+    def test_the_tables_name_no_library_of_the_host(self):
+        for folder, prefix in ((ASSETS, "${KIPRJMOD}/lib/"), (K10, "${KIPRJMOD}/../lib/")):
+            for table in ("sym-lib-table", "fp-lib-table"):
+                for nick, uri in self._rows(folder, table):
+                    with self.subTest(table=os.path.relpath(os.path.join(folder, table), ASSETS),
+                                      lib=nick):
+                        self.assertTrue(uri.startswith(prefix), uri)
+                        path = os.path.normpath(os.path.join(folder, uri[len("${KIPRJMOD}/"):]))
+                        self.assertTrue(os.path.exists(path), path)
+
+    def test_every_entry_the_baseline_uses_is_in_the_copies(self):
+        fp_libs = dict(self._rows(ASSETS, "fp-lib-table"))
+        sym_libs = dict(self._rows(ASSETS, "sym-lib-table"))
+
+        def where(uri: str) -> str:
+            return os.path.join(ASSETS, uri[len("${KIPRJMOD}/"):])
+        for fp in K.children(K.load_tree(BOARD), "footprint"):
+            lib, name = str(fp[1]).split(":", 1)
+            with self.subTest(footprint=str(fp[1])):
+                self.assertTrue(os.path.isfile(os.path.join(where(fp_libs[lib]),
+                                                            name + ".kicad_mod")))
+        sch = K.load_tree(os.path.join(ASSETS, "esd_guard.kicad_sch"))
+        for lib_id in sorted({str(K.value(s, "lib_id")) for s in K.children(sch, "symbol")}):
+            lib, name = lib_id.split(":", 1)
+            with self.subTest(symbol=lib_id):
+                held = {str(s[1]) for s in K.children(K.load_tree(where(sym_libs[lib])),
+                                                      "symbol")}
+                self.assertIn(name, held)
+
+    @unittest.skipIf(shutil.which("kicad-cli") is None, "needs the real kicad-cli")
+    def test_kicad_reads_the_copies(self):
+        """A copy edited (U1's pad 1 0.1 mm longer) is what KiCad's DRC compares
+        the board with: the library is the pack's, not the host's."""
+        registry = _registry()
+        params = _pack_params()
+        root = tempfile.mkdtemp(prefix="nopekit-pcb-lib-")
+        self.addCleanup(shutil.rmtree, root, True)
+        clean = _run(registry, "pcb.drc", root, params)
+        self.assertEqual(clean.outcome, "pass", clean.render())
+        board = _board_copy(root, _board_text())
+        mod = os.path.join(root, "lib", "Package_TO_SOT_SMD.pretty", "SOT-23-6.kicad_mod")
+        with open(mod, encoding="utf-8") as fh:
+            text = fh.read()
+        edited = text.replace("(at -1.1375 -0.95) (size 1.325 0.6)",
+                              "(at -1.1375 -0.95) (size 1.425 0.6)", 1)
+        self.assertNotEqual(edited, text)
+        with open(mod, "w", encoding="utf-8") as fh:
+            fh.write(edited)
+        verdict = _run(registry, "pcb.drc", root, dict(params, pcb_board=board))
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIn("1x lib_footprint_mismatch (warning)", verdict.detail)
+
+
+def _report_cli(bin_dir: str, report: dict, code: int, *, version: str = "") -> None:
+    """A stand-in kicad-cli: it writes ``report`` where ``-o`` says and exits
+    ``code``; asked its ``version``, it prints ``version``."""
+    path = os.path.join(bin_dir, "report.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh)
+    _stand_in(bin_dir, "kicad-cli",
+              "import shutil, sys\n"
+              "if sys.argv[1:2] == ['version']:\n"
+              f"    print({version!r}); sys.exit(0)\n"
+              f"shutil.copyfile({path!r}, sys.argv[sys.argv.index('-o') + 1])\n"
+              f"sys.exit({code})\n")
+
+
+def _drc_report(violations=(), parity=(), version: str = "9.0.9") -> dict:
+    return {"$schema": "https://schemas.kicad.org/drc.v1.json", "coordinate_units": "mm",
+            "kicad_version": version, "source": "b.kicad_pcb",
+            "violations": list(violations), "unconnected_items": [],
+            "schematic_parity": list(parity)}
+
+
+def _item(kind: str, severity: str = "warning", uuid: str = "x", **more) -> dict:
+    return dict({"type": kind, "severity": severity, "description": kind,
+                 "items": [{"description": f"an item of {kind}", "uuid": uuid}]}, **more)
+
+
+@unittest.skipIf(os.name == "nt", "the stand-in kicad-cli is a #! script")
+class _StandIn(unittest.TestCase):
+    """A project with the baseline's board and schematic, and a stand-in kicad-cli
+    on PATH."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-pcb-h1-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.bin = os.path.join(self.root, "bin")
+        os.makedirs(self.bin)
+        self.board = _board_copy(self.root, _board_text())
+        shutil.copyfile(os.path.join(ASSETS, "esd_guard.kicad_sch"),
+                        os.path.join(self.root, "b.kicad_sch"))
+        self.registry = _registry()
+
+    def gate(self, gid: str, **params):
+        with mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ["PATH"]}):
+            return _run(self.registry, gid, self.root,
+                        dict(_baseline(), pcb_board=self.board, **params))
+
+
+class AnExclusionIsAWaiverCountedApart(_StandIn):
+    """A finding a person excluded in KiCad is listed by kicad-cli with
+    ``"excluded": true`` and its comment, and kicad-cli exits 5 when it is the
+    only one (measured, 9.0.9 and 10.0.8). It is counted apart, never as a
+    finding. (What slipped through: the gates said exclusions are honoured and
+    counted every item, so a design's two waived courtyard overlaps would fail.)"""
+
+    WAIVED = _item("courtyards_overlap", "error", excluded=True,
+                   comment="fitted on one variant only")
+
+    def test_drc_counts_what_no_exclusion_waives(self):
+        _report_cli(self.bin, _drc_report([self.WAIVED]), 5)
+        verdict = self.gate("pcb.drc")
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertIn("nothing found; 1 excluded in the project, not counted: "
+                      "1x courtyards_overlap ('fitted on one variant only')", verdict.detail)
+        _report_cli(self.bin, _drc_report([self.WAIVED, _item("clearance", "error")]), 5)
+        verdict = self.gate("pcb.drc")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+
+    def test_a_clean_exit_beside_a_counted_finding_still_disagrees(self):
+        _report_cli(self.bin, _drc_report([_item("clearance", "error")]), 0)
+        verdict = self.gate("pcb.drc")
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("the two disagree", verdict.error)
+        _report_cli(self.bin, _drc_report([]), 5)
+        self.assertEqual(self.gate("pcb.drc").outcome, "error")
+
+    def test_erc_counts_what_no_exclusion_waives(self):
+        report = {"kicad_version": "9.0.9", "sheets": [
+            {"path": "/", "violations": [_item("pin_to_pin", excluded=True, comment="")]}]}
+        _report_cli(self.bin, report, 5)
+        verdict = self.gate("pcb.erc")
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertIn("1 excluded in the project, not counted: 1x pin_to_pin", verdict.detail)
+
+    def test_parity_counts_what_no_exclusion_waives(self):
+        _report_cli(self.bin, _drc_report(parity=[
+            _item("net_conflict", excluded=True, comment="a test pad")]), 5)
+        verdict = self.gate("pcb.parity")
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertIn("1 excluded in the project, not counted: 1x net_conflict", verdict.detail)
+
+    @unittest.skipIf(shutil.which("kicad-cli") is None, "needs the real kicad-cli")
+    def test_kicad_marks_an_exclusion_in_the_project_file(self):
+        """A dangling via on the baseline, waived in the project file: KiCad's
+        own exclusion key, type|x|y|item|aux, the position in nanometres."""
+        tree = K.load_tree(BOARD)
+        via = copy.deepcopy(K.children(tree, "via")[0])
+        K.child(via, "at")[1:3] = ["10", "12"]
+        K.child(via, "uuid")[1] = K.Q("11111111-2222-4333-8444-555555555555")
+        tree.append(via)
+        board = _board_copy(self.root, K.dump(tree) + "\n", stem="v")
+        found = _run(self.registry, "pcb.drc", self.root, dict(_baseline(), pcb_board=board))
+        self.assertEqual(found.outcome, "fail", found.render())
+        self.assertIn("1x via_dangling (warning)", found.detail)
+        pro = os.path.join(self.root, "v.kicad_pro")
+        with open(pro, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["board"]["design_settings"]["drc_exclusions"] = [[
+            "via_dangling|10000000|12000000|11111111-2222-4333-8444-555555555555|"
+            "00000000-0000-0000-0000-000000000000", "a person's waiver"]]
+        with open(pro, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2)
+        waived = _run(self.registry, "pcb.drc", self.root, dict(_baseline(), pcb_board=board))
+        self.assertEqual(waived.outcome, "pass", waived.render())
+        self.assertIn("1 excluded in the project, not counted: 1x via_dangling "
+                      "(\"a person's waiver\")", waived.detail)
+
+
+class TheDrcLineNamesItsErrorsFirst(_StandIn):
+    """Each severity's count, then the kinds, errors first. (What slipped
+    through: the line named the four most numerous kinds, all warnings, and a
+    board's 16 errors were in no word of it.)"""
+
+    def test_errors_lead_the_line(self):
+        rows = [("solder_mask_bridge", "warning", 199), ("lib_footprint_issues", "warning", 63),
+                ("silk_over_copper", "warning", 43), ("lib_footprint_mismatch", "warning", 9),
+                ("silk_overlap", "warning", 4), ("shorting_items", "error", 5),
+                ("clearance", "error", 4), ("copper_edge_clearance", "error", 3),
+                ("footprint_type_mismatch", "error", 3), ("courtyards_overlap", "error", 1)]
+        report = _drc_report([_item(k, s) for k, s, n in rows for _ in range(n)])
+        _report_cli(self.bin, report, 5)
+        verdict = self.gate("pcb.drc")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 334), verdict.render())
+        self.assertTrue(verdict.detail.startswith(
+            "KiCad DRC at all severities: 334 finding(s), 16 error, 318 warning: "
+            "5x shorting_items (error), 4x clearance (error), 3x copper_edge_clearance "
+            "(error), 3x footprint_type_mismatch (error), 1x courtyards_overlap (error), "
+            "and 5 more kind(s)"), verdict.detail)
+
+    def test_erc_too(self):
+        report = {"kicad_version": "9.0.9", "sheets": [{"path": "/", "violations": [
+            *[_item("lib_symbol_issues") for _ in range(9)],
+            _item("power_pin_not_driven", "error")]}]}
+        _report_cli(self.bin, report, 5)
+        verdict = self.gate("pcb.erc")
+        self.assertIn("10 finding(s), 1 error, 9 warning: 1x power_pin_not_driven (error), "
+                      "9x lib_symbol_issues (warning) (power_pin_not_driven:", verdict.detail)
+
+
+class TheReleaseIsPartOfWhatAKiCadGateReads(_StandIn):
+    """A kicad-cli gate asks for the record of the release its report names, so
+    the spine keys it: a control under 9.0.9 and one under 10.0.8 are two control
+    entries, never two outcomes of one. (What slipped through: both landed on one
+    key, and pcb.drc read "two control outcomes for identical inputs" on every
+    KiCad 10 host.)"""
+
+    def reads(self, version: str):
+        from nopekit import verdicts
+        _report_cli(self.bin, _drc_report(version=version), 0)
+        spec, fn = self.registry.get("pcb.unconnected")
+        ctx = gates_mod.GateContext(
+            root=self.root, ledger=Ledger(meta=ProjectMeta(name="pcb")), model=None,
+            params=dict(_baseline(), pcb_board=self.board),
+            out_dir=os.path.join(self.root, "out"), tier=1, log=lambda _m: None, extra={})
+        trace = verdicts.GateTrace()
+        with mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ["PATH"]}):
+            verdict = gates_mod.run_gate(spec, fn, ctx, trace=trace)
+        anchors = verdicts.anchors_for(self.root, self.registry, out_dir=ctx.out_dir)
+        return verdict, verdicts.Reads.from_trace(trace, anchors=anchors)
+
+    def test_the_release_is_keyed(self):
+        from nopekit import verdicts
+        nine, nine_reads = self.reads("9.0.9")
+        ten, ten_reads = self.reads("10.0.8")
+        self.assertEqual((nine.outcome, ten.outcome), ("pass", "pass"))
+        self.assertIn("<pack:pcb-kicad>/gates/kicad-cli/9.0.9.json", nine_reads.files)
+        self.assertIn("<pack:pcb-kicad>/gates/kicad-cli/10.0.8.json", ten_reads.files)
+        self.assertNotEqual(verdicts.rho_control("pcb.unconnected", "static", nine_reads),
+                            verdicts.rho_control("pcb.unconnected", "static", ten_reads))
+        self.assertTrue(nine.detail.endswith("; kicad-cli 9.0.9"), nine.detail)
+
+    def test_a_release_with_no_record_is_keyed_and_said(self):
+        verdict, reads = self.reads("10.0.9")
+        self.assertIsNone(reads.files.get("<pack:pcb-kicad>/gates/kicad-cli/10.0.9.json", "x"))
+        self.assertTrue(verdict.detail.endswith(
+            "; kicad-cli 10.0.9 (no record of it in this pack: measured 9.0.9, 10.0.8)"),
+            verdict.detail)
+
+    def test_each_record_says_what_its_release_reads(self):
+        records = sorted(n for n in os.listdir(RELEASES) if n.endswith(".json"))
+        self.assertEqual(records, ["10.0.8.json", "9.0.9.json"])
+        formats = {}
+        for name in records:
+            with open(os.path.join(RELEASES, name), encoding="utf-8") as fh:
+                record = json.load(fh)
+            self.assertEqual(sorted(record), sorted(["release", "board_format",
+                                                     "schematic_format", "measured", "on",
+                                                     "shown"]))
+            self.assertEqual(record["release"] + ".json", name)
+            formats[record["release"]] = (record["board_format"], record["schematic_format"])
+        self.assertEqual(formats["9.0.9"], (K.header_version(BOARD), K.header_version(
+            os.path.join(ASSETS, "esd_guard.kicad_sch"))))
+        self.assertEqual(formats["10.0.8"], (K.header_version(K10_BOARD), K.header_version(
+            os.path.join(K10, "esd_guard.kicad_sch"))))
+
+
+class AFileTooNewForTheToolIsAToolLimit(_StandIn):
+    """kicad-cli 9.0.9 exits 3 on a board or schematic KiCad 10 saved (measured).
+    That reads as a skip naming the release, as a missing tool does, never as an
+    error. (What slipped through: every tier-1 gate read errored on that one
+    predictable cause, louder than the tier-0 skip for the same board.)"""
+
+    def setUp(self):
+        super().setUp()
+        for name in ("esd_guard.kicad_pcb", "esd_guard.kicad_sch"):
+            shutil.copyfile(os.path.join(K10, name),
+                            os.path.join(self.root, "b" + name[len("esd_guard"):]))
+        _stand_in(self.bin, "kicad-cli",
+                  "import sys\n"
+                  "if sys.argv[1:2] == ['version']:\n"
+                  "    print('9.0.9'); sys.exit(0)\n"
+                  "print('Failed to load board'); sys.exit(3)\n")
+
+    def test_drc_and_erc_skip_naming_the_release(self):
+        for gid, kind, reads, fmt in (("pcb.drc", "board", 20241229, 20260206),
+                                      ("pcb.parity", "board", 20241229, 20260206),
+                                      ("pcb.unconnected", "board", 20241229, 20260206),
+                                      ("pcb.erc", "schematic", 20250114, 20260306)):
+            with self.subTest(gate=gid):
+                verdict = self.gate(gid)
+                self.assertEqual(verdict.outcome, "skipped", verdict.render())
+                self.assertTrue(verdict.skip_reason.startswith(
+                    f"kicad-cli 9.0.9 reads {kind} formats through {reads}; this {kind} is "
+                    f"format {fmt}, saved by a newer KiCad: a tool limit, not a defect"),
+                    verdict.skip_reason)
+                self.assertLessEqual(len(verdict.skip_reason), 200)
+                self.assertFalse(verdict.skip_reason.endswith("..."), verdict.skip_reason)
+
+    def test_a_file_the_release_reads_still_errors(self):
+        self.board = _board_copy(self.root, _board_text(), stem="old")
+        verdict = self.gate("pcb.drc")
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("exited 3 without a report", verdict.error)
+
+    @unittest.skipIf(not _kicad_cli_release().startswith("9."), "needs kicad-cli 9")
+    def test_kicad_9_on_the_committed_kicad_10_project(self):
+        os.remove(os.path.join(self.bin, "kicad-cli"))
+        params = _pack_params(pcb_board=K10_BOARD)
+        for gid in ("pcb.drc", "pcb.erc", "pcb.parity", "pcb.unconnected"):
+            with self.subTest(gate=gid):
+                verdict = _run(self.registry, gid, self.root, params)
+                self.assertEqual(verdict.outcome, "skipped", verdict.render())
+                self.assertRegex(verdict.skip_reason, r"^kicad-cli 9\.0\.\d+ reads ")
+
+
+class ParityCountsWhatIsBuilt(_StandIn):
+    """A part, a value, a footprint or a pad's net that differs is counted;
+    BOM fields, footprint filters, board-only drawing and an exclusion are said
+    apart; a type this pack does not know is named, and alone is an error.
+    (What slipped through: under KiCad 10.0.8, 32 of a board's 33 parity items
+    were BOM fields, and on another board all 16 were mounting holes.)"""
+
+    HOLE_ID = "aaaaaaaa-bbbb-4ccc-8ddd-000000000001"
+
+    def setUp(self):
+        super().setUp()
+        tree = K.load_tree(BOARD)
+        hole = ["footprint", K.Q("MountingHole:MountingHole_2.1mm"), ["layer", K.Q("F.Cu")],
+                ["uuid", K.Q(self.HOLE_ID)], ["at", "10", "12"],
+                ["property", K.Q("Reference"), K.Q("REF**"), ["at", "0", "0", "0"]],
+                ["property", K.Q("Value"), K.Q("MountingHole"), ["at", "0", "0", "0"]],
+                ["attr", "exclude_from_pos_files", "exclude_from_bom"],
+                ["pad", K.Q(""), "np_thru_hole", "circle", ["at", "0", "0"],
+                 ["size", "2.1", "2.1"], ["drill", "2.1"], ["layers", K.Q("*.Cu"), K.Q("*.Mask")],
+                 ["uuid", K.Q("aaaaaaaa-bbbb-4ccc-8ddd-000000000002")]]]
+        tree.append(hole)
+        self.board = _board_copy(self.root, K.dump(tree) + "\n")
+        self.j1 = str(K.value(_footprint(tree, "J1"), "uuid"))
+
+    def parity(self, items):
+        _report_cli(self.bin, _drc_report(parity=items), 5 if items else 0)
+        return self.gate("pcb.parity")
+
+    def test_bom_fields_and_board_only_drawing_are_said_apart(self):
+        items = [_item("footprint_symbol_field_mismatch", uuid=self.j1) for _ in range(32)]
+        items.append(_item("extra_footprint", uuid=self.HOLE_ID))
+        verdict = self.parity(items)
+        self.assertEqual((verdict.outcome, verdict.measured), ("pass", 0), verdict.render())
+        self.assertIn("said apart, not counted: 32x footprint_symbol_field_mismatch (symbol "
+                      "field(s) that differ), 1x board-only drawing not marked 'Not in "
+                      "schematic' (REF**)", verdict.detail)
+
+    def test_what_is_built_is_counted(self):
+        for name, item in (("a value", _item("footprint_symbol_mismatch", uuid=self.j1)),
+                           ("a part with pins", _item("extra_footprint", uuid=self.j1)),
+                           ("an id the board does not keep", _item("extra_footprint")),
+                           ("a pad's net", _item("net_conflict", uuid=self.j1))):
+            with self.subTest(item=name):
+                verdict = self.parity([item])
+                self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1),
+                                 verdict.render())
+
+    def test_duplicates_with_no_reference_and_no_pins_are_drawing(self):
+        item = _item("duplicate_footprints", uuid=self.HOLE_ID)
+        item["items"].append({"description": "Footprint REF**", "uuid": self.HOLE_ID})
+        verdict = self.parity([item])
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+
+    def test_a_type_this_pack_does_not_know_is_named(self):
+        verdict = self.parity([_item("footprint_new_check")])
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertTrue(verdict.error.startswith("1x footprint_new_check: parity of a type "
+                                                 "this pack does not know"), verdict.error)
+        verdict = self.parity([_item("footprint_new_check"),
+                               _item("footprint_symbol_mismatch", uuid=self.j1)])
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("of a type this pack does not know, not counted: 1x footprint_new_check",
+                      verdict.detail)
+
+    def test_the_drawing_rule(self):
+        tree = K.load_tree(self.board)
+        self.assertTrue(K.not_a_part(K.footprints_by_id(tree)[self.HOLE_ID]))
+        self.assertFalse(K.not_a_part(_footprint(tree, "J1")))
+        named = copy.deepcopy(K.footprints_by_id(tree)[self.HOLE_ID])
+        for prop in K.children(named, "property"):
+            if prop[1] == "Reference":
+                prop[2] = K.Q("H1")
+        named[:] = [x for x in named if K.head(x) != "attr"]
+        self.assertFalse(K.not_a_part(named), "a BOM would take H1: it is bought")
+
+
+class TheStageTakesTheProjectsLibraries(_StandIn):
+    """The libraries a project's tables name through ${KIPRJMOD}, inside the
+    project, go to the stage at their place relative to the board; one that is
+    not there, or outside the project, is named. (What slipped through: the
+    stage copied the tables and none of their libraries, and ERC called the
+    project's own libraries "not found".)"""
+
+    #: A stand-in that writes a clean report naming, in each item's words, which
+    #: of the libraries the board's tables name it can see from the stage.
+    SEES = ("import json, os, sys\n"
+            "board = sys.argv[-1]\n"
+            "here = os.path.dirname(board)\n"
+            "seen = sorted(p for p in ('lib', '../libs/SOT.pretty', '../libs/sym.kicad_sym')\n"
+            "              if os.path.exists(os.path.join(here, p)))\n"
+            "out = sys.argv[sys.argv.index('-o') + 1]\n"
+            "json.dump({'kicad_version': '9.0.9', 'violations': [], 'unconnected_items': [],\n"
+            "           'schematic_parity': [], 'sheets': [], 'seen': seen}, open(out, 'w'))\n")
+
+    def project(self, sym_rows: list[str], fp_rows: list[str]) -> str:
+        hw = os.path.join(self.root, "hw")
+        os.makedirs(hw)
+        for name in ("b.kicad_pcb", "b.kicad_sch", "b.kicad_pro"):
+            shutil.copyfile(os.path.join(self.root, name), os.path.join(hw, name))
+        for table, head, rows in (("sym-lib-table", "sym_lib_table", sym_rows),
+                                  ("fp-lib-table", "fp_lib_table", fp_rows)):
+            with open(os.path.join(hw, table), "w", encoding="utf-8") as fh:
+                fh.write(f"({head}\n\t(version 7)\n" + "".join(
+                    f'\t(lib (name "{n}")(type "KiCad")(uri "{u}")(options "")(descr ""))\n'
+                    for n, u in (r.split("=", 1) for r in rows)) + ")\n")
+        os.makedirs(os.path.join(self.root, "libs", "SOT.pretty"))
+        with open(os.path.join(self.root, "libs", "sym.kicad_sym"), "w") as fh:
+            fh.write("(kicad_symbol_lib (version 20220914))\n")
+        return os.path.join(hw, "b.kicad_pcb")
+
+    def seen(self, verdict) -> list[str]:
+        report = next(e for e in verdict.evidence if e.endswith((".json")))
+        with open(report, encoding="utf-8") as fh:
+            return json.load(fh)["seen"]
+
+    def test_the_tables_libraries_keep_their_place(self):
+        self.board = self.project(
+            ["sym=${KIPRJMOD}/../libs/sym.kicad_sym", "stock=${KICAD9_SYMBOL_DIR}/x.kicad_sym"],
+            ["sot=${KIPRJMOD}/../libs/SOT.pretty", "gone=${KIPRJMOD}/../missing/x.pretty",
+             "away=${KIPRJMOD}/../../away.pretty"])
+        _stand_in(self.bin, "kicad-cli", self.SEES)
+        drc = self.gate("pcb.drc")
+        self.assertEqual(drc.outcome, "pass", drc.render())
+        self.assertEqual(self.seen(drc), ["../libs/SOT.pretty"],
+                         "a board's run takes the footprint table's libraries")
+        self.assertIn("not staged with the board: fp-lib-table gone (${KIPRJMOD}/../missing/"
+                      "x.pretty): nothing there; fp-lib-table away (${KIPRJMOD}/../../"
+                      "away.pretty) is outside the project", drc.detail)
+        erc = self.gate("pcb.erc")
+        self.assertEqual(erc.outcome, "pass", erc.render())
+        self.assertEqual(self.seen(erc), ["../libs/SOT.pretty", "../libs/sym.kicad_sym"])
+        self.assertNotIn("stock", erc.detail, "a library of the host is not the stage's")
+
+    @unittest.skipIf(shutil.which("kicad-cli") is None, "needs the real kicad-cli")
+    def test_kicad_finds_a_library_one_directory_up(self):
+        hw = os.path.join(self.root, "hw")
+        os.makedirs(hw)
+        for name in ("b.kicad_pcb", "b.kicad_sch", "b.kicad_pro"):
+            shutil.copyfile(os.path.join(self.root, name), os.path.join(hw, name))
+        for table in ("sym-lib-table", "fp-lib-table"):
+            with open(os.path.join(ASSETS, table), encoding="utf-8") as fh:
+                text = fh.read().replace("${KIPRJMOD}/lib/", "${KIPRJMOD}/../lib/")
+            with open(os.path.join(hw, table), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        params = dict(_baseline(), pcb_board=os.path.join(hw, "b.kicad_pcb"))
+        for gid in ("pcb.drc", "pcb.erc"):
+            with self.subTest(gate=gid):
+                verdict = _run(self.registry, gid, self.root, params)
+                self.assertEqual(verdict.outcome, "pass", verdict.render())
+
+
+class TheBroadTagsAreLeftToTheirOtherPacks(unittest.TestCase):
+    """`connectivity`, `clearance` and `manufacturability` are listed by gates of
+    other packs too, so this pack's KiCad gates list narrow words of their own.
+    (What slipped through: a claim about a printed part tagged
+    `manufacturability` was covered by pcb.drc and pcb.fab_rules.)"""
+
+    def test_each_gate_lists_its_own_word(self):
+        registry = _registry()
+        claims = {s.id: set(s.claims) for s in registry.specs()}
+        for gid in ("pcb.drc", "pcb.unconnected", "pcb.parity", "pcb.fab_rules"):
+            with self.subTest(gate=gid):
+                self.assertFalse(claims[gid] & {"connectivity", "clearance", "manufacturability"},
+                                 claims[gid])
+        for tag, bound in (("pcb-manufacturability", ["pcb.drc", "pcb.fab_rules"]),
+                           ("copper-clearance", ["pcb.drc"]),
+                           ("copper-connectivity", ["pcb.unconnected"]),
+                           ("schematic-parity", ["pcb.parity"])):
+            with self.subTest(tag=tag):
+                self.assertEqual(sorted(s.id for s in registry.for_claim("C1", [tag])), bound)
+
+    def test_the_move_is_named(self):
+        with open(os.path.join(PACK, "PACK.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        moved = text.split("## Tags this pack no longer lists", 1)[1].split("\n## ", 1)[0]
+        for old, new in (("connectivity", "copper-connectivity"),
+                         ("clearance", "copper-clearance"),
+                         ("manufacturability", "pcb-manufacturability")):
+            with self.subTest(tag=old):
+                self.assertIn(f"`{old}`", moved)
+                self.assertIn(f"`{new}`", moved)
+        with open(os.path.join(PACK, "pack.json"), encoding="utf-8") as fh:
+            classes = json.load(fh)["claim_classes"]
+        self.assertFalse({"connectivity", "clearance", "manufacturability"} & set(classes))
+
+
+class InstallingNamesKiCad10(unittest.TestCase):
+    """installing.md gives a KiCad 10 route and the 3D-model variables. (What
+    slipped through: it offered KiCad 8 or 9 only, and never named the
+    variable a KiCad 6 board's models are named by.)"""
+
+    def test_the_routes_and_variables(self):
+        with open(os.path.join(PACK, "references", "installing.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        for said in ("kicad/kicad:10.0", "ppa:kicad/kicad-10.0-releases", "10.0.x",
+                     "KICAD6_3DMODEL_DIR", "KICAD10_3DMODEL_DIR"):
+            with self.subTest(said=said):
+                self.assertIn(said, text)
 
 
 if __name__ == "__main__":

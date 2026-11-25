@@ -23,16 +23,17 @@ by tracks is reported as such, never judged on the pour.
 and name a track's net by its code (``(net 3)``). KiCad 10 stopped writing codes
 at board format 20251028: every pad, track, via and zone names its net
 (``(net "DP")``), and the file holds no table. The reader takes both, so the gates
-see the same nets either way. It is checked against KiCad 9 boards only
-(:data:`MAX_BOARD_VERSION`): ``pcb.board_readable``, the power rules and
-``pcb.fab_rules``'s service guard skip a newer file (:func:`reader_ceiling`), and
-the other tier-0 gates need the guard. ``pcb.enclosure_fit`` skips a newer
-file too, before it reads a part's 3D model or courtyard (general-packs P7). One
-tier-1 gate still reads a newer file with it: ``pcb.parity``, for the pads that
-have no net, once kicad-cli has loaded the board. (What slipped through, in the
-review of P4: this paragraph said a newer file is never read on trust, while the
-service guard read a KiCad 10 file's stackup and vias. The same review noted
-that the fit read its footprints and models.)
+see the same nets either way. It is checked against KiCad 9 and KiCad 10 boards
+(:data:`MAX_BOARD_VERSION`, with ``selftest/assets/kicad10/``, which KiCad 10.0.8
+saved): ``pcb.board_readable``, the power rules and ``pcb.fab_rules``'s service
+guard skip a newer file (:func:`reader_ceiling`), and the other tier-0 gates need
+the guard. ``pcb.enclosure_fit`` skips a newer file too, before it reads a part's
+3D model or courtyard (general-packs P7). One tier-1 gate still reads a newer
+file with it: ``pcb.parity``, for the pads that have no net and the footprints
+that have no numbered pad, once kicad-cli has loaded the board. (What slipped
+through, in the review of P4: this paragraph said a newer file is never read on
+trust, while the service guard read a KiCad 10 file's stackup and vias. The same
+review noted that the fit read its footprints and models.)
 
 **The formula.** :func:`temp_rise_c` is IPC-2221's trace-heating curve fit,
 cited in ``references/ipc-2221.md`` with the range it was fitted over.
@@ -363,25 +364,58 @@ def load_tree(path: str) -> list:
         return parse(fh.read())
 
 
+#: How much of a file :func:`header_version` reads: KiCad writes ``(version N)``
+#: on the file's second line, so 4 KiB is far past it on any file it saves.
+HEADER_BYTES = 4096
+
+_HEADER_VERSION = re.compile(r"^\s*\(\s*kicad_(?:pcb|sch)\s+\(\s*version\s+(\d+)\s*\)")
+
+
+def header_version(path: str) -> int | None:
+    """The ``(version N)`` a board's or schematic's first expression opens with,
+    read from the head of the file alone, or None when the head is not one.
+    For the words of a tool limit (``pcb._kicad_cli``), never for a verdict: the
+    gates that judge a file parse all of it."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(HEADER_BYTES)
+    except OSError:
+        return None
+    match = _HEADER_VERSION.match(head)
+    return int(match.group(1)) if match else None
+
+
 # --------------------------------------------------------------------------- #
 # Whether this reader can vouch for a board
 # --------------------------------------------------------------------------- #
 
-#: The newest board file version this reader was written and checked against:
-#: KiCad 9.0's (``(version 20241229)``, unchanged through 9.0.9). A newer file may
-#: have moved what the reader looks for (KiCad 10 stopped writing net codes and
-#: split the via types), so the guard skips it rather than read it on trust: a
-#: newer format is a limit of this reader, not a defect in the board. It moves to
-#: KiCad 10's 20260206 only when a board saved by KiCad 10.0.x is committed as a
-#: reader fixture and passes the pack's readers; this pack was written on a
-#: machine with KiCad 9.0.9 alone, so no such board exists yet (an accepted gap,
-#: PACK.md). Rejected: accepting any version (a reader that silently finds no
-#: tracks on a new format reports a clean board); raising it on the 10.0 source
-#: alone (the source says what KiCad writes, not that this reader reads it);
-#: failing a newer file (the earlier rule: every board saved by current KiCad read
-#: FAIL, a wrong FAIL across the whole category); a ceiling per minor release (the
-#: format version, not the application's, is what moves).
-MAX_BOARD_VERSION = 20241229
+#: The newest board file version this reader was checked against: KiCad 10.0's
+#: (``(version 20260206)``, what KiCad 10.0.8's pcbnew and ``kicad-cli pcb
+#: upgrade`` write). A newer file may have moved what the reader looks for (KiCad
+#: 10 stopped writing net codes and split the via types), so the guard skips it
+#: rather than read it on trust: a newer format is a limit of this reader, not a
+#: defect in the board. It was KiCad 9.0's 20241229 until a board KiCad 10 saved
+#: was committed as a reader fixture (``selftest/assets/kicad10/``, made in the
+#: kicad/kicad:10.0 image by ``make_kicad10.py``) and read the same as the KiCad 9
+#: board it came from: every footprint, pad, pin name and net by name, every
+#: track and its length, the pads' ids, the lands, and on a second board the
+#: blind, buried and micro vias, a stated stackup and a filled pour
+#: (``tests/test_pcb_kicad.py``, ``AKiCad10BoardReadsAsItsKiCad9Original``). What
+#: slipped through at 20241229: KiCad 10 is the current release, and in the
+#: holdout run on outside designs every pcb-kicad gate skipped on the two KiCad 10
+#: boards, with nothing a person could do but down-convert the board. Rejected:
+#: accepting any version (a reader that silently finds no tracks on a new format
+#: reports a clean board); raising it on the 10.0 source alone (the source says
+#: what KiCad writes, not that this reader reads it); failing a newer file (the
+#: earlier rule: every board saved by current KiCad read FAIL, a wrong FAIL across
+#: the whole category); a ceiling per minor release (the format version, not the
+#: application's, is what moves). The next move is the same: a board the next
+#: KiCad saved, committed and read, then this number.
+MAX_BOARD_VERSION = 20260206
+
+#: The KiCad release that writes :data:`MAX_BOARD_VERSION`, for the words a
+#: ceiling skip says. The format, not the release, is what is checked.
+MAX_BOARD_RELEASE = "KiCad 10.0"
 
 #: The oldest: KiCad 6 (``20211014``), the first S-expression board format with
 #: ``pinfunction`` on pads. KiCad 5's is a different file and is refused.
@@ -414,7 +448,7 @@ def reader_ceiling(version: int | None) -> str:
     if version is None or version <= MAX_BOARD_VERSION:
         return ""
     return (f"this reader was checked through board format {MAX_BOARD_VERSION} "
-            f"(KiCad 9.0); the file is format {version}")
+            f"({MAX_BOARD_RELEASE}); the file is format {version}")
 
 
 def board_problems(tree: list) -> tuple[int | None, list[str]]:
@@ -424,7 +458,7 @@ def board_problems(tree: list) -> tuple[int | None, list[str]]:
     when the file is not a board or states no version, and the one problem says
     which.
 
-    A board newer than KiCad 9 (:func:`reader_ceiling`, listed here too, so a
+    A board newer than KiCad 10 (:func:`reader_ceiling`, listed here too, so a
     caller that does not ask for the ceiling still refuses it) or older than
     KiCad 6, or one whose tracks or vias name a net code its table does not
     define, is one whose nets this reader may read wrongly or not at all. The
@@ -849,6 +883,41 @@ def pad_nets_by_id(tree: list) -> dict[str, str]:
     """{the id a report gives a pad: its net name, "" for none}, for every pad
     whose id KiCad keeps (:func:`_pads_by_id`)."""
     return {i: net for i, net in _pads_by_id(tree) if i is not None}
+
+
+def footprints_by_id(tree: list) -> dict[str, list]:
+    """{the id a report gives a footprint: its tree}, for every footprint whose id
+    KiCad keeps (:func:`kiid` of its ``uuid``, KiCad 8 and later, or ``tstamp``,
+    KiCad 6 and 7). A parity report names a footprint by this id."""
+    out = {}
+    for fp in children(tree, "footprint"):
+        found = None
+        for key in ("uuid", "tstamp"):
+            found = found or kiid(value(fp, key))
+        if found:
+            out[found] = fp
+    return out
+
+
+#: The last character of a reference KiCad writes for a footprint nobody
+#: annotated: ``REF**`` (a footprint placed from the library), ``G***`` (a logo
+#: from KiCad's image converter), ``U?`` (KiCad 5's unannotated symbol).
+UNANNOTATED = ("*", "?")
+
+
+def not_a_part(fp: list) -> bool:
+    """Whether a footprint is board-only drawing, never a part: it has no
+    numbered pad (no pin of a circuit: only unnumbered holes, or no pads at all),
+    and no bill of materials takes it (no reference, an unannotated one, or
+    ``exclude_from_bom``). A mounting hole, a logo, an outline.
+
+    A footprint with a numbered pad is a part whatever its reference, and so is
+    one a BOM would list: a pinless standoff with a reference is bought."""
+    if any(len(p) > 1 and str(p[1]).strip() for p in children(fp, "pad")):
+        return False
+    ref, _val = footprint_ref(fp)
+    attrs = [str(a) for a in (child(fp, "attr") or [])[1:]]
+    return not ref.strip() or ref.strip().endswith(UNANNOTATED) or "exclude_from_bom" in attrs
 
 
 def fab_findings(doc: dict, table: dict, pads: tuple[set[str], int],

@@ -77,6 +77,10 @@ nopekit = [
   # library tables (no extension) that KiCad reads from the board's directory.
   "**/*.kicad_pcb", "**/*.kicad_pro", "**/*.kicad_sch", "**/*.kicad_dru",
   "**/fp-lib-table", "**/sym-lib-table",
+  # The library entries a baseline's tables name in the pack itself (pcb-kicad's
+  # `selftest/assets/lib/`, its controls sealed against the host's library: the
+  # holdout run of general-packs H1).
+  "**/*.kicad_mod", "**/*.kicad_sym",
   # ngspice decks and OpenModelica models.
   "**/*.cir", "**/*.mo",
   # OpenFOAM: a case is extensionless dictionaries in three directories, the

@@ -23,14 +23,14 @@ has heard its radio.
 
 | Gate | Tier | Basis | Settles |
 |---|---|---|---|
-| `pcb.board_readable` | 0 | model-only | the board is a KiCad 6-9 file whose every track names a defined net (the guard); nets read by code and by name; a newer file is skipped, never failed |
+| `pcb.board_readable` | 0 | model-only | the board is a KiCad 6-10 file whose every track names a defined net (the guard); nets read by code and by name; a newer file is skipped, never failed |
 | `pcb.pin_names` | 0 | sourced | pins the library gives one name (a TVS array's two `COM`, a part's several `GND`) carry one net, except the ends of a series element stated per ref (`pcb_pin_names_series`); the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` |
 | `pcb.land_pattern` | 0 | model-only | each footprint `pcb_land_drawings` names fits its vendor's drawing: pads paired by pin function (anchored on the pads of a function of their own when the pairings are too many to try), one rigid fit with no mirror, every centre within half its smaller pad's smaller side |
 | `pcb.net_width` | 0 | sourced | every track of each named net stays inside its temperature-rise limit, IPC-2221; the detail names the hottest stretch |
-| `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing, at every severity by default, and every custom rule in the board's `.kicad_dru`, and every property its conditions read, is shown to select something |
+| `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing a person did not exclude in KiCad, at every severity by default, and every custom rule in the board's `.kicad_dru`, and every property its conditions read, is shown to select something; the line names the errors first |
 | `pcb.unconnected` | 1 | established | KiCad finds no connection the netlist asks for and the copper does not make |
-| `pcb.erc` | 1 | established | `kicad-cli sch erc` finds nothing in the schematic, at every severity by default |
-| `pcb.parity` | 1 | established | KiCad finds no difference between the board and its schematic: parts, values, footprints, pad nets (an open pin on a pad with no net is agreement) |
+| `pcb.erc` | 1 | established | `kicad-cli sch erc` finds nothing in the schematic a person did not exclude, at every severity by default |
+| `pcb.parity` | 1 | established | KiCad finds no difference between the board and its schematic in what is built: parts, values, footprints, pad nets (an open pin on a pad with no net is agreement; symbol fields, footprint filters and board-only drawing are said apart) |
 | `pcb.fab_rules` | 1 | sourced | KiCad's DRC with the named fab's published minimums, for the service the board is ordered on, as the only custom rules finds nothing past them; a dielectric or via kind the service does not list skips |
 | `pcb.spice` | 1 | established | a `.meas` result of `ngspice -b` on the project's deck stays inside `pcb_spice_min` / `pcb_spice_max`; an option name ngspice does not know (on a `.options` card or an `option` command), a measure two `.meas` cards define, or a `.meas tran` window outside the run, is refused first |
 | `pcb.enclosure_fit` | 1 | established | each board, every part's 3D model (or declared height) in place and turned to any orientation, shares no volume with its enclosure or with another board in it, and each part keeps the clearance of the claim tagged `enclosure-fit`, but against a feature a by-design contact names (OpenCascade) |
@@ -44,10 +44,16 @@ has heard its radio.
 
 The tier-0 gates read the board with this pack's own reader (`gates/_kicad.py`,
 standard library only), so they run without KiCad, CI included. The tier-1 gates
-run `kicad-cli` on a copy of the board or schematic (every sheet, the project file
-and the library tables with it) under the gate's out directory: the verdict
-is KiCad's exit code and its report's count, and if the two disagree the gate
-errors. `pcb.spice` runs `ngspice -b` the same way, `pcb.enclosure_fit` runs
+run `kicad-cli` on a copy of the board or schematic (every sheet, the project file,
+the library tables and the project libraries they name with it) under the gate's
+out directory: the verdict is its report's count, less what a person excluded in
+KiCad, and if kicad-cli's exit code disagrees with the report the gate errors.
+Each verdict names the kicad-cli release that ran, and the release is part of
+what the gate read: a control run under KiCad 9 and one under KiCad 10 are two
+qualifications, never two outcomes of one (`gates/kicad-cli/`, one record per
+release this pack was measured on: 9.0.9 and 10.0.8). A file newer than the
+running kicad-cli reads (a KiCad 10 board under kicad-cli 9) is a skip that
+names the release, as a missing tool is. `pcb.spice` runs `ngspice -b` the same way, `pcb.enclosure_fit` runs
 `kicad-cli pcb export step` and then OpenCascade (through CadQuery) in a child
 process, and `pcb.antenna_keepout` refills the board's zones with KiCad's own
 `pcbnew` in a child process before its two DRC runs. They read inside
@@ -58,8 +64,8 @@ skip where they do not.
 `pcb.pin_names`, `pcb.net_width` and `pcb.land_pattern` need `pcb.board_readable`:
 on a board this reader cannot vouch for they are not run, and read Skipped,
 `prerequisite failed`. On a board newer than the reader was checked through (a
-KiCad 10 file) the guard skips, and they read Skipped, `prerequisite not
-established`: a newer format is a limit of the reader, not a defect in the
+file newer than KiCad 10's) the guard skips, and they read Skipped, `prerequisite
+not established`: a newer format is a limit of the reader, not a defect in the
 board. The battery, mis-mating and USB-C rules read the boards their records
 name, which the guard may never read, so each makes the guard's own checks on its
 board: it errors on one that fails them, and skips a newer one with the guard's
@@ -281,7 +287,8 @@ Read this before you write a claim. Every one of these has passed a "0 violation
 - **A board with no schematic.** A netlist built in a script has no ERC and no
   parity to check: `pcb.erc` and `pcb.parity` skip, and the script's dictionary is
   the only record of what connects to what. Tag a claim that every connection is
-  made `copper-connectivity`, not `connectivity`, or `pcb.parity`'s skip holds it.
+  made `copper-connectivity`, which binds `pcb.unconnected` alone, so
+  `pcb.parity`'s skip does not hold it.
 - **What a written schematic cannot add.** On a schematic `pcb.schematic_from_board`
   wrote, parity checks only the writer's copy of the board's nets, never the
   design's intent; ERC judges nothing for a part on a generic or passive stand-in
@@ -369,20 +376,32 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   `track_width` rule that selects only vias is live); and a real property that
   sits on no item of this board (a via rule on a board with no vias) is a false
   error.
-- **A board saved by KiCad 10.** KiCad 10 writes board format 20260206, with
-  nets by name and no net codes. The reader reads nets by name, but it was
-  checked against KiCad 9 boards only: this pack was written where only KiCad
-  9.0.9 was installed, and no board saved by KiCad 10 is committed as a fixture.
-  Until one is, a KiCad 10 board reads Skipped on the tier-0 gates, the power
-  rules and `pcb.antenna_keepout` ("this reader was checked through board format
-  20241229 (KiCad 9.0)"),
-  never Checked and never Failing. `pcb.fab_rules` skips it for the same reason:
-  its service guard reads the stackup and vias with this reader, and so does
-  `pcb.enclosure_fit`, which reads each part's model and courtyard with it. The
-  other gates that run kicad-cli on the board are KiCad's own answer, and run on it
-  only with a kicad-cli that reads its format. KiCad 9.0.9's kicad-cli does not:
-  it prints "Failed to load board" and exits 3, so those gates read errored,
-  never Checked.
+- **A board saved by a KiCad newer than 10.** The reader was checked against
+  KiCad 9 and KiCad 10 boards: `selftest/assets/kicad10/` holds the baseline as
+  KiCad 10.0.8 saved it (board format 20260206, nets by name, no net codes) and a
+  second board with inner layers, a stated stackup, every via kind, a filled pour
+  and a keep-out, and the reader reads them as their KiCad 9 originals
+  (`make_kicad10.py` says how they were made). A file newer than that reads
+  Skipped on the tier-0 gates, the power rules, `pcb.fab_rules`'s service guard,
+  `pcb.enclosure_fit` and `pcb.antenna_keepout` ("this reader was checked through
+  board format 20260206 (KiCad 10.0)"), never Checked and never Failing, until a
+  board that KiCad saved is committed and read the same way. The gates that run
+  kicad-cli are KiCad's own answer, and run only with a kicad-cli that reads the
+  file: kicad-cli 9.0.9 prints "Failed to load board" on a KiCad 10 file and
+  exits 3, and the gate reads Skipped, naming the release and the format it
+  reads through. The KiCad 10 schematic (format 20260306) is read the same way.
+- **What KiCad's library checks compare with.** `lib_footprint_mismatch`,
+  `lib_footprint_issues` (DRC) and `lib_symbol_issues`, `lib_symbol_mismatch`,
+  `footprint_link_issues` (ERC) compare the design with the library each table
+  entry names. An entry in the project (`${KIPRJMOD}/...`) is staged with the
+  board and reads the same everywhere; an entry through KiCad's own variable
+  (`${KICAD9_FOOTPRINT_DIR}`) is the host's library, whose copy moves with the
+  KiCad installed: KiCad 10.0.8's footprints differ from the 7.0.11 copies this
+  pack's baseline was drawn from, and it reports each one. Those findings
+  count, at every severity, like any other: a footprint that has drifted from
+  its library may be a real edit. Keep the libraries the design uses in the
+  project, as the baseline does (`selftest/assets/lib/`), and its verdict reads
+  the same on every host.
 - **The land beyond its centres.** `pcb.land_pattern` judges pad centres in the
   top view, one rigid fit; pad sizes, paste, courtyard and pads the drawing omits
   (mounting pads) are not judged, so a pad of the wrong size, or turned 90 degrees
@@ -433,12 +452,11 @@ what it asserts.
 | Tag | Bound by |
 |---|---|
 | `pcb` | every gate here (too broad for a claim: use a narrower one) |
-| `design-rules`, `clearance` | `pcb.drc` |
-| `manufacturability` | `pcb.drc`, `pcb.fab_rules` |
+| `design-rules`, `copper-clearance` | `pcb.drc` |
+| `pcb-manufacturability` | `pcb.drc`, `pcb.fab_rules` |
 | `fab-limits` | `pcb.fab_rules` |
 | `circuit-simulation` | `pcb.spice` |
 | `enclosure-fit`, `packaging`, `interference` | `pcb.enclosure_fit` |
-| `connectivity` | `pcb.unconnected`, `pcb.parity` |
 | `copper-connectivity` | `pcb.unconnected` |
 | `netlist` | `pcb.unconnected`, `pcb.pin_names`, `pcb.erc`, `pcb.parity` |
 | `land-pattern` | `pcb.land_pattern` |
@@ -457,10 +475,28 @@ what it asserts.
 | `power-integrity` | `pcb.net_width`, `pcb.spice` |
 | `pcb-model-validity` | `pcb.board_readable` |
 
-A claim "every connection is made" tagged `connectivity` stays Checked through a
-silkscreen warning; tagged `pcb`, it would read Failing on it. On a board with no
-schematic, tag it `copper-connectivity`: `connectivity` brings in `pcb.parity`,
-which skips there, so the claim would read Skipped beside a pass.
+A claim "every connection is made" tagged `copper-connectivity` stays Checked
+through a silkscreen warning; tagged `pcb`, it would read Failing on it. It binds
+`pcb.unconnected` alone, so it holds on a board with no schematic too. A claim that
+the board is also the schematic's carries `schematic-parity` as well.
+
+## Tags this pack no longer lists
+
+Three words this pack's KiCad gates listed are listed by other packs' gates too,
+so a claim that carried one was covered by the gates of both: a claim about a
+printed part tagged `manufacturability` read a board's DRC finding. (What slipped
+through, in the holdout run on outside designs: `connectivity` bound
+`cad.assembly_connected` beside `pcb.unconnected` and `pcb.parity`; `clearance`
+bound `cad.clearance` beside `pcb.drc`; `manufacturability` bound the cad-solid
+mesh gates, every fdm-print gate and `bom.process_rules` beside `pcb.drc` and
+`pcb.fab_rules`.) A claim that carried one now binds no gate of this pack: move
+it to this pack's own word.
+
+| Was | Now | Bound by |
+|---|---|---|
+| `connectivity` | `copper-connectivity`, and `schematic-parity` for the board against its schematic | `pcb.unconnected`; `pcb.parity` |
+| `clearance` | `copper-clearance` | `pcb.drc` |
+| `manufacturability` | `pcb-manufacturability` | `pcb.drc`, `pcb.fab_rules` |
 
 ## Units and frames
 
@@ -573,13 +609,29 @@ The board's `.kicad_pro` (rules, net classes, ERC and DRC exclusions),
 under it), beside it with the same name, go to `kicad-cli` with it, and so do the
 project's `sym-lib-table` and `fp-lib-table`. Keep those two in the project: on a
 machine whose KiCad was never configured, ERC otherwise warns about every symbol
-("library not in the current configuration"). `pcb_schematic` names another root
-schematic for `pcb.erc`; `pcb.parity` always compares with the board's own, as
-KiCad does.
+("library not in the current configuration"). Each library a table names through
+`${KIPRJMOD}` and that is inside the project goes too, at its place relative to
+the board (`${KIPRJMOD}/../libs/...` included, so the board sits one directory
+down in the stage). An entry the stage cannot take is named in the verdict: one
+with nothing at its path ("nothing there"), and one outside the project root (or
+outside the board's own directory, for a board outside the project). An entry
+through any other variable is the host's (above). `pcb_schematic` names another
+root schematic for `pcb.erc`; `pcb.parity` always compares with the board's own,
+as KiCad does.
 **To waive a DRC or ERC finding, exclude it in KiCad** and commit the `.kicad_pro`:
-the exclusion is then a named, reviewable record. Never narrow `pcb_drc_severity`
-or `pcb_erc_severity` to make a warning go away; that hides every warning,
-including the next one.
+the exclusion is then a named, reviewable record, and KiCad's report marks the
+finding excluded, with the exclusion's comment. `pcb.drc`, `pcb.unconnected`,
+`pcb.erc` and `pcb.parity` count it apart and say it, by kind, with the first
+comment; `pcb.fab_rules` still counts a fab finding the project excludes, since
+the fab's published minimum is not the project's to waive. Never narrow
+`pcb_drc_severity` or `pcb_erc_severity` to make a warning go away; that hides
+every warning, including the next one. A design checked as someone else made it
+(a checkout of an outside design) carries only its authors' exclusions: keep the
+board, its schematic and its `.kicad_pro` in your project as your own copy,
+exclude there in KiCad with a comment that says why (a PWR_FLAG on a pin the
+library types bidirectional reads as `pin_to_pin` until a person says it is not
+a fault), and point `pcb_board` at the copy. Each exclusion is then your
+reviewable line, and the authors' file is untouched.
 
 A board updated from its schematic ("Update PCB from Schematic") carries each pad's
 library pin name. A board generated by a script must copy those names itself (the
@@ -618,6 +670,6 @@ back under 1 C or over 100 C, look at the units first.
   antenna's, the records and drawings, the refill, and the stock library survey.
 - `references/what-slipped-through.md`: the defects the source pipeline's checks
   passed, and which gate here answers each.
-- `references/installing.md`: getting `kicad-cli` (KiCad 9), ngspice, CadQuery,
+- `references/installing.md`: getting `kicad-cli` (KiCad 10 or 9), ngspice, CadQuery,
   `pcbnew` for the keep-out's refill, and the proposer's Java and Freerouting.
 - `lenses.md`: how to attack a board before anyone orders it.

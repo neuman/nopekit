@@ -87,8 +87,13 @@ def _claims_ledger() -> Ledger:
 
 
 #: The baseline project's library tables, copied beside every variant with its
-#: project file, so KiCad reads the same rules, exclusions and libraries.
+#: project file, so KiCad reads the same rules, exclusions and libraries; and the
+#: directories beside the board that the tables and the footprints name through
+#: ``${KIPRJMOD}`` (the pack's library copies, its 3D models). Without ``lib`` a
+#: variant's DRC would also find the libraries missing, and a known-bad control
+#: would fail for that as well as for its defect.
 _DIR_FILES = ("sym-lib-table", "fp-lib-table")
+_PROJECT_DIRS = ("3d", "lib")
 
 
 def _variant(ctx, name: str, edit=None, *, schematic=None) -> object:
@@ -113,9 +118,10 @@ def _variant(ctx, name: str, edit=None, *, schematic=None) -> object:
         shutil.copyfile(os.path.join(os.path.dirname(src), rel), os.path.join(stage, rel))
     if os.path.isfile(src_stem + ".kicad_dru"):
         shutil.copyfile(src_stem + ".kicad_dru", os.path.join(stage, stem + ".kicad_dru"))
-    models = os.path.join(stage, "3d")
-    if not os.path.isdir(models):
-        shutil.copytree(os.path.join(os.path.dirname(src), "3d"), models)
+    for folder in _PROJECT_DIRS:
+        if not os.path.isdir(os.path.join(stage, folder)):
+            shutil.copytree(os.path.join(os.path.dirname(src), folder),
+                            os.path.join(stage, folder))
     params["pcb_board"] = board
     return dataclasses.replace(ctx, params=params, ledger=Ledger())
 
