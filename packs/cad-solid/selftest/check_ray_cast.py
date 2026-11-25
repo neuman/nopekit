@@ -109,8 +109,8 @@ def _min_wall(solid, mesh, caster=None) -> tuple[float, int, int]:
 
     Duplicated from the gate on purpose: this file checks the CASTER, so it must
     not go through the gate's parameter handling, skip paths and verdict shaping to
-    reach it. Everything here that is also in the gate is four lines of vector
-    arithmetic that can be read side by side.
+    reach it. The surface classification is the gate's; the surface-to-surface
+    distance is computed here from each caster's hits.
     """
     import numpy as np
 
@@ -118,12 +118,12 @@ def _min_wall(solid, mesh, caster=None) -> tuple[float, int, int]:
     normals = np.asarray(mesh.face_normals, dtype=float)
     eps = max(1e-6, float(mesh.scale) * 1e-8)
     origins = centres - normals * eps
-    locations, index_ray = solid._cast_first_hit(
+    locations, index_ray, index_tri = solid._cast_first_hit(
         caster if caster is not None else mesh, origins, -normals)
     if len(index_ray) == 0:
         return math.inf, 0, len(origins)
     travel = np.linalg.norm(np.asarray(locations, dtype=float) - origins[index_ray], axis=1)
-    real = travel > 10.0 * eps
+    real = (travel > 10.0 * eps) & solid._wall_hits(mesh, index_ray, index_tri)
     if not real.any():
         return math.inf, 0, len(origins)
     return float((travel[real] + eps).min()), int(real.sum()), len(origins)
@@ -134,8 +134,12 @@ def main() -> int:
         import numpy  # noqa: F401
         import trimesh  # noqa: F401
     except ImportError as exc:
-        print(f"SKIPPED: {exc}. This check needs trimesh and numpy — the same two "
-              f"modules cad.wall_thickness declares.")
+        print(f"SKIPPED: {exc}. This check needs trimesh and numpy.")
+        return 0
+
+    import importlib.util
+    if not any(importlib.util.find_spec(name) for name in ("scipy", "networkx")):
+        print("SKIPPED: trimesh's surface groups need scipy or networkx.")
         return 0
 
     solid = _load_gate_module()

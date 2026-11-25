@@ -23,6 +23,8 @@ model's.
 """
 from __future__ import annotations
 
+import difflib
+import fnmatch
 import json
 import math
 import os
@@ -78,6 +80,57 @@ COM_TOL_KEYS = ("assembly_com_tol_mm", "com_tol_mm")
 #: the reading, and a project that publishes its measured thinnest wall under the
 #: bare name hands this gate a limit it never chose.
 MIN_WALL_KEYS = ("process_min_wall_mm", "min_wall_mm")
+
+# What slipped through with one minimum for every mesh: an ordinary product read
+# FAIL on parts that are thin on purpose or not made by the process at all. A bought
+# board, cover glass, a flex circuit and a shield can have a vendor's thickness. A
+# living hinge, a snap finger and a button flexure are thin by design. A light pipe
+# made in SLA beside FDM shells has another process minimum. Each wrong FAIL is the
+# moment somebody lowers the one minimum, and a lowered minimum passes a thin wall
+# anywhere. So three records narrow the rule. Each is refused when it is malformed,
+# never ignored, and a refusal FAILS the gate, as in cad.clash.
+
+#: ``{part name or glob: mm}``: a part's own process minimum. A key that is a
+#: part's name is that part's. Otherwise a key with ``*``, ``?`` or ``[`` is a
+#: pattern (``fnmatchcase``). A part with neither falls back to
+#: ``process_min_wall_mm``. *Rejected:* patterns "in the order written" (the
+#: design). The verdict cache digests a map with its keys sorted, so a reorder
+#: would change which minimum governs and leave the verdict's key unchanged: a
+#: stale pass served as current (invariant 7). So two patterns that match one part
+#: must state the same minimum, or the part is refused. A pattern that matches
+#: only exempt parts judges nothing and is refused; one that also matches a
+#: judged part governs that part. *Rejected:* a list form that carries an order
+#: (a second record shape for one fact), regular expressions (a reader cannot
+#: check one by eye), and refusing every pattern that matches an exempt part (a
+#: pattern that governs real parts would be refused because one bought part
+#: shares its prefix).
+MIN_WALL_BY_PART_KEYS = ("process_min_wall_mm_by_part",)
+
+#: ``{part: reason}``: parts that are not judged. The detail names them. Exact
+#: names only. *Rejected:* a pattern (it exempts parts nobody named: the wildcard
+#: that hides a defect in cad.clash), and a tiny per-part minimum (it reads as
+#: judged and passed; an exemption reads as not judged, and says so).
+WALL_EXEMPT_KEYS = ("wall_exempt_parts",)
+
+#: ``[{part, box_mm, min_mm, reason}]``: a region of one part judged at its own
+#: minimum. ``box_mm`` is ``[[x0, y0, z0], [x1, y1, z1]]`` in the assembly frame,
+#: x0 < x1, y0 < y1, z0 < z1. A ray that STARTS inside the box is judged against
+#: ``min_mm``. Every other ray of the part is judged against the part's minimum.
+#: *Rejected:* a lower minimum for the whole part (it passes a thin wall anywhere
+#: on the part, not only at the hinge), and judging a ray by where it lands or
+#: what it crosses (a ray from outside the box would take the box's minimum for a
+#: wall outside it).
+WALL_EXCEPTION_KEYS = ("wall_exceptions",)
+
+#: The only keys a ``wall_exceptions`` entry may carry. Any other is refused, with
+#: the nearest of these as a suggestion. What slipped through on the clearance
+#: pairs before they refused a number: a key the reader did not know was accepted
+#: and dropped, and the person who wrote it thought it was used.
+WALL_EXCEPTION_FIELDS = ("part", "box_mm", "min_mm", "reason")
+
+#: The characters that make a ``process_min_wall_mm_by_part`` key a pattern, as
+#: ``fnmatch`` reads them.
+_GLOB_CHARS = frozenset("*?[")
 
 
 # --------------------------------------------------------------------------- #
@@ -175,15 +228,6 @@ BONDED_CONTACT_DEPTH_TOL_MM = 0.05
 #: degenerate on any axis holds no volume at all and there is nothing for a kernel
 #: to measure — see the contact branch in :func:`clash`.
 AABB_MARGIN_MM = 0.05
-
-#: Ray budget for the wall-thickness sampler, as an exact ray COUNT. Above this many
-#: faces the gate casts from an evenly spaced deterministic subset of exactly this
-#: size rather than from every facet; a gate whose cost scales with tessellation
-#: density stops being runnable exactly when the model gets detailed enough to need
-#: it. Rejected: a stride (``n_faces // budget``), which is what this was — it gives
-#: stride 1 for any face count below twice the budget, so the real ceiling was about
-#: double the number stated here and the gate's cost was not the cost it declared.
-MAX_WALL_SAMPLES = 4000
 
 #: Formats that store a bag of triangles with no vertex identity. A file in one of
 #: these has no topology until somebody welds it, so this pack welds it once at the
@@ -501,7 +545,13 @@ def bounding(ctx: GateContext) -> Verdict:
 @gate(
     id="cad.watertight",
     title="Every solid is closed: no open edges, no non-manifold edges",
-    claims=["geometry", "mesh", "cad", "manufacturability"],
+    # `mesh-validity` is the closure gates' own tag, carried by these three and
+    # by nothing else: what slipped through while all four mesh gates shared
+    # geometry/mesh/cad/manufacturability was that no tag selected closure
+    # without the process wall, and a claim that the exported file is a valid
+    # solid failed on cad.wall_thickness's process minimum (PACK.md, "Claim
+    # vocabulary", names the move for older claims).
+    claims=["geometry", "mesh", "mesh-validity", "cad", "manufacturability"],
     tier=Tier.BUILD,
     settles="mesh watertightness",
     requires_python=["trimesh", "numpy"],
@@ -583,7 +633,8 @@ def watertight(ctx: GateContext) -> Verdict:
     id="cad.is_volume",
     basis="established",
     title="Every solid is a volume: closed, consistently wound, positive volume",
-    claims=["geometry", "mesh", "cad", "manufacturability"],
+    # `mesh-validity`: the closure gates' own tag; cad.watertight says why.
+    claims=["geometry", "mesh", "mesh-validity", "cad", "manufacturability"],
     tier=Tier.BUILD,
     settles="solid validity",
     requires_python=["trimesh", "numpy"],
@@ -727,7 +778,8 @@ def _weld_and_drop(mesh: Any, digits: int, area_eps: float, max_passes: int = 8)
 @gate(
     id="cad.degenerate_faces",
     title="No duplicate vertices and no zero-area triangles",
-    claims=["geometry", "mesh", "cad", "manufacturability"],
+    # `mesh-validity`: the closure gates' own tag; cad.watertight says why.
+    claims=["geometry", "mesh", "mesh-validity", "cad", "manufacturability"],
     tier=Tier.BUILD,
     settles="degenerate faces",
     requires_python=["trimesh", "numpy"],
@@ -842,14 +894,14 @@ _CAST_CHUNK_RT = 2_000_000
 _PARALLEL_COS_EPS = 1e-12
 
 
-def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]:
-    """``(locations, index_ray)`` of each ray's first forward hit.
+def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any, Any]:
+    """``(locations, index_ray, index_tri)`` of each ray's first forward hit.
 
     trimesh's own ray engines are used when one of them is importable. Neither is
     guaranteed: the pure-python engine culls candidates with an ``rtree`` index and
     the fast one needs an embree binding, and NEITHER is a dependency of trimesh.
-    On a machine with just trimesh and numpy — exactly what this gate declares in
-    ``requires_python`` — ``mesh.ray`` raises ``ModuleNotFoundError`` from inside the
+    On a machine with trimesh and numpy but neither ray engine, ``mesh.ray``
+    raises ``ModuleNotFoundError`` from inside the
     property, which reaches the spine as a CRASHED gate. A crash settles nothing and
     reads as "the design is wrong" rather than "the tool is missing", so the gate has
     to be able to do this itself with what it declared.
@@ -872,15 +924,16 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]
     origins = np.asarray(origins, dtype=float)
     directions = np.asarray(directions, dtype=float)
     try:
-        locations, index_ray, _ = mesh.ray.intersects_location(
+        locations, index_ray, index_tri = mesh.ray.intersects_location(
             origins, directions, multiple_hits=False)
-        return np.asarray(locations, dtype=float), np.asarray(index_ray, dtype=int)
+        return (np.asarray(locations, dtype=float), np.asarray(index_ray, dtype=int),
+                np.asarray(index_tri, dtype=int))
     except ImportError:
         pass
 
     tri = np.asarray(mesh.triangles, dtype=float)
     if len(tri) == 0 or len(origins) == 0:
-        return np.zeros((0, 3)), np.zeros(0, dtype=int)
+        return np.zeros((0, 3)), np.zeros(0, dtype=int), np.zeros(0, dtype=int)
     v0 = tri[:, 0, :]
     e1 = tri[:, 1, :] - v0
     e2 = tri[:, 2, :] - v0
@@ -896,6 +949,7 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]
 
     chunk = max(1, int(_CAST_CHUNK_RT // max(1, len(tri))))
     best = np.full(len(origins), np.inf)
+    which = np.zeros(len(origins), dtype=int)
     for start in range(0, len(origins), chunk):
         o = origins[start:start + chunk]
         d = directions[start:start + chunk]
@@ -909,20 +963,705 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]
         v = np.einsum("rj,rfj->rf", d, qvec) * inv
         t = np.einsum("fj,rfj->rf", e2, qvec) * inv
         hit = live & (u >= 0.0) & (v >= 0.0) & (u + v <= 1.0) & (t > 0.0)
-        best[start:start + chunk] = np.where(hit, t, np.inf).min(axis=1)
+        dist = np.where(hit, t, np.inf)
+        which[start:start + chunk] = dist.argmin(axis=1)
+        best[start:start + chunk] = dist.min(axis=1)
 
     index_ray = np.nonzero(np.isfinite(best))[0]
     locations = origins[index_ray] + directions[index_ray] * best[index_ray][:, None]
-    return locations, index_ray
+    return locations, index_ray, which[index_ray]
+
+
+#: Adjacent surfaces this close to opposed still count as a thin fold. The
+#: original 30-degree rule removed false thin spots at acute corners (0.000 mm
+#: across a 39-degree edge), but applied to EVERY hit it also erased a real rib:
+#: 0.2-1.2 mm wide, drafted 16-20 degrees per side, on a 20x30x5 mm block. It
+#: reported the block's 5 mm and passed a 1 mm minimum. Angle alone cannot tell
+#: that rib's flanks from a corner. Restrict the corner exclusion to surfaces
+#: that actually share an edge; nonadjacent flanks count at every draft angle.
+#: Retain 30 degrees only for the old thin-fold exception at a shared edge.
+OPPOSED_DEG = 30.0
+OPPOSED_COS = math.cos(math.radians(OPPOSED_DEG))
+
+#: Two faces that share an edge are one SURFACE when their normals differ by less
+#: than this, and the corner exclusion asks whether two surfaces share an edge.
+#: What slipped through while a surface was a coplanar group (``mesh.facets``): a
+#: revolved 45 deg chamfer meeting a flat ledge read a 0.188 mm wall. The chamfer
+#: is a cone, so each strip of its triangles is a group of its own; the first
+#: strip shares an edge with the ledge and its rays were excluded (0.095 mm), the
+#: second does not and its rays across the 45 deg feather edge were kept. The
+#: median of 40 rays near the point read 0.536 mm. Grouped this way, the whole
+#: cone is one surface beside the ledge.
+#:
+#: 30 deg joins a curve tessellated at up to 30 deg per facet, which covers
+#: OpenCascade's default 0.5 rad (28.6 deg) deflection; it keeps a 45 deg chamfer
+#: apart from both faces it joins. The measured steps on two published cases: 75%
+#: of adjacent pairs under 5.6 deg and 90% under 20 deg. *Rejected:* a smaller
+#: angle (10 deg joined both measured cones, but not an export at the default
+#: deflection, whose second strip reads the false wall again); a larger one (a
+#: 45 deg chamfer would join its walls, and a corner it makes would read as one
+#: surface); and excluding a hit by its distance from the shared crease
+#: (``t * cot(angle)``), which needs the crease located and changes nothing on a
+#: chamfer whose strips are joined first. The cost, written down: a rib whose
+#: peak is two bevels each within 30 deg of its flank has flanks that share an
+#: edge as surfaces, and reads as the acute corner a knife-edge rib already
+#: reads as. A rib with a flat top, the case the rib fix was made on, is not
+#: joined (its flanks meet the top at 70 deg or more).
+SMOOTH_PATCH_DEG = 30.0
+
+#: The angle within which a cast face's normal must be known, degrees, and the
+#: smallest altitude that gives it. The load welds an STL's vertices at
+#: ``WELD_TOL_MM``, so a vertex may sit that far from where the exporter put it,
+#: and on a triangle whose smallest altitude is ``h`` that tilts its normal by up
+#: to ``atan(WELD_TOL_MM / h)``. A face with ``h`` under
+#: ``WELD_TOL_MM / tan(WALL_NORMAL_TOL_DEG)`` (about 0.0057 mm) has a normal
+#: nobody knows to a degree, and a ray along it goes anywhere: it is not cast
+#: from, and the detail counts it.
+#:
+#: What slipped through without it: a face of almost no area (5.9e-7 mm^2,
+#: altitude 8.5e-7 mm) sat on an edge of a printed top, its ray ran down the side
+#: face beside it, and the part read 0.126 mm where 2.57 mm and 3.1 mm of material
+#: lie. *Rejected:* an aspect-ratio floor (the two triangles of a 0.3 mm strip
+#: 20 mm long are 67:1 and their normal is known; aspect says nothing about the
+#: error, the altitude does); an area floor (a length squared: it drops the small,
+#: well-shaped faces of a fine mesh); confirming a thin reading with the rays of
+#: neighbouring faces (it needs a neighbourhood, more rays, and a rule for a wall
+#: that is thin over one face only).
+WALL_NORMAL_TOL_DEG = 1.0
+MIN_CAST_ALTITUDE_MM = WELD_TOL_MM / math.tan(math.radians(WALL_NORMAL_TOL_DEG))
+
+
+def _smooth_patches(mesh: Any) -> Any:
+    """A surface label per face: faces joined across edges under ``SMOOTH_PATCH_DEG``.
+
+    trimesh supplies the edge adjacency and the angle across each edge; its
+    graph engine (SciPy or NetworkX, declared on the gate) gives the components.
+    """
+    import numpy as np
+    from trimesh import graph
+
+    n = len(mesh.faces)
+    labels = np.arange(n)
+    angles = np.asarray(mesh.face_adjacency_angles, dtype=float)
+    joined = np.asarray(mesh.face_adjacency, dtype=int)[angles < math.radians(SMOOTH_PATCH_DEG)]
+    for component in graph.connected_components(joined, nodes=np.arange(n), min_len=1):
+        component = np.asarray(component, dtype=int)
+        labels[component] = component.min()
+    return labels
+
+
+def _castable(mesh: Any) -> Any:
+    """Faces whose normal is known to ``WALL_NORMAL_TOL_DEG``: altitude at least
+    ``MIN_CAST_ALTITUDE_MM``."""
+    import numpy as np
+
+    tri = np.asarray(mesh.triangles, dtype=float)
+    longest = np.linalg.norm(np.roll(tri, -1, axis=1) - tri, axis=2).max(axis=1)
+    area = np.asarray(mesh.area_faces, dtype=float)
+    altitude = np.where(longest > 0, 2.0 * area / np.where(longest > 0, longest, 1.0), 0.0)
+    return altitude >= MIN_CAST_ALTITUDE_MM
+
+
+def _wall_hits(mesh: Any, start: Any, hit: Any, surface: Any = None) -> Any:
+    """Keep walls; exclude rays across an acute edge between two adjacent surfaces.
+
+    A surface is a smooth patch (``SMOOTH_PATCH_DEG`` says what slipped through
+    while it was a coplanar group). A hit between two surfaces that share an edge
+    is excluded unless they are nearly opposed (``OPPOSED_DEG``): that ray crossed
+    the corner. A hit between surfaces that share no edge is judged by
+    ``_edge_rays`` (a ray past a land or along a face is an edge), and a hit on the
+    start's own surface counts: a smooth surface that faces
+    itself across material (a rounded rim, a rounded rib) is a section through the
+    material, never a corner. Using individual triangle neighbours would miss the
+    same corner after subdivision. Rejected as a replacement measure: trimesh's
+    shrinking sphere, which reads 0.244 mm at the harmless acute corner of the
+    subdivided 10 mm prism. It measures local reach, including that corner.
+    ``surface`` is ``_smooth_patches(mesh)`` when the caller has it already.
+    """
+    import numpy as np
+
+    if surface is None:
+        surface = _smooth_patches(mesh)
+    joined = np.sort(surface[mesh.face_adjacency], axis=1)
+    adjacent = {tuple(pair) for pair in joined if pair[0] != pair[1]}
+    pairs = np.sort(np.column_stack((surface[start], surface[hit])), axis=1)
+    across_edge = np.array([tuple(pair) in adjacent for pair in pairs], dtype=bool)
+    normals = np.asarray(mesh.face_normals)
+    opposed = (normals[start] * normals[hit]).sum(axis=1) <= -OPPOSED_COS
+    return opposed | ~across_edge
+
+
+#: A ray that runs ALONG the surface it hits measures how far it leans, not a
+#: wall. It does when that surface passes nearer the ray's midpoint than
+#: ``sin(GRAZE_DEG)`` times half the reading. When the faces a ray joins are ``a``
+#: from opposed, the midpoint is ``cos(a)`` times half the reading from the plane
+#: of the face it hit, so where that face runs the length of the ray this is
+#: "within 10 deg of grazing" (``a`` over 80 deg). Judged only where
+#: ``_edge_rays`` judges: a hit that is not nearly opposed, on a surface that
+#: shares no edge with the start's.
+#:
+#: What slipped through without it: on a published housing, a top face tilted 4
+#: deg met a vertical face under a web. The ray from a face 0.05 mm from that
+#: vertical face went down beside it, 0.017-0.05 mm away, and hit it 3.7 deg from
+#: grazing: 0.731 mm, where the wall it ran beside goes on down past 1.6 mm. The
+#: third-surface rule keeps it: the nearest surface to its midpoint, 0.034 mm away,
+#: is the one it hit. That is 0.093 of half its reading, sin(5.3 deg); the test's
+#: block that leans 4 deg (``ARayAlongAFaceIsNotAWall``) gives 0.070, sin(4.0 deg).
+#:
+#: 10 deg is the measured case with a margin: sin(10 deg) is 0.174, almost twice
+#: 0.093. On a ridge drafted ``d`` per side the flanks are ``2d`` from opposed, so
+#: this drops a flank-to-flank ray only past 40 deg per side. There the sampler
+#: reads little anyway: past 45 deg no flank's normal ray reaches the other flank.
+#: Measured on the rib of ``ATaperedRibIsStillAWall`` (0.2-1.2 mm on a 5 mm block,
+#: subdivided 0-3 times), this rule and the code before it read the same wall at
+#: 16, 20, 25, 31, 35 and 38 deg per side, and at 40 deg both read the block: only
+#: a ray from the rib's top hundredth reaches the other flank. On the held-out
+#: designs every part reads what it read at 30 deg: the rays 30 deg dropped and
+#: 10 deg keeps read 1.42 mm and more, and the housing's 0.731 mm ray stays dropped.
+#: *Rejected:* 30 deg, the angle ``OPPOSED_DEG`` and ``SMOOTH_PATCH_DEG`` use (review
+#: of round 3): it dropped every flank-to-flank ray of that rib drafted over 30 deg
+#: per side, so at 31 and 35 deg the gate passed at the block's 5.000 mm, where the
+#: code before it failed at 0.517 and 0.679 mm. That is the false pass
+#: ``ATaperedRibIsStillAWall`` was written against, and the test tried only 16 and
+#: 20 deg. 15 deg passes the rib at 38 deg (the code before it failed at 0.923 mm);
+#: 5 deg is under the housing's 5.3. The angle at the hit alone: on a published case
+#: bottom it drops 308 rays at 10 deg (2023 at 30), 245 of them rays the distance
+#: keeps, the thinnest 1.520 mm. That ray meets its face 3.6 deg from grazing, but
+#: at its far end: the face is 0.735 mm from its midpoint, so the ray is a section
+#: that ends where the face begins. Also rejected: a floor on the midpoint's
+#: distance to every surface (a 45 deg wedge gives 0.707 of half the reading by
+#: itself, so that floor is a second angle in disguise); applying it to a hit on the
+#: start's own smooth surface (a rounded rim meets itself at any angle, and no
+#: measured case needs it). The cost: two nonadjacent surfaces more than 80 deg
+#: from opposed (a ridge drafted over 40 deg per side) are not read across where
+#: one of them runs the length of the ray.
+GRAZE_DEG = 10.0
+GRAZE_SIN = math.sin(math.radians(GRAZE_DEG))
+
+#: Two distances that are one point's. A concave edge between the surface a ray hit
+#: and the next one belongs to both, and its distance from the ray's midpoint comes
+#: out of two triangles' arithmetic: a groove's flank and its other flank tie at
+#: the groove's root, and so does a slot's side and its roof. A tie is a wall
+#: (``_edge_rays``), so a third surface counts only when it is nearer by more than
+#: this fraction. 1e-9 is six orders above the float64 round-off on one point
+#: (about 1e-15 relative) and far below any distance a mesh resolves.
+_EDGE_TIE_REL = 1e-9
+
+
+def _edge_rays(mesh: Any, surface: Any, start: Any, hit: Any, length: Any,
+               points: Any = None) -> Any:
+    """Rays that ran past a part's edge or along a face, not across a wall.
+
+    ``start`` and ``hit`` are the face of each ray, ``length`` its reading in mm,
+    ``points`` the point on ``start`` it left from (the face's centre when not
+    given: a ray from a box's points leaves from elsewhere on its face), and
+    ``surface`` is ``_smooth_patches(mesh)``. Only a hit that ``_wall_hits``
+    keeps on another, nonadjacent surface and that is not nearly opposed is judged:
+    two surfaces that face each other are a wall wherever a ray joins them, even
+    beside an edge (a plate is that thick up to its edge), and a smooth surface that
+    faces itself is a section through the material.
+
+    Such a ray is an edge when a THIRD surface is nearer the ray's midpoint than the
+    two surfaces it joins, or when the surface it hit runs along it
+    (``GRAZE_DEG``). Through a wall, the surfaces nearest the middle of a section
+    are the two it joins (the medial sheet runs between them). Beside a part's
+    edge, the nearest one is the land or the face the ray ran past.
+
+    What slipped through before (round 2 of the held-out designs): the acute-edge
+    rule asks only whether two surfaces share an edge, and a narrow land between
+    them breaks that. A published bottom plate, 1.35-1.4 mm thick, ends in a 0.6 mm
+    vertical land under a 45 deg chamfer. A ray from a strip of the flat underside,
+    0.005 mm in from the land, ran up beside it and hit the chamfer (normals 135 deg
+    apart): the part read 0.605 mm. At that ray's midpoint the land is 0.0047 mm
+    away and the two faces it joins 0.298 mm. A housing's 1.0 mm wall read 0.699 mm
+    the same way: a ray from its outer face, 0.2 mm above a 0.5 mm wide bottom land,
+    hit the inner 45 deg chamfer above the land (the land 0.200 mm from the
+    midpoint, the faces 0.247 mm). With this rule the plate reads 0.905 mm (a ray
+    from the chamfer to the underside), and the housing, outside the box over its
+    web (``BOX_SPACING_OF_MIN``), 0.718 mm: a real section, a sloped face against
+    the corner of a slot below it.
+
+    What it keeps, measured on the same designs: a printed top's lip, a 0.71 mm
+    overhang 0.75 mm thick whose tip is a 0.25 mm land under a 45 deg chamfer,
+    reads 0.487 mm: the ray from the middle of its underside has the chamfer
+    0.172 mm from its midpoint and the land 0.237 mm, so it is a wall, and it still
+    fails a 1.2 mm minimum. A V-groove on the inside of a wall (0.475 mm at its
+    root) reads 0.542 mm: the nearest point is the root, which is a point of the
+    flank the ray hit and of the other flank, a tie, so a wall.
+
+    *Rejected:* an angle limit on every hit (``OPPOSED_DEG`` widened to 45 deg or
+    more): the lip's real 0.487 mm and the plate's false 0.605 mm are the same
+    135 deg pair, and the drafted rib's flanks are 140-148 deg apart; the start
+    face's area (the false readings came from faces of 0.0008 to 0.06 mm^2, the
+    lip's from 6 mm^2, and a fine mesh puts small faces on a real wall); the start's
+    distance to its surface's edge as a fraction of the reading (it separates the
+    measured cases only between 0.29 and 0.49: a tuned number); excluding every hit
+    two surfaces apart, as the acute-edge rule excludes one apart (a flat-topped
+    rib is flank, top, flank: the same topology as underside, land, chamfer); the
+    midpoint's distance to every surface as a fraction of half the reading (a
+    45 deg wedge gives 0.707 by itself, so the fraction must sit between 0.57,
+    the plate's false band at 0.84 mm, and 0.69, the groove: tuned).
+
+    The costs, measured. A chamfered edge over a land reads as an edge out to about
+    1.55 times the land's height (0.93 mm on the 0.6 mm land), so a minimum above
+    that is judged on the rays further in. A fin or rib drafted 15 to 30 deg per
+    side loses the rays just under its top land, where the land is nearer their
+    midpoints than the flank they hit (under 15 deg its flanks are nearly opposed and
+    not judged; past 30 deg the midpoints sit too deep). The thinnest ray it counts
+    on such a fin reads about 1.40 times the land at 16 deg per side and 1.75 times
+    at 29 deg, where the code before this read 1.14 and 1.68 times (a flank's normal
+    crosses the fin obliquely). So the fin passes a minimum under that many times its
+    land, with its top thinner than the minimum: a 0.3 mm land on a 1.2 mm base,
+    1.0 mm tall (24 deg per side), reads 0.495 mm and passes 0.45 mm, and the top
+    0.17 mm of it is thinner than 0.45 mm (``ADraftedFinIsReadBelowItsLand`` holds
+    this). No test at one ray tells that top from the plate's edge: each is a wedge
+    of about 45 deg cut off by a land, and the ray beside the land joins the
+    wedge's two faces. (In review of round 3: this said the rib's middle still
+    reads, but the thin part of a fin is its top.)
+    """
+    import numpy as np
+    from trimesh.triangles import closest_point
+
+    start = np.asarray(start, dtype=int)
+    hit = np.asarray(hit, dtype=int)
+    length = np.asarray(length, dtype=float)
+    normals = np.asarray(mesh.face_normals, dtype=float)
+    judged = ((surface[start] != surface[hit])
+              & ((normals[start] * normals[hit]).sum(axis=1) > -OPPOSED_COS))
+    edge = np.zeros(len(start), dtype=bool)
+    rows = np.nonzero(judged)[0]
+    if len(rows) == 0:
+        return edge
+    tri = np.asarray(mesh.triangles, dtype=float)
+    lo, hi = tri.min(axis=1), tri.max(axis=1)
+    if points is None:
+        points = np.asarray(mesh.triangles_center, dtype=float)[start]
+    points = np.asarray(points, dtype=float)
+    half = length[rows] / 2.0
+    middle = points[rows] - normals[start[rows]] * half[:, None]
+    own_s, own_h = surface[start[rows]], surface[hit[rows]]
+    near_s = np.full(len(rows), np.inf)
+    near_h = np.full(len(rows), np.inf)
+    third = np.full(len(rows), np.inf)
+    # The start face is `half` from the midpoint (the ray leaves it along its
+    # normal), so nothing farther than `half` can be the nearest surface: a box
+    # test against each face's bounds keeps the exact distances to the few faces
+    # that can be. The margin is round-off on that one distance.
+    reach = half * (1.0 + 1e-9) + 1e-12
+    chunk = max(1, int(_CAST_CHUNK_RT // max(1, len(tri))))
+    for begin in range(0, len(rows), chunk):
+        m = middle[begin:begin + chunk]
+        gap = np.zeros((len(m), len(tri)))
+        for axis in range(3):
+            out = np.maximum(lo[None, :, axis] - m[:, None, axis],
+                             m[:, None, axis] - hi[None, :, axis])
+            gap += np.maximum(out, 0.0) ** 2
+        ray, face = np.nonzero(gap <= (reach[begin:begin + chunk] ** 2)[:, None])
+        at = begin + ray
+        dist = np.linalg.norm(closest_point(tri[face], middle[at]) - middle[at], axis=1)
+        on_s = surface[face] == own_s[at]
+        on_h = surface[face] == own_h[at]
+        np.minimum.at(near_s, at[on_s], dist[on_s])
+        np.minimum.at(near_h, at[on_h], dist[on_h])
+        np.minimum.at(third, at[~on_s & ~on_h], dist[~on_s & ~on_h])
+    along = near_h < half * GRAZE_SIN
+    past = third < np.minimum(near_s, near_h) * (1.0 - _EDGE_TIE_REL)
+    edge[rows] = along | past
+    return edge
+
+
+#: Inside a ``wall_exceptions`` box, rays also leave from points on the surface no
+#: farther apart than this fraction of the box's ``min_mm``, not only from face
+#: centres. What slipped through with face centres alone (round 2 of the held-out
+#: designs): a housing's box held a web 0.4 mm thick, 1.7 mm by 0.9 mm, between a
+#: top face and an underside that each ran on past it. Every face over the web was
+#: a large triangle whose centre lay over 1.0 mm or 1.7 mm of material, so the 27
+#: rays that started in the box read 1.0 mm, and the box reported 1.0 mm over a
+#: 0.4 mm web. A web under its 0.36 mm minimum would have passed.
+#:
+#: Half the minimum: each piece of a face in the box gets a square grid of points
+#: in its own plane, its cells no wider than this, so every point of the surface is
+#: within about 0.36 of the minimum of a ray (half a cell's diagonal). A wall at
+#: the minimum that reaches as far across as about 0.7 of its own thickness holds
+#: one, and a section narrower than its own thickness reads as an edge anyway
+#: (``_edge_rays``).
+#: *Rejected:* more rays from every face of every part (four per face is four
+#: times the cast, 236 s to 944 s on a 53,706-face part on the fallback caster, for
+#: regions nobody named); rays from each face's corners in the box (a web between
+#: two faces' corners still holds none); the box's own size as the spacing (a box
+#: 17.6 mm long would sample the 0.9 mm web at 8.8 mm).
+BOX_SPACING_OF_MIN = 0.5
+
+#: The most rays a part's boxes may add: this, or the part's face count when that is
+#: larger, so the boxes at most double the cast on a large part. A box that needs
+#: more holds more surface than a thin region has, and is refused, named: a box
+#: drawn around most of a part at a small ``min_mm`` lowers the part's minimum
+#: everywhere in it, which is the silencer the boxes exist to replace. 20,000 rays
+#: cover about 800 mm^2 of surface at a 0.4 mm minimum (a ray per 0.2 mm square).
+#: The count is of the rays the grid casts, found before any is built.
+#: What slipped through (review of round 3): the count was the cells of each piece's
+#: bounding rectangle, and a triangle's piece casts from about half of them, so a box
+#: over 400 mm^2 of a plate at a 0.4 mm minimum (10,170 rays, 20,164 cells) was
+#: refused as "more than the 20000". *Rejected:* sampling a large box more coarsely
+#: and passing (the spacing would then hide the walls the box is for); no limit (a
+#: box at 0.01 mm over a 100 mm part is a billion rays); scaling each rectangle by
+#: its piece's area (an estimate, where the refusal names a count).
+BOX_RAYS_FLOOR = 20_000
+
+#: Two points of a clipped piece closer than this fraction of its largest
+#: coordinate are one point. A face's vertex that lies on a box's plane, its next
+#: vertex outside, came out of the clip twice (the vertex, then the crossing at that
+#: same vertex), and the piece's first side had no length: review of round 3 found a
+#: triangle whose piece cast no ray in one vertex order and 225 in another. 1e-9 is
+#: about seven orders above float64 round-off on a coordinate (2.2e-16 relative) and
+#: far below any grid spacing a box asks for (1e-6 mm on a 1 m part).
+_CLIP_SAME_REL = 1e-9
+
+
+def _clip_to_box(polygon: list, lo: Any, hi: Any) -> list:
+    """The part of a convex polygon (a list of 3-vectors) inside a box.
+
+    Sutherland-Hodgman against the box's six planes, kept inclusive, so a face
+    that lies on a box's plane stays in it. A point the clip gives twice in a row
+    is given once (``_CLIP_SAME_REL``), and a piece left with fewer than three
+    points is empty."""
+    import numpy as np
+
+    for axis in range(3):
+        for bound, below in ((lo[axis], False), (hi[axis], True)):
+            kept = []
+            for i, p in enumerate(polygon):
+                q = polygon[(i + 1) % len(polygon)]
+                p_in = p[axis] <= bound if below else p[axis] >= bound
+                q_in = q[axis] <= bound if below else q[axis] >= bound
+                if p_in:
+                    kept.append(p)
+                if p_in != q_in:
+                    t = (bound - p[axis]) / (q[axis] - p[axis])
+                    kept.append(p + t * (q - p))
+            polygon = kept
+            if len(polygon) < 3:
+                return []
+    scale = max(1.0, max(float(np.abs(p).max()) for p in polygon))
+    same = _CLIP_SAME_REL * scale
+    distinct = []
+    for p in polygon:
+        if not distinct or float(np.abs(p - distinct[-1]).max()) > same:
+            distinct.append(p)
+    while len(distinct) > 1 and float(np.abs(distinct[-1] - distinct[0]).max()) <= same:
+        distinct.pop()
+    return distinct if len(distinct) >= 3 else []
+
+
+def _column_spans(flat: Any, gx: Any, y0: float, dy: float, rows: int) -> tuple[Any, Any]:
+    """``(first, last)``: for each grid column ``gx``, the rows ``k`` in
+    ``range(first, last)`` whose cell centre ``y0 + (k + 0.5) * dy`` lies inside a
+    convex polygon ``flat``, wound counter-clockwise.
+
+    A point is inside when it is on the left of every side, or on it. A side that
+    rises along x bounds the column from below, one that falls bounds it from
+    above, and an upright side lets the whole column in or none of it. Each column
+    is solved in one step, so a piece's rays are counted before any is built, at a
+    cost in its columns and not its cells."""
+    import numpy as np
+
+    side = np.roll(flat, -1, axis=0) - flat
+    ex, ey = side[:, 0], side[:, 1]
+    px, py = flat[:, 0], flat[:, 1]
+    x = np.asarray(gx, dtype=float)[:, None]
+    bound = py + ey * (x - px) / np.where(ex != 0.0, ex, 1.0)
+    low = np.where(ex > 0.0, bound, -np.inf).max(axis=1)
+    high = np.where(ex < 0.0, bound, np.inf).min(axis=1)
+    open_ = np.all((ex != 0.0) | (ey * (x - px) <= 0.0), axis=1)
+    if dy > 0.0:
+        with np.errstate(invalid="ignore"):
+            first = np.ceil((low - y0) / dy - 0.5)
+            last = np.floor((high - y0) / dy - 0.5) + 1.0
+    else:
+        # A piece with no width: its one row sits at y0.
+        first = np.where(low <= y0, 0.0, 1.0)
+        last = np.where(high >= y0, 1.0, 0.0)
+    first = np.clip(np.nan_to_num(first, nan=rows, posinf=rows, neginf=0.0), 0, rows)
+    last = np.clip(np.nan_to_num(last, nan=0.0, posinf=rows, neginf=0.0), 0, rows)
+    last = np.where(open_, np.maximum(last, first), first)
+    return first.astype(int), last.astype(int)
+
+
+def _box_points(mesh: Any, lo: Any, hi: Any, spacing: float, limit: int):
+    """``(points, faces, count)``: points on the surface inside a box, each with its
+    face, on a grid no coarser than ``spacing`` (``BOX_SPACING_OF_MIN``).
+
+    Each face's piece inside the box gets a square grid in its own plane, laid along
+    the piece's longest side from its own corner, so the same mesh gives the same
+    rays, and every cell centre inside the piece is a point. A piece that holds none
+    (a strip narrower than a cell) gives its middle. A face wholly inside the box and
+    no larger than one cell gives none: its centre is cast already. ``count`` is the
+    number of points, found column by column before any is built
+    (``_column_spans``), the columns taken a chunk at a time on ``_CAST_CHUNK_RT``
+    (columns times sides); ``points`` is ``None`` as soon as it passes ``limit``.
+    *Rejected:* cutting each piece into ``k x k`` triangles (on the 4 x 20 mm faces
+    of a hinge strip, ``k`` follows the long side, and the cut cost five times the
+    rays of a grid for the same spacing); laying the grid along the piece's first
+    side (a vertex on a box's plane gave that side no length, and the piece no
+    ray)."""
+    import numpy as np
+
+    tri = np.asarray(mesh.triangles, dtype=float)
+    face_normals = np.asarray(mesh.face_normals, dtype=float)
+    touches = np.all((tri.max(axis=1) >= lo) & (tri.min(axis=1) <= hi), axis=1)
+    pieces = []
+    count = 0
+    for face in np.nonzero(touches)[0]:
+        polygon = _clip_to_box([v for v in tri[face]], lo, hi)
+        if len(polygon) < 3:
+            continue
+        polygon = np.asarray(polygon)
+        sides = np.roll(polygon, -1, axis=0) - polygon
+        lengths = np.linalg.norm(sides, axis=1)
+        longest = int(lengths.argmax())
+        if lengths[longest] <= 0.0:
+            continue
+        e1 = sides[longest] / lengths[longest]
+        e2 = np.cross(face_normals[face], e1)
+        flat = (polygon - polygon[0]) @ np.column_stack((e1, e2))
+        low, high = flat.min(axis=0), flat.max(axis=0)
+        cells = np.maximum(1, np.ceil((high - low) / spacing).astype(int))
+        whole = bool(np.all(tri[face] >= lo) and np.all(tri[face] <= hi))
+        if whole and cells[0] * cells[1] == 1:
+            continue
+        dx, dy = (high - low) / cells
+        held, columns = 0, []
+        chunk = max(1, int(_CAST_CHUNK_RT // len(flat)))
+        for begin in range(0, int(cells[0]), chunk):
+            gx = low[0] + (np.arange(begin, min(begin + chunk, int(cells[0]))) + 0.5) * dx
+            first, last = _column_spans(flat, gx, low[1], dy, int(cells[1]))
+            some = last > first
+            held += int((last - first).sum())
+            columns.append((gx[some], first[some], last[some]))
+            if count + max(held, 1) > limit:
+                return None, None, count + max(held, 1)
+        count += max(held, 1)
+        gx, first, last = (np.concatenate(part) for part in zip(*columns))
+        pieces.append((face, polygon[0], e1, e2, flat, low[1], dy, gx, first, last))
+    points, faces = [], []
+    for face, origin, e1, e2, flat, y0, dy, gx, first, last in pieces:
+        per = last - first
+        if len(per):
+            column = np.repeat(np.arange(len(gx)), per)
+            row = np.repeat(first, per) + (np.arange(int(per.sum()))
+                                           - np.repeat(np.cumsum(per) - per, per))
+            chosen = np.column_stack((gx[column], y0 + (row + 0.5) * dy))
+        else:
+            chosen = flat.mean(axis=0)[None, :]
+        points.append(origin + chosen[:, :1] * e1 + chosen[:, 1:] * e2)
+        faces.append(np.full(len(chosen), face, dtype=int))
+    if not points:
+        return np.zeros((0, 3)), np.zeros(0, dtype=int), 0
+    return np.vstack(points), np.concatenate(faces), count
+
+
+def _is_mm(value: Any) -> bool:
+    """A positive, finite number of mm. A bool is not a number here."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+def _box_corners(value: Any) -> tuple[list[float], list[float]] | None:
+    """``(lo, hi)`` from ``[[x0, y0, z0], [x1, y1, z1]]``, or ``None``.
+
+    The corners must come low first on every axis. *Rejected:* sorting them for
+    the author: a box written with one corner wrong is a box nobody checked, and a
+    reordered box can hold a region the author did not mean."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    corners = []
+    for corner in value:
+        if not isinstance(corner, (list, tuple)) or len(corner) != 3:
+            return None
+        if not all(isinstance(c, (int, float)) and not isinstance(c, bool)
+                   and math.isfinite(c) for c in corner):
+            return None
+        corners.append([float(c) for c in corner])
+    lo, hi = corners
+    if not all(a < b for a, b in zip(lo, hi)):
+        return None
+    return lo, hi
+
+
+def _read_wall_rules(names: list, global_min: float | None, global_key: str,
+                     by_part: tuple, exempt: tuple, exceptions: tuple) -> tuple[dict, list]:
+    """``(rules, refusals)`` for ``cad.wall_thickness``. A refusal FAILS the gate.
+
+    ``by_part``, ``exempt`` and ``exceptions`` are each ``(value, key)`` as
+    ``first_pack_param_named`` returned them. ``rules`` holds ``exempt``
+    (``{part: reason}``), ``minimums`` (``{part: (mm, where it came from)}`` for
+    each judged part that has one) and ``boxes`` (``{part: [box]}``).
+
+    The refusals, and why each one is a FAIL and never a silent skip of the entry:
+
+    * an entry that names no part in the assembly, or a pattern that matches none:
+      a misspelt minimum leaves its part at another one, and nothing says so;
+    * an exemption with no reason, or one written as a pattern: an unexplained or
+      blanket exemption is a silencer;
+    * one part named both exempt and with its own minimum or box: which one
+      governs is a guess;
+    * a pattern that matches only exempt parts: it judges nothing, so the
+      minimum its author wrote is dropped. A pattern that also matches a judged
+      part governs that part, and the exempt parts stay not judged;
+    * two patterns that match one part with different minimums (see
+      ``MIN_WALL_BY_PART_KEYS``);
+    * an exception entry with a key outside ``WALL_EXCEPTION_FIELDS``, a missing
+      key, a malformed box, or a box that touches another box on the same part.
+
+    One more is the gate's, because it needs the faces: a box that holds no face
+    of its part judges nothing, and is refused there.
+    """
+    present = set(names)
+    refusals: list[str] = []
+
+    raw, key = exempt
+    key = key or WALL_EXEMPT_KEYS[0]
+    exempted: dict[str, str] = {}
+    if raw is not None and not isinstance(raw, dict):
+        refusals.append(f"{key} is {type(raw).__name__}; write {{part: reason}}")
+    for part, reason in (raw.items() if isinstance(raw, dict) else ()):
+        label = f"{key} entry {json.dumps(part, default=str)[:40]}"
+        if not isinstance(part, str) or not part.strip():
+            refusals.append(f"unreadable {label}: an exemption names one part")
+        elif part not in present:
+            if part in ("*", "any", "anything") or _GLOB_CHARS & set(part):
+                refusals.append(f"blanket {label} refused: an exemption names one part, "
+                                f"and a pattern exempts parts nobody named")
+            else:
+                refusals.append(f"{label} names no part in the assembly")
+        elif not isinstance(reason, str) or not reason.strip():
+            refusals.append(f"{label} has no reason: an exemption nobody explained is "
+                            f"one nobody can check or delete when the part changes")
+        else:
+            exempted[part] = reason.strip()
+
+    raw, key = by_part
+    by_key = key or MIN_WALL_BY_PART_KEYS[0]
+    exact: dict[str, float] = {}
+    patterns: dict[str, float] = {}
+    if raw is not None and not isinstance(raw, dict):
+        refusals.append(f"{by_key} is {type(raw).__name__}; write {{part or pattern: mm}}")
+    for name, value in (raw.items() if isinstance(raw, dict) else ()):
+        label = f"{by_key} entry {json.dumps(name, default=str)[:40]}"
+        if not isinstance(name, str) or not name.strip():
+            refusals.append(f"unreadable {label}")
+        elif not _is_mm(value):
+            refusals.append(f"{label} is {value!r}; a minimum is a positive number of mm")
+        elif name in present:
+            if name in exempted:
+                refusals.append(f"part {name!r} is in {by_key} and is exempt: one says "
+                                f"judge it, the other says do not. Delete one")
+            else:
+                exact[name] = float(value)
+        elif _GLOB_CHARS & set(name):
+            matched = [part for part in names if fnmatch.fnmatchcase(part, name)]
+            if not matched:
+                refusals.append(f"{label} matches no part in the assembly")
+            elif all(part in exempted for part in matched):
+                # What slipped through (review of C1): only the exact-name form was
+                # refused. `{"cover_*": 0.3}` beside an exempt cover_glass was
+                # accepted, judged nothing, and the 0.3 mm the author wrote for the
+                # glass was dropped with no word.
+                refusals.append(
+                    f"{label} matches only exempt part(s) "
+                    f"{', '.join(map(repr, matched[:3]))}{'...' if len(matched) > 3 else ''}: "
+                    f"one says judge it, the other says do not, and the minimum judges "
+                    f"nothing. Delete one")
+            else:
+                patterns[name] = float(value)
+        else:
+            refusals.append(f"{label} names no part in the assembly")
+
+    minimums: dict[str, tuple[float, str]] = {}
+    for part in names:
+        if part in exempted:
+            continue
+        if part in exact:
+            minimums[part] = (exact[part], f"{by_key}[{part}]")
+            continue
+        hits = sorted((p, v) for p, v in patterns.items() if fnmatch.fnmatchcase(part, p))
+        if len({v for _, v in hits}) > 1:
+            refusals.append(
+                f"part {part!r} matches {by_key} patterns with different minimums ("
+                + ", ".join(f"{p!r} {v:g} mm" for p, v in hits[:3])
+                + "): the map has no order a verdict can be keyed on, so name the part")
+        elif hits:
+            minimums[part] = (hits[0][1], f"{by_key}[{hits[0][0]}]")
+        elif global_min is not None:
+            minimums[part] = (global_min, global_key)
+
+    raw, key = exceptions
+    key = key or WALL_EXCEPTION_KEYS[0]
+    boxes: dict[str, list[dict]] = {}
+    if raw is not None and not isinstance(raw, (list, tuple)):
+        refusals.append(f"{key} is {type(raw).__name__}; write a list of "
+                        f"{{{', '.join(WALL_EXCEPTION_FIELDS)}}}")
+    for index, entry in enumerate(raw if isinstance(raw, (list, tuple)) else ()):
+        label = f"{key}[{index}]"
+        if not isinstance(entry, dict):
+            refusals.append(f"{label} is {type(entry).__name__}; write "
+                            f"{{{', '.join(WALL_EXCEPTION_FIELDS)}}}")
+            continue
+        unknown = sorted(str(k) for k in entry if k not in WALL_EXCEPTION_FIELDS)
+        if unknown:
+            hints = [difflib.get_close_matches(k, WALL_EXCEPTION_FIELDS, n=1) for k in unknown]
+            refusals.append(f"{label} has unknown key(s) "
+                            + ", ".join(f"{k!r}" + (f" (did you mean {h[0]!r}?)" if h else "")
+                                        for k, h in zip(unknown, hints))
+                            + f"; an entry takes {', '.join(WALL_EXCEPTION_FIELDS)} only")
+            continue
+        missing = [k for k in WALL_EXCEPTION_FIELDS if k not in entry]
+        if missing:
+            refusals.append(f"{label} has no {', '.join(missing)}")
+            continue
+        part, corners = entry["part"], _box_corners(entry["box_mm"])
+        reason = entry["reason"]
+        if not isinstance(part, str) or part not in present:
+            refusals.append(f"{label} names part {part!r}, not in the assembly")
+        elif part in exempted:
+            refusals.append(f"{label} is a box on {part!r}, which is exempt: a box on a "
+                            f"part nobody judges. Delete one")
+        elif corners is None:
+            refusals.append(f"{label} box_mm is {json.dumps(entry['box_mm'], default=str)[:60]}; "
+                            f"write [[x0, y0, z0], [x1, y1, z1]] in mm in the assembly "
+                            f"frame, low corner first on every axis")
+        elif not _is_mm(entry["min_mm"]):
+            refusals.append(f"{label} min_mm is {entry['min_mm']!r}; a minimum is a "
+                            f"positive number of mm")
+        elif not isinstance(reason, str) or not reason.strip():
+            refusals.append(f"{label} has no reason: a thin region nobody explained is "
+                            f"one nobody can defend when the part changes")
+        else:
+            boxes.setdefault(part, []).append({
+                "label": label, "part": part, "lo": corners[0], "hi": corners[1],
+                "min_mm": float(entry["min_mm"]), "reason": reason.strip()})
+    for part, own in boxes.items():
+        for i, a in enumerate(own):
+            for b in own[i + 1:]:
+                if all(a["lo"][k] <= b["hi"][k] and b["lo"][k] <= a["hi"][k]
+                       for k in range(3)):
+                    refusals.append(f"{a['label']} and {b['label']} touch or overlap on "
+                                    f"{part!r}: a ray in both would have two minimums")
+    return {"exempt": exempted, "minimums": minimums, "boxes": boxes}, refusals
 
 
 @gate(
     id="cad.wall_thickness",
-    title="Thinnest wall found by inward ray casting, against the minimum",
-    claims=["geometry", "mesh", "cad", "manufacturability", "wall"],
+    title="Thinnest wall of each part, by inward ray casting, against its own minimum",
+    # No `mesh`: that tag is the exported file's closure, winding and
+    # degeneracy, and a wall is a process minimum. A claim on it carries `wall`.
+    # What slipped through while it carried `mesh`: a claim about mesh validity
+    # could not leave the process wall out.
+    claims=["geometry", "cad", "manufacturability", "wall"],
     tier=Tier.BUILD,
     settles="minimum wall thickness",
     requires_python=["trimesh", "numpy"],
+    requires_one_of=["python:scipy", "python:networkx"],  # trimesh.graph's components
     # Prerequisite cad.watertight (P2.2-D12): ray casting through an open mesh
     #    leaks out of the hole and reports a thickness that is not there.
     #    Isolated: the guard passes this gate's own known-bad control
@@ -941,16 +1680,72 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     """Minimum wall by casting a ray inward from each facet along its own normal.
 
     Method, stated plainly because its limits matter more than its number: from the
-    centroid of each facet — an evenly spaced, deterministic subset of exactly the
-    ray budget once the face count exceeds it — a ray is cast along the inward
-    normal and the distance to the first hit is the local thickness. The minimum
-    over all samples is reported.
+    centroid of EVERY facet a ray is cast along the inward normal, and the distance
+    to the first hit is the local thickness. A hit between two adjacent
+    surfaces across an acute edge is excluded (opposed thin folds still count),
+    where a surface is a smooth patch, so a tessellated chamfer is one surface
+    (``SMOOTH_PATCH_DEG``). Tapered flanks that do not share an edge count
+    at any angle, unless the ray ran past the part's edge: a third surface (a
+    land) nearer its midpoint than the two it joins, or the face it hit running
+    along it (``_edge_rays``); the detail counts those. A sliver face, whose normal
+    is not known to a degree, is not cast from (``MIN_CAST_ALTITUDE_MM``); the
+    detail counts them.
+
+    Each part is judged against its own minimum: its exact name in
+    ``process_min_wall_mm_by_part`` first, then a pattern there that matches it,
+    then ``process_min_wall_mm``. A part in ``wall_exempt_parts`` is not cast
+    from, and the detail names it; with every part exempt the gate skips. A ray
+    that starts inside a ``wall_exceptions`` box of its part is judged against
+    that box's ``min_mm``, and the box and its reason go in the evidence. Inside a
+    box, rays also leave from a grid of points at half its ``min_mm``
+    (``BOX_SPACING_OF_MIN``), so a thin region between large faces is measured;
+    a box that needs more of them than ``BOX_RAYS_FLOOR`` (or the part's face
+    count) is refused. The gate
+    passes only when every judged ray meets its own minimum. A pass reports the
+    thinnest wall of every judged part, in mm, against the minimum that wall was
+    held to, and the detail also names the wall nearest its own minimum when that
+    is another wall. A fail reports the ray with the lowest thickness over its own
+    minimum. With one minimum everywhere both are the thinnest wall, as before.
+    What slipped through with one minimum for every mesh, and why patterns carry
+    no order, is at ``MIN_WALL_BY_PART_KEYS``.
+
+    Why a pass reports the thinnest wall and not the worst ratio: this gate
+    settles ``minimum wall thickness`` in mm, and ``claims.cross_check`` compares
+    the value with a claim that states that quantity. What slipped through
+    (review of C1): a pass reported the worst ratio. Beside a 0.45 mm hinge held
+    to 0.4 mm, a 3.0 mm shell left the hinge as the worst ray and a claim ">= 1.2
+    mm" read Failing. Thinned to 1.25 mm, the shell held the worst ratio, the gate
+    reported 1.25 mm, and the same claim read Checked with the 0.45 mm hinge still
+    there. *Rejected:* a ratio in other units on a pass (a mm claim is then not
+    compared, and reads Checked by its tags beside the 0.45 mm wall); reading the
+    covered claims' acceptance conditions here (the gate then errors in every
+    project with no wall claim, and its controls need claims of their own). The
+    cost: on a pass, the verdict's margin is the thinnest wall's against its own
+    minimum, which can be larger than the margin of the wall nearest its own
+    minimum. The detail and the evidence name that wall.
+
+    Every facet, never a subset. What slipped through while a 4000-ray budget
+    cast from evenly spaced facets above that count (``wall_samples``): a
+    watertight 20,492-face part whose 0.5 mm plate had its 12 faces between the
+    samples read PASS at 59.983 mm against a 1.0 mm minimum, and a 0.3 mm fin on a
+    49,126-face plate passed in 8 of 10 face orderings. A thin wall is a few faces
+    on a detailed part, so a subset misses it exactly when the part is detailed.
+    The cost scales with the face count: 236 s for a 53,706-face part on the
+    fallback caster, 17 s at 4000 rays, which is why ``rtree`` or ``embreex`` is
+    worth installing (PACK.md). *Rejected:* keeping the budget as an option that
+    skips instead of passing (a knob that can never help a pass).
+
+    A zero-thickness fold still reads 0: two faces on one edge whose normals
+    oppose (a printed part read 0.000 mm at one, 0.0001 mm apart) are a wall with
+    no material in it, and the filter keeps them on purpose.
 
     What this does NOT measure, and nobody should assume it does:
 
-    * It is a LOWER-BOUND SAMPLER, not a proof. It sees thickness only where a facet
-      exists and only along that facet's normal. A thin region whose thinnest
-      direction is not normal to any sampled facet is missed.
+    * It is a LOWER-BOUND SAMPLER, not a proof. It sees thickness only at a facet's
+      centre (and, in a box, at its grid points) and only along that facet's
+      normal. A thin region whose thinnest direction is not normal to any facet is
+      missed, and so is one outside every box that holds no facet's centre: a web
+      between two large faces that each run on past it.
     * On a coarsely tessellated curved wall it UNDER-reports, by roughly
       ``t*(1 - cos(pi/N))`` for a wall of thickness ``t`` across an N-sided
       tessellation of the curve. The chord sits inside the true surface, so a ray
@@ -970,10 +1765,17 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     For a proof rather than a sample, the domain tool is a medial-axis or
     sphere-inscription analysis; ``references/mesh_hygiene.md`` says what that costs.
     """
+    gid = "cad.wall_thickness"
     limit, limit_key = ctx.first_pack_param_named(MIN_WALL_KEYS)
-    if not isinstance(limit, (int, float)) or isinstance(limit, bool) or limit <= 0:
+    by_part = ctx.first_pack_param_named(MIN_WALL_BY_PART_KEYS)
+    exempt = ctx.first_pack_param_named(WALL_EXEMPT_KEYS)
+    exceptions = ctx.first_pack_param_named(WALL_EXCEPTION_KEYS)
+    # A stated minimum that is not a positive number skips, as it always has. An
+    # absent one skips only when no part has a minimum of its own: a project that
+    # gives every part its own needs no fallback.
+    if (limit is not None and not _is_mm(limit)) or (limit is None and not by_part[0]):
         return _skipped(
-            "cad.wall_thickness",
+            gid,
             f"the projection does not define "
             f"{_spellings(ctx, MIN_WALL_KEYS)} as a positive number of mm "
             f"(read: {limit!r}) — the minimum wall is a PROCESS decision the model "
@@ -982,66 +1784,138 @@ def wall_thickness(ctx: GateContext) -> Verdict:
             f"measured in a part; publish this one as process_min_wall_mm (or "
             f"cad.min_wall_mm) when both packs are installed",
         )
-    limit = float(limit)
+    global_min = float(limit) if limit is not None else None
+    global_key = limit_key or MIN_WALL_KEYS[0]
 
-    meshes, welded, skip = _load_all(ctx, "cad.wall_thickness")
+    meshes, welded, skip = _load_all(ctx, gid)
     if skip is not None:
         return skip
 
     import numpy as np
 
-    # `int(ctx.param(...) or MAX)` swallowed an explicit 0 and turned it into 4000,
-    # so a projection asking for no sampling silently got the full budget. A ray
-    # budget is a number the model states on purpose; an unusable one is a defect
-    # in the projection, not something to paper over with a default.
-    raw_budget = ctx.param("wall_samples")
-    if raw_budget is None:
-        budget = MAX_WALL_SAMPLES
-    else:
-        try:
-            budget = int(raw_budget)
-        except (TypeError, ValueError):
-            budget = 0
-        if budget <= 0:
-            return _skipped(
-                "cad.wall_thickness",
-                f"'wall_samples' is {raw_budget!r}; it must be a positive integer "
-                f"number of rays (omit it for the default {MAX_WALL_SAMPLES}) — a "
-                f"budget of zero would measure nothing and report a pass",
-            )
-    rows = []
-    worst_value = math.inf
-    worst_part = ""
-    worst_point: list[float] = []
-    for name, mesh in meshes.items():
+    names = list(meshes)
+    rules, refusals = _read_wall_rules(names, global_min, global_key,
+                                       by_part, exempt, exceptions)
+    exempted, minimums, boxes = rules["exempt"], rules["minimums"], rules["boxes"]
+    judged = [name for name in names if name not in exempted]
+
+    # Every part is checked closed, and every box is checked to hold a ray, before
+    # any ray is cast: a cast on the fallback caster can take minutes, and a
+    # refusal found after it costs them for nothing.
+    prepared = {}
+    for name in judged:
+        mesh = meshes[name]
         if not bool(getattr(mesh, "is_watertight", False)):
             return _skipped(
-                "cad.wall_thickness",
+                gid,
                 f"part {name!r} is not watertight, so a ray cast from inside it can "
                 f"escape and thickness is undefined — settle cad.watertight first",
             )
-
         centres = np.asarray(mesh.triangles_center, dtype=float)
-        normals = np.asarray(mesh.face_normals, dtype=float)
-        n_faces = len(centres)
-        # Honour the budget exactly. `stride = n_faces // budget` gives stride 1 for
-        # any face count below 2x the budget, so the real ceiling was about twice
-        # the number the constant promises and the gate's cost was not the cost it
-        # declared. An evenly spaced index of exactly min(n_faces, budget) samples
-        # is deterministic in the same way a stride is, and is the stated budget.
-        n_rays = min(n_faces, budget)
-        idx = np.unique(np.linspace(0, n_faces - 1, n_rays).round().astype(int))
+        face_normals = np.asarray(mesh.face_normals, dtype=float)
         eps = max(1e-6, float(getattr(mesh, "scale", 1.0)) * 1e-8)
-        origins = centres[idx] - normals[idx] * eps
-        directions = -normals[idx]
+        n_faces = len(centres)
+        # Which box each ray starts in, -1 for none. Boxes on one part never touch
+        # (refused above), so no ray is in two. One ray leaves every face's centre;
+        # a box adds rays from points of its surface (`BOX_SPACING_OF_MIN` says what
+        # slipped through), each along its own face's normal.
+        box_of = [np.full(n_faces, -1, dtype=int)]
+        start = [np.arange(n_faces)]
+        points = [centres]
+        added = 0
+        limit = max(BOX_RAYS_FLOOR, n_faces)
+        origins = centres - face_normals * eps
+        for j, box in enumerate(boxes.get(name, ())):
+            lo, hi = np.asarray(box["lo"], dtype=float), np.asarray(box["hi"], dtype=float)
+            inside = np.all((origins >= lo) & (origins <= hi), axis=1)
+            spacing = BOX_SPACING_OF_MIN * box["min_mm"]
+            extra, faces, _count = _box_points(mesh, lo, hi, spacing, limit - added)
+            if extra is None:
+                # The count stops where it passes the budget: say the budget, not a total.
+                refusals.append(
+                    f"{box['label']} holds too much of {name!r} to sample: rays every "
+                    f"{spacing:g} mm (half its min_mm) would be more than the "
+                    f"{limit - added} its part's boxes may still add ({limit} in all). "
+                    f"Draw the box around the thin region it is about")
+                continue
+            if not inside.any() and not len(extra):
+                refusals.append(f"{box['label']} holds no face of {name!r}: it judges "
+                                f"nothing. The box is in the assembly frame, in mm")
+            box_of[0][inside] = j
+            box["spacing_mm"] = spacing
+            start.append(faces)
+            points.append(extra)
+            box_of.append(np.full(len(extra), j, dtype=int))
+            added += len(extra)
+        start = np.concatenate(start)
+        points = np.vstack(points)
+        box_of = np.concatenate(box_of)
+        normals = face_normals[start]
+        prepared[name] = (points - normals * eps, normals, eps, box_of, start, points,
+                          n_faces)
 
-        locations, index_ray = _cast_first_hit(mesh, origins, directions)
+    if refusals:
+        return Verdict(gate=gid, passed=False, measured=float(len(refusals)), limit=0.0,
+                       comparator="<=", units="refused entries",
+                       detail=f"{len(refusals)} wall entr(ies) refused: "
+                              + "; ".join(refusals[:3]))
+    if not judged:
+        return _skipped(gid, f"every part is exempt in {exempt[1] or WALL_EXEMPT_KEYS[0]} "
+                             f"({', '.join(sorted(exempted)[:4])}"
+                             f"{'...' if len(exempted) > 4 else ''}): no wall was judged")
+    unset = [name for name in judged if name not in minimums]
+    if unset:
+        return _skipped(
+            gid,
+            f"part(s) {', '.join(map(repr, unset[:4]))}{'...' if len(unset) > 4 else ''} "
+            f"have no minimum: no {MIN_WALL_BY_PART_KEYS[0]} entry names or matches "
+            f"them, and the projection does not define {_spellings(ctx, MIN_WALL_KEYS)}. "
+            f"The minimum wall is a PROCESS decision the model must carry, and this "
+            f"gate will not invent one",
+        )
+
+    def where_from(name: str, j: int) -> str:
+        if j < 0:
+            return minimums[name][1]
+        box = boxes[name][j]
+        reason = box["reason"]
+        return f"{box['label']} box: {reason[:60]}{'...' if len(reason) > 60 else ''}"
+
+    rows = []
+    box_rows = []
+    # Two rays across every judged part, each (key, thickness, minimum, part,
+    # point, source, ray): the one with the lowest thickness over its own minimum
+    # (key: that ratio), which decides the pass and is reported on a fail, and the
+    # thinnest (key: thickness, then the higher minimum), which is reported on a
+    # pass. The first part wins a tie in both, so with one minimum they are the
+    # same ray.
+    worst = None
+    thinnest = None
+    slivers = 0
+    edges = 0
+    box_rays = 0
+    for name in judged:
+        mesh = meshes[name]
+        origins, normals, eps, box_of, start, points, n_faces = prepared[name]
+        n_rays = len(origins)
+        box_rays += n_rays - n_faces
+        part_min = minimums[name][0]
+        own = boxes.get(name, [])
+        # Each ray's own minimum: its box's when it starts in one, else its part's.
+        ray_min = np.full(n_rays, part_min, dtype=float)
+        for j, box in enumerate(own):
+            ray_min[box_of == j] = box["min_mm"]
+
+        locations, index_ray, index_tri = _cast_first_hit(mesh, origins, -normals)
         if len(index_ray) == 0:
             return _skipped(
-                "cad.wall_thickness",
-                f"no inward ray hit anything on part {name!r} ({len(idx)} rays) — the "
+                gid,
+                f"no inward ray hit anything on part {name!r} ({n_rays} rays) — the "
                 f"ray engine returned nothing, so no thickness was measured",
             )
+        index_ray = np.asarray(index_ray, dtype=int)
+        index_tri = np.asarray(index_tri, dtype=int)
+        from_face = start[index_ray]
         # The ray origin is pushed eps ALONG THE INWARD direction, i.e. eps below
         # the surface it starts from (trimesh face normals point outward and the
         # origin is centre - normal*eps). The wall runs surface to surface, so the
@@ -1052,28 +1926,97 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         # assembly.
         travel = np.linalg.norm(
             np.asarray(locations, dtype=float) - origins[index_ray], axis=1)
-        real = travel > 10.0 * eps
+        castable = _castable(mesh)
+        slivers += int((~castable).sum())
+        surface = _smooth_patches(mesh)
+        real = ((travel > 10.0 * eps) & _wall_hits(mesh, from_face, index_tri, surface)
+                & castable[from_face])
+        # A ray past a land or along a face is the part's edge, not a wall
+        # (`_edge_rays` says what slipped through). Judged only on the rays the
+        # filters above keep, so the count is of rays that would have counted.
+        part_edges = np.zeros(len(real), dtype=bool)
+        part_edges[real] = _edge_rays(mesh, surface, from_face[real], index_tri[real],
+                                      travel[real] + eps, points[index_ray[real]])
+        real &= ~part_edges
+        edges += int(part_edges.sum())
         if not real.any():
             return _skipped(
-                "cad.wall_thickness",
-                f"every inward ray on part {name!r} hit its own facet — the sampler "
-                f"measured nothing",
+                gid,
+                f"no inward ray on part {name!r} crossed a wall after excluding "
+                "acute-edge hits, sliver faces and rays past an edge — the sampler "
+                "measured nothing",
             )
         distances = travel[real] + eps
-        hit_rows = np.asarray(index_ray)[real]
-        local_min = float(distances.min())
-        where = origins[hit_rows[int(distances.argmin())]]
-        rows.append({"part": name, "min_mm": local_min, "rays": int(len(idx)),
-                     "hits": int(len(distances)), "faces": int(n_faces),
-                     "at_mm": [round(float(c), 3) for c in where]})
-        if local_min < worst_value:
-            worst_value = local_min
-            worst_part = name
-            worst_point = [round(float(c), 3) for c in where]
+        hit_rows = index_ray[real]
+        # The part's worst ray is the one thinnest FOR ITS OWN minimum: a 0.45 mm
+        # hinge held to 0.4 mm is better off than a 1.3 mm wall held to 1.2 mm.
+        # It decides the pass. Its thinnest ray is the one a "minimum wall
+        # thickness" claim is about, and a tie goes to the higher minimum (the
+        # one nearer failing). With one minimum on the part the two are the same
+        # ray: argmin and the stable lexsort both take the first of equals.
+        ratio = distances / ray_min[hit_rows]
+        k = int(ratio.argmin())
+        t = int(np.lexsort((-ray_min[hit_rows], distances))[0])
+        point = [round(float(c), 3) for c in origins[hit_rows[k]]]
+        source = where_from(name, int(box_of[hit_rows[k]]))
+        t_point = [round(float(c), 3) for c in origins[hit_rows[t]]]
+        t_source = where_from(name, int(box_of[hit_rows[t]]))
+        rows.append({"part": name, "min_mm": float(distances[t]),
+                     "sliver_faces_not_cast": int((~castable).sum()),
+                     "edge_rays_not_counted": int(part_edges.sum()),
+                     "min_minimum_mm": float(ray_min[hit_rows[t]]), "min_from": t_source,
+                     "at_mm": t_point,
+                     "minimum_mm": part_min, "minimum_from": minimums[name][1],
+                     "worst_mm": float(distances[k]),
+                     "worst_minimum_mm": float(ray_min[hit_rows[k]]),
+                     "worst_from": source, "worst_ratio": float(ratio[k]),
+                     "worst_at_mm": point,
+                     "rays": int(n_rays), "hits": int(len(distances)),
+                     "faces": int(n_faces), "box_rays": int(n_rays - n_faces)})
+        for j, box in enumerate(own):
+            in_box = box_of[hit_rows] == j
+            box_rows.append({
+                "entry": box["label"], "part": name, "box_mm": [box["lo"], box["hi"]],
+                "min_mm": box["min_mm"], "reason": box["reason"],
+                "spacing_mm": box["spacing_mm"],
+                "rays": int((box_of == j).sum()), "hits": int(in_box.sum()),
+                "thinnest_mm": float(distances[in_box].min()) if in_box.any() else None})
+        if worst is None or float(ratio[k]) < worst[0]:
+            worst = (float(ratio[k]), float(distances[k]),
+                     float(ray_min[hit_rows[k]]), name, point, source,
+                     (name, int(hit_rows[k])))
+        t_key = (float(distances[t]), -float(ray_min[hit_rows[t]]))
+        if thinnest is None or t_key < thinnest[0]:
+            thinnest = (t_key, float(distances[t]), float(ray_min[hit_rows[t]]),
+                        name, t_point, t_source, (name, int(hit_rows[t])))
 
-    evidence = [_write(ctx, "wall_thickness.json", rows)]
+    def summary(found: tuple) -> dict:
+        _key, mm, minimum, part, at, source, _ray = found
+        return {"part": part, "mm": mm, "minimum_mm": minimum, "from": source,
+                "at_mm": at, "ratio": mm / minimum}
+
+    evidence = [_write(ctx, "wall_thickness.json", {
+        "thinnest": summary(thinnest), "nearest_its_minimum": summary(worst),
+        "parts": rows, "boxes": box_rows, "exempt": dict(sorted(exempted.items())),
+        "sliver_faces_not_cast": slivers, "min_cast_altitude_mm": MIN_CAST_ALTITUDE_MM,
+        "edge_rays_not_counted": edges, "graze_deg": GRAZE_DEG,
+        "box_rays": box_rays, "box_spacing_of_min": BOX_SPACING_OF_MIN,
+        "minimums": {name: {"mm": minimums[name][0], "from": minimums[name][1]}
+                     for name in judged}})]
     sampled = sum(r["hits"] for r in rows)
     cast = sum(r["rays"] for r in rows)
+    _ratio, worst_value, worst_limit, worst_part, worst_point, worst_from, worst_ray = worst
+    passed = worst_value >= worst_limit
+    # What the verdict reports (see the docstring): on a pass the thinnest wall,
+    # against the minimum it was held to, so a claim on "minimum wall thickness"
+    # in mm is compared with the thinnest wall there is. It meets that minimum,
+    # because every ray met its own. On a fail the worst ray, below its own.
+    if passed:
+        (_key, value, value_limit, value_part, value_point, value_from,
+         value_ray) = thinnest
+    else:
+        value, value_limit, value_part, value_point, value_from, value_ray = (
+            worst_value, worst_limit, worst_part, worst_point, worst_from, worst_ray)
 
     # The one gate in this pack that knows a POINT rather than a part: the thin
     # spot is where a ray started, in the same model coordinates the assembly GLB
@@ -1083,26 +2026,57 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     # only the worst one is pinned. Pinning the runner-up on every part would
     # suggest a thickness map the gate did not produce.
     locators = []
-    if worst_value < limit and worst_part:
+    if not passed:
         movers = PARTS.movers(meshes)
         locators = [
             Locator(view=PARTS.VIEW_ID, target=movers.get(worst_part, worst_part),
                     kind="point", position=list(worst_point),
                     value=round(worst_value, 4),
-                    label=f"{worst_value:.3f} mm wall vs {limit:.3f} mm minimum "
-                          f"({cast} rays sampled)")
+                    label=f"{worst_value:.3f} mm wall vs {worst_limit:.3f} mm minimum "
+                          f"[{worst_from}] ({cast} rays, one per face"
+                          + (f" and {box_rays} in boxes" if box_rays else "") + ")")
         ]
 
+    # With one minimum over every judged ray, the worst wall IS the thinnest one,
+    # and the line says so in the words it always used. A pass always reports the
+    # thinnest wall; a fail with more than one minimum says which wall it reports.
+    one_minimum = not boxes and len({minimums[name][0] for name in judged}) == 1
+    head = ("thinnest wall" if passed or one_minimum
+            else "worst wall against its own minimum:")
+    # On a pass, the wall nearest its own minimum is named beside the thinnest
+    # when it is another ray: the verdict's margin is the thinnest wall's, and a
+    # reader must see the smaller one. Its point is in the evidence, not here: the
+    # detail is capped at 500 characters (gates._DETAIL_MAX).
+    nearest = (f"; nearest its own minimum: {worst_value:.3f} mm on {worst_part} vs "
+               f"{worst_limit:.3f} mm [{worst_from}]"
+               if passed and worst_ray != value_ray else "")
+    shown = sorted(exempted)
+    # The order is what the cap may cut: the walls, then the exempt parts (the gap a
+    # reader must see), then the counts, whose every number is in the evidence too.
+    # What slipped through (review of round 3): the box and edge counts came first,
+    # and on an assembly with a box, slivers, edge rays, a nearest wall and six
+    # exempt parts the detail reached 500 characters at "exempt, not judge...".
     return Verdict(
-        gate="cad.wall_thickness",
-        passed=worst_value >= limit,
-        measured=round(worst_value, 4),
-        limit=round(limit, 4), comparator=">=",
+        gate=gid,
+        passed=passed,
+        measured=round(value, 4),
+        limit=round(value_limit, 4), comparator=">=",
         units="mm",
-        detail=f"thinnest wall {worst_value:.3f} mm on {worst_part} at "
-               f"({', '.join(f'{c:g}' for c in worst_point)}) vs {limit:.3f} mm minimum "
-               f"[{limit_key or MIN_WALL_KEYS[0]}] "
-               f"({sampled}/{cast} inward face-normal rays hit; sampler, not a proof)",
+        detail=f"{head} {value:.3f} mm on {value_part} at "
+               f"({', '.join(f'{c:g}' for c in value_point)}) vs {value_limit:.3f} mm "
+               f"minimum [{value_from}]"
+               + nearest
+               + (f"; exempt, not judged: {', '.join(shown[:4])}"
+                  f"{f' and {len(shown) - 4} more' if len(shown) > 4 else ''}"
+                  if shown else "")
+               + f" (a ray sampler, not a proof: {sampled}/{cast} inward face-normal "
+                 f"rays hit, one per face"
+               + (f" and {box_rays} more in wall_exceptions boxes" if box_rays else "")
+               + (f", {slivers} sliver face(s) under {MIN_CAST_ALTITUDE_MM:.4f} mm "
+                  f"altitude not cast from" if slivers else "")
+               + (f", {edges} ray(s) past an edge or along a face not counted"
+                  if edges else "")
+               + ")",
         evidence=evidence,
         locators=locators,
     )
@@ -1150,6 +2124,47 @@ def _boolean_engines() -> list[str]:
     except Exception:                                  # noqa: BLE001 - third-party import side effects
         pass
     return found
+
+
+def _layer_thickness(shared: Any) -> float:
+    """How thick the shared material is as one flat layer, mm: an UPPER bound.
+
+    The extent of the shared solid's vertices along their axis of least spread.
+    Any direction's extent bounds the solid's width in that direction from above,
+    so a value under the depth tolerance proves the whole shared material lies
+    between two parallel planes that close together: a layer, not a pocket.
+
+    What slipped through without it: a seated flat contact failed on volume
+    alone. Tessellation leaves two coincident faces sharing a layer a few
+    microns thick, and its volume is that depth times the contact area, so a
+    board seated over a few hundred mm^2 passes 0.2 mm^3 with nothing wrong. The
+    pack already said this for a bonded joint. Measured on the shared solid
+    itself, the layer is judged on depth like a bonded joint, with no
+    declaration, and only while it is thinner than the pair's own depth tolerance.
+
+    *Rejected,* and measured on a published assembly before it was: judging the
+    pair on the existing equivalent depth (volume over the largest face of the
+    two boxes' overlap) or scaling the volume tolerance by that face's area. That
+    depth is a lower bound and a loose one. Three pairs read 0.00025, 0.0015 and
+    0.0027 mm by it; their shared solids were four 3 mm pads 0.0135 mm thick, two
+    bodies 0.6 x 1.3 x 5.9 mm, and a crescent 0.85 x 0.89 x 5.6 mm. Two of those
+    are real interferences that the volume tolerance caught, and either rule
+    would have passed them. *Rejected too:* twice the volume over the surface
+    area (a lower bound on the width: a crescent or an edge dug into a face reads
+    a third to a half of its depth, so the waiver would forgive two to three
+    times its tolerance). The cost of the upper bound: a curved seated layer
+    spreads along its curve and is not waived, as it was not before; declare the
+    part curved (``organic_parts``) or the pair bonded.
+    """
+    import numpy as np
+
+    vertices = np.asarray(getattr(shared, "vertices", ()), dtype=float).reshape(-1, 3)
+    if len(vertices) < 4:
+        return math.inf
+    centred = vertices - vertices.mean(axis=0)
+    _values, vectors = np.linalg.eigh(centred.T @ centred)
+    along = centred @ vectors[:, 0]
+    return float(along.max() - along.min())
 
 
 def _pair_key(a: str, b: str) -> tuple[str, str]:
@@ -1555,6 +2570,7 @@ def clash(ctx: GateContext) -> Verdict:
             try:
                 inter = trimesh.boolean.intersection([ma, mb])
                 volume = float(inter.volume) if inter is not None and len(inter.faces) else 0.0
+                layer = _layer_thickness(inter) if volume > 0.0 else 0.0
             except Exception as exc:                   # noqa: BLE001 - kernel
                 row.update(volume_mm3=None, depth_mm=None, verdict="clash",
                            why=f"boolean raised {type(exc).__name__}: {exc} — an "
@@ -1605,14 +2621,25 @@ def clash(ctx: GateContext) -> Verdict:
 
             over = volume - tol
             over_depth = depth - depth_tol
+            # A SEATED LAYER: the shared material, measured on the shared solid
+            # itself, lies within the pair's own depth tolerance of one plane. Its
+            # volume is that depth times the contact area, so the volume tolerance
+            # is waived for it as for a bonded joint; the depth tolerance stands.
+            # `_layer_thickness` says what slipped through and what was rejected.
+            seated = (not glued and over > 0 and math.isfinite(layer)
+                      and layer <= depth_tol)
+            clashes_here = (over > 0 and not seated) or over_depth > 0
             row.update(volume_mm3=volume, depth_mm=depth, contact_mm2=contact,
-                       verdict="clash" if (over > 0 or over_depth > 0) else "clear",
-                       why=f"{volume:.4f} mm^3 vs {tol_text}; "
-                           f"{depth:.4f} mm equivalent depth over {contact:.2f} mm^2 "
+                       layer_mm=layer if math.isfinite(layer) else None, seated=seated,
+                       verdict="clash" if clashes_here else "clear",
+                       why=f"{volume:.4f} mm^3 vs {tol_text}"
+                           + (f", waived: a seated layer {layer:.4f} mm thick, within "
+                              f"the {depth_tol:g} mm depth tolerance" if seated else "")
+                           + f"; {depth:.4f} mm equivalent depth over {contact:.2f} mm^2 "
                            f"vs {depth_tol:g} mm"
                            + (f" (bonded: {bonded[pair]})" if glued else ""))
             rows.append(row)
-            if over > 0 or over_depth > 0:
+            if clashes_here:
                 worst_over = max(worst_over, over)
                 if pair not in allowed:
                     clashes.append(row)
@@ -1657,7 +2684,7 @@ def clash(ctx: GateContext) -> Verdict:
                   f"{tol_shown} / "
                   f"{first['depth_tolerance_mm']:g} mm tolerance: {first['why']}")
         # THE PAYOFF. Two pins per interfering pair, each naming the other part and
-        # carrying the shared volume, so `back_left interferes with grip_lid_left by
+        # carrying the shared volume, so `carriage interferes with guide_roller by
         # 0.41 mm^3` stops being a sentence somebody has to go and act on and
         # becomes two parts lit up in the viewer at the pose where it happens.
         #
@@ -1704,15 +2731,199 @@ def clash(ctx: GateContext) -> Verdict:
               f"{len(contacts)} in surface contact, rest AABB-clear); "
               f"largest shared volume {measured:.4f} mm^3"
               + (f" on {worst['a']}/{worst['b']} vs "
-                 + (f"{worst_tol:g} mm^3 tolerance" if isinstance(worst_tol, (int, float))
+                 + (f"no volume limit (a seated layer {worst['layer_mm']:.4f} mm thick)"
+                    if worst.get("seated") else
+                    f"{worst_tol:g} mm^3 tolerance" if isinstance(worst_tol, (int, float))
                     else "no volume limit (bonded joint)")
                  if worst else "")
               + f"; deepest equivalent penetration {deepest:.4f} mm"
+              + (f"; {sum(1 for r in rows if r.get('seated'))} seated layer(s) judged "
+                 f"on depth, not volume" if any(r.get("seated") for r in rows) else "")
               + (f"; {len(allowed)} intended contact(s) allowlisted" if allowed else "")
               + (f"; {len(bonded)} bonded joint(s) held to "
                  f"{BONDED_CONTACT_DEPTH_TOL_MM:g} mm of penetration" if bonded else ""))
     return Verdict(gate="cad.clash", passed=True, measured=0.0, limit=0.0, comparator="<=",
                    units="pairs", detail=detail, evidence=evidence)
+
+
+# --------------------------------------------------------------------------- #
+# tier 1 — clearance: how far apart two declared parts are
+# --------------------------------------------------------------------------- #
+#: Where a project declares the pairs whose clearance a claim is about:
+#: ``[{pair: [a, b], reason}]``, refused as ``_clearance_from`` says.
+CLEARANCE_PAIR_KEYS = ("clearance_pairs",)
+
+#: Keys that state a number on a pair. A clearance pair takes its limit from the
+#: claim only. What slipped through when the list was read by the mating-contact
+#: reader: ``tol_mm: 0.5`` on a clearance pair was accepted, then dropped, and the
+#: pair was judged at the claim's limit with no word about the 0.5.
+CLEARANCE_NUMBER_KEYS = ("tol_mm", "max_gap_mm", "gap_tol_mm", "limit_mm", "min_gap_mm",
+                         "clearance_mm")
+
+#: The claim tag ``cad.clearance`` reads its limit from (``ctx.acceptance``).
+CLEARANCE_TAG = "clearance"
+
+#: How far manifold3d's ``min_gap`` searches, mm. A gap past it reads as the cap,
+#: and the detail says so. Fixed, never derived from the limit: a value that moves
+#: when the limit moves is not a measurement of the parts. Measured on two printed
+#: parts of ~50k faces each: a 5 mm search takes 0.02 s, 50 mm 0.61 s, 500 mm 104 s.
+#: *Rejected:* the limit + 1 mm (the reported value then moved with the claim).
+#: A limit at or above the cap cannot be shown to hold, so it fails, and says why.
+CLEARANCE_SEARCH_MM = 10.0
+
+
+def _clearance_from(entry: Any, refusals: list) -> tuple[str, str] | None:
+    """``(a, b)`` from one ``clearance_pairs`` entry, or ``None`` and a refusal.
+
+    The same four refusals as a mating pair, in the words of a clearance: an entry
+    that cannot be read, a wildcard, one part twice, no reason. And a fifth: a
+    number on the pair, because the limit is the claim's and a second one that the
+    gate drops is a limit the reader thinks was used."""
+    pair = _normalise_pair(entry)
+    if pair is None:
+        refusals.append(f"unreadable clearance_pairs entry {json.dumps(entry, default=str)[:80]}")
+        return None
+    label = f"clearance_pairs entry {pair[0]!r} vs {pair[1]!r}"
+    if any(p in ("*", "any", "anything", "") for p in pair):
+        refusals.append(f"blanket {label} refused — a clearance from 'anything' names no "
+                        f"part to measure the gap to")
+        return None
+    if pair[0] == pair[1]:
+        refusals.append(f"{label} names one part twice — a part has no gap to itself")
+        return None
+    stated = [k for k in CLEARANCE_NUMBER_KEYS if isinstance(entry, dict) and k in entry]
+    if stated:
+        refusals.append(f"{label} states {stated[0]} = {entry[stated[0]]!r} — the clearance "
+                        f"limit is the claim's (tagged {CLEARANCE_TAG}), and this gate will "
+                        f"not drop a number a pair states; remove it, or state the limit "
+                        f"on the claim")
+        return None
+    reason = str((entry or {}).get("reason", "")).strip() if isinstance(entry, dict) else ""
+    if not reason:
+        refusals.append(f"{label} has no reason — a clearance nobody explained is one "
+                        f"nobody can check, delete or defend when the design moves")
+        return None
+    return pair
+
+
+def _manifold(mesh: Any):
+    """A manifold3d solid of ``mesh``, or raises: ``min_gap`` on a solid manifold3d
+    could not build returns the search cap, a pass that measured nothing. Measured:
+    an unwelded triangle soup builds an empty ``NotManifold`` solid."""
+    import manifold3d
+    import numpy as np
+
+    solid = manifold3d.Manifold(manifold3d.Mesh(
+        vert_properties=np.asarray(mesh.vertices, dtype=np.float32),
+        tri_verts=np.asarray(mesh.faces, dtype=np.uint32)))
+    status = solid.status()
+    if status != manifold3d.Error.NoError or solid.is_empty():
+        raise ValueError(f"manifold3d built no solid from it ({status.name}"
+                         f"{', empty' if solid.is_empty() else ''})")
+    return solid
+
+
+@gate(
+    id="cad.clearance",
+    title="Declared pairs of parts are at least the claim's clearance apart",
+    claims=["clearance"],
+    tier=Tier.BUILD,
+    settles="minimum clearance",
+    requires_python=["trimesh", "numpy", "manifold3d"],
+    # Prerequisite cad.is_volume: a distance between solids means nothing when one
+    #    of them is not a solid. Isolated: it passes carriage_under_cover.
+    needs=["cad.is_volume"],
+    basis="established",
+    negative_control=NegativeControl(
+        fixture="selftest/bad_meshes.py:carriage_under_cover",
+        good="selftest/good_meshes.py:baseline_meshes",
+        note="the baseline carriage made taller, its bottom on the cavity floor, so its "
+             "top is 0.01 mm under the cover: no shared material, so cad.clash passes "
+             "it, and 0.01 mm against the claim's 1.0 mm",
+    ),
+)
+def clearance(ctx: GateContext) -> Verdict:
+    """The least distance between the two solids of each declared pair, by
+    manifold3d's ``min_gap``, against the limit of the claim tagged ``clearance``.
+
+    What slipped through before it: ``cad.clash`` reads a 0.01 mm gap and an 8 mm
+    gap both as PASS (no shared material), and a clearance claim tagged ``fit``
+    read Checked on that pass. This gate measures the gap.
+
+    The limits, for the reader: one pose (the one exported); the nearest approach
+    only (a sliding part resting on its guide reads 0.0); and the distance between
+    the meshes, which on a curved face reads wider than the CAD by about twice the
+    chord sag (a true 0.01 mm between R5 cylinders reads 0.058 mm at 32 segments,
+    0.013 mm at 128).
+    """
+    gid = "cad.clearance"
+    raw = ctx.first_pack_param(CLEARANCE_PAIR_KEYS, None) or []
+    if not raw:
+        # Before the acceptance: a project with no clearance claim reads skipped here.
+        return _skipped(gid, "clearance_pairs declares no pair: nothing declared, nothing "
+                             "measured")
+    acc = ctx.acceptance(CLEARANCE_TAG)
+    if str(acc.units or "").strip() != "mm" or acc.comparator.value != ">=":
+        return Verdict(gate=gid, passed=False,
+                       error=f"the claim tagged {CLEARANCE_TAG} states {acc.comparator.value} "
+                             f"{acc.limit:g} {acc.units!r}; this gate judges a minimum "
+                             f"clearance (>=) in mm: state the limit so")
+    meshes, welded, skip = _load_all(ctx, gid)
+    if skip is not None:
+        return skip
+    refusals: list[str] = []
+    pairs = []
+    for entry in (raw if isinstance(raw, list) else [raw]):
+        got = _clearance_from(entry, refusals)
+        if got is None:
+            continue
+        missing = [p for p in got if p not in meshes]
+        if missing:
+            refusals.append(f"clearance_pairs entry {got[0]!r} vs {got[1]!r} names "
+                            f"{', '.join(map(repr, missing))}, not in the assembly")
+            continue
+        pairs.append((got, str(entry.get("reason", "")).strip()))
+    if refusals:
+        return Verdict(gate=gid, passed=False, measured=float(len(refusals)), limit=0.0,
+                       comparator="<=", units="refused entries",
+                       detail=f"{len(refusals)} clearance_pairs entr(ies) refused: "
+                              + "; ".join(refusals[:3]))
+
+    solids: dict[str, Any] = {}
+    rows = []
+    for (a, b), reason in pairs:
+        # Every pair goes through manifold3d, far ones too: it returns the cap
+        # past the search. What slipped through with a shortcut on the two boxes:
+        # the baseline's one pair was 23 mm apart by box, so its known-good never
+        # reached min_gap, and a gate that read 0.0 for every pair qualified.
+        for name in (a, b):
+            if name not in solids:
+                try:
+                    solids[name] = _manifold(meshes[name])
+                except ValueError as exc:
+                    return Verdict(gate=gid, passed=False, error=f"part {name!r}: {exc}")
+        gap = min(float(solids[a].min_gap(solids[b], CLEARANCE_SEARCH_MM)),
+                  CLEARANCE_SEARCH_MM)
+        rows.append({"a": a, "b": b, "reason": reason, "gap_mm": round(gap, 6),
+                     "capped": gap >= CLEARANCE_SEARCH_MM})
+    worst = min(rows, key=lambda r: r["gap_mm"])
+    measured = worst["gap_mm"]
+    capped = worst["capped"]
+    passed = acc.holds(measured) and acc.limit < CLEARANCE_SEARCH_MM
+    shown = (f">= {CLEARANCE_SEARCH_MM:g} mm (search cap)" if capped else f"{measured:.4f} mm")
+    detail = (f"least clearance {shown} between {worst['a']} and {worst['b']} vs "
+              f"{acc.comparator.value} {acc.limit:g} mm, over {len(rows)} declared pair(s)"
+              + (f"; a limit at or past the {CLEARANCE_SEARCH_MM:g} mm search cannot be "
+                 f"shown to hold" if acc.limit >= CLEARANCE_SEARCH_MM else "")
+              + _welded_note(welded))
+    movers = PARTS.movers(meshes)
+    locators = ([_locate(movers, n, label=f"{shown} to {o} vs {acc.limit:g} mm",
+                         value=measured)
+                 for n, o in ((worst["a"], worst["b"]), (worst["b"], worst["a"]))]
+                if not passed else [])
+    return Verdict(gate=gid, passed=passed, measured=measured, limit=acc.limit,
+                   comparator=">=", units="mm", detail=detail,
+                   evidence=[_write(ctx, "clearance.json", rows)], locators=locators)
 
 
 # --------------------------------------------------------------------------- #
@@ -2648,7 +3859,7 @@ def _entry_tolerance(entry: Any, label: str, refusals: list) -> float | None:
     """A per-entry mating tolerance in mm, or ``None`` to inherit the project's.
 
     A tolerance that is present and unusable is refused rather than ignored, for
-    the same reason `wall_samples` is: a projection that states a number means it,
+    the same reason `mating_samples` is: a projection that states a number means it,
     and silently replacing it with a default is a gate measuring against a limit
     nobody chose.
     """

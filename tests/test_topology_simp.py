@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
+from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
@@ -54,7 +54,7 @@ class SolverOutput(unittest.TestCase):
             deck.write_text("*HEADING\nfixture\n")
             result = deck.with_suffix(".frd")
             result.write_text("old result that must not count\n")
-            with mock.patch.object(ccx.subprocess, "run", return_value=subprocess.CompletedProcess([],0,"", "")):
+            with mock.patch.object(ccx.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
                 with self.assertRaisesRegex(RuntimeError,"ccx failed"):
                     ccx.run(str(deck), ccx="fixture-ccx")
             self.assertFalse(result.exists())
@@ -123,9 +123,9 @@ class Proposer(unittest.TestCase):
     def test_hosted_output_cannot_escape(self):
         script = str(PACK / "proposers" / "topopt3d.py")
         with tempfile.TemporaryDirectory() as d:
-            env=dict(os.environ,NOPEKIT_PROPOSAL_DIR=d)
-            p=subprocess.run([sys.executable,script,"--problem","missing.npz","--out",d+"-outside"],
-                             env=env,capture_output=True,text=True)
+            env={"NOPEKIT_PROPOSAL_DIR": d}
+            p=_env.run([sys.executable,script,"--problem","missing.npz","--out",d+"-outside"],
+                             env=env, cwd=d)
             self.assertNotEqual(p.returncode,0)
             self.assertIn("NOPEKIT_PROPOSAL_DIR",p.stderr)
 

@@ -75,6 +75,8 @@ if _GATES_DIR not in _sys.path:
 
 import _thermal_physics as P                                        # noqa: E402
 
+from nopekit.models import Claim, Ledger                           # noqa: E402
+
 #: How far past its limit each fixture must drive the measured quantity. 15% is
 #: the margin: large enough that no rounding, property-table interpolation or
 #: correlation-band edge can put the known-bad case back inside the limit, small
@@ -124,6 +126,37 @@ def _with(ctx, **overrides):
     params = _baseline()
     params.update(overrides)
     return dataclasses.replace(ctx, params=params)
+
+
+def _claims() -> list:
+    """The claims the baseline states under ``_claims``, fresh each call.
+
+    The ledger a fixture hands a gate that reads its limit from a claim
+    (``ctx.acceptance``): the baseline's, never the host's, so a host claim at a
+    generous limit cannot defuse the control (``packs.baseline_claims`` reads
+    the same rows for the known-good control)."""
+    try:
+        with open(_BASELINE_PATH, "r", encoding="utf-8") as handle:
+            loaded = _json.load(handle)
+    except (OSError, ValueError):
+        return []
+    return [Claim.from_dict(row) for row in loaded.get("_claims") or ()
+            if isinstance(row, dict)]
+
+
+def _with_claims(ctx, **overrides):
+    """``_with``, and the baseline's claims as the ledger."""
+    return dataclasses.replace(_with(ctx, **overrides), ledger=Ledger(claims=_claims()))
+
+
+def _claim_limit(tag: str) -> float | None:
+    """The limit of the baseline's claim tagged ``tag``, or None."""
+    for claim in _claims():
+        if tag in (claim.tags or ()) and claim.acceptance is not None:
+            limit = claim.acceptance.limit
+            if isinstance(limit, (int, float)) and not isinstance(limit, bool):
+                return float(limit)
+    return None
 
 
 def _num(params: dict, key: str, default: float) -> float:
@@ -602,3 +635,80 @@ def north_facing(ctx):
             return _with(ctx, surface_azimuth_deg=azimuth, surface_tilt_deg=candidate)
     worst = min(candidates, key=poa_at)
     return _with(ctx, surface_azimuth_deg=azimuth, surface_tilt_deg=worst)
+
+
+#: The named fault behind ``shell_shrunk``: a pocket remake at half the linear
+#: size, so a quarter of the area. It is what runs on the shipped baseline (65.84 C
+#: against 48 C). *Rejected:* a smaller emissivity or a larger grip as the fault
+#: (each moves one of the model's own assumptions, not the design's size).
+SHELL_SCALE = 0.5
+
+#: The tag ``thermal.skin_temperature`` reads its limit from. Restated here, not
+#: imported: a fixture reads the gate's arithmetic (``_thermal_physics``), never
+#: the gate module, whose import registers gates.
+SKIN_TAG = "average-skin-temperature"
+
+
+def _hottest_power(sources) -> float | None:
+    """The largest per-state sum of ``heat_sources`` in W, as the gate sums it
+    (a ``linear`` entry at its worst corner), or None when the record does not
+    read. The hottest state is the one with the most power: every state shares
+    one shell, and T_s rises with P."""
+    totals: dict = {}
+    try:
+        for entry in (sources or {}).values():
+            if "linear" in entry:
+                lin = entry["linear"]
+                watts = P.linear_dissipation(float(lin["vin_max_v"]), float(lin["vout_min_v"]),
+                                             float(lin["i_max_a"]))
+            else:
+                watts = float(entry["w"])
+            for label in dict.fromkeys(str(s).strip() for s in entry["states"]):
+                totals[label] = totals.get(label, 0.0) + watts
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    return max(totals.values()) if totals else None
+
+
+def shell_shrunk(ctx):
+    """thermal.skin_temperature — the same electronics in a smaller shell.
+
+    A pocket remake: area x s^2 and convective length x s, with s the smaller of
+    ``SHELL_SCALE`` and the scale that puts the hottest state at T_a + MARGIN x
+    (limit - T_a), found by bisection with the gate's own
+    ``shell_skin_temperature``. The limit is the baseline claim's (tagged
+    ``average-skin-temperature``), read from ``_claims`` and handed to the gate
+    as its ledger, never the host's. Power, emissivity, grip and ambient are
+    unchanged, so the value moves for one reason: less surface to shed the same
+    watts.
+    """
+    base = _baseline()
+    area = _num(base, "shell_area_m2", 0.04)
+    length = _num(base, "shell_length_m", 0.16)
+    eps = _num(base, "shell_emissivity", 0.9)
+    covered = _num(base, "shell_covered_fraction", 0.0)
+    ambient_k = P.c_to_k(_num(base, "shell_ambient_c", 25.0))
+    power = _hottest_power(base.get("heat_sources"))
+    limit = _claim_limit(SKIN_TAG)
+    scale = SHELL_SCALE
+    if power is not None and limit is not None and 0.0 <= covered < 1.0:
+        target_k = ambient_k + MARGIN * (P.c_to_k(limit) - ambient_k)
+
+        def t_at(s: float) -> float:
+            return P.shell_skin_temperature(power, ambient_k, area * (1.0 - covered) * s * s,
+                                            length * s, eps)["t_s_k"]
+
+        try:
+            if t_at(SHELL_SCALE) < target_k:
+                lo, hi = 1e-6, SHELL_SCALE      # T_s falls as s grows: bisect for target
+                for _ in range(60):
+                    mid = (lo + hi) / 2.0
+                    if t_at(mid) >= target_k:
+                        lo = mid
+                    else:
+                        hi = mid
+                scale = lo
+        except ValueError:
+            pass
+    return _with_claims(ctx, shell_area_m2=area * scale * scale,
+                        shell_length_m=length * scale)

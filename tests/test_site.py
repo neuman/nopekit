@@ -811,7 +811,7 @@ class DeriveExplode(unittest.TestCase):
         self.assertGreaterEqual(site_mod.derive_explode(thin)["step"], 14.0)
 
     def test_nodes_group_into_movers_by_the_double_underscore(self):
-        """`back_left` is one part; `cap__boss_a` is a feature of `cap`. A
+        """`guide_roller` is one part; `cap__boss_a` is a feature of `cap`. A
         grouper that split on the first `_` would shatter every multi-word part
         into a mover of its own."""
         bounds = dict(STACK)

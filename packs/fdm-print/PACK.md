@@ -1,7 +1,8 @@
 # fdm-print
 
-Filament printability. Seven gates: five that cost nothing and run on every edit,
-two that read the mesh. **Every one of them judges ONE PRINTED PART, and expects
+Filament printability. Eight gates: five that cost nothing and run on every edit,
+two that read the mesh, and one (`fdm.slice`, tier 2) that slices the mesh on
+OrcaSlicer and reads the toolpaths. **Every one of them judges ONE PRINTED PART, and expects
 that part IN ITS PRINT ORIENTATION WITH THE BED AT Z=0** — the pose the machine
 will actually build it in, not the pose it occupies in the assembly. Hand a gate
 here a part exported in assembly coordinates and you get an answer that is true of
@@ -13,9 +14,9 @@ the clash check and the viewer, `build/print/*.stl` laid down as printed — and
 point this pack at the second.
 
 The same distinction runs through the parameters. This pack's `part_bbox_mm`,
-`part_volume_mm3` and `part_min_wall_mm` describe **one part**; `cad-solid`'s
-`assembly_bbox_mm`, `assembly_volume_mm3` and `process_min_wall_mm` describe **the
-assembly** or **the process**. They were all once spelled `bbox_mm`, `volume_mm3`
+`part_volume_mm3`, `part_min_wall_mm` and `part_min_floor_mm` describe **one part**;
+`cad-solid`'s `assembly_bbox_mm`, `assembly_volume_mm3` and `process_min_wall_mm`
+describe **the assembly** or **the process**. They were all once spelled `bbox_mm`, `volume_mm3`
 and `min_wall_mm`, and on a project with both packs installed — an assembly and
 printed parts, which is every mechanical project — one word had to mean two
 things. See [Keys, frames and resolution order](#keys-frames-and-resolution-order).
@@ -23,21 +24,26 @@ things. See [Keys, frames and resolution order](#keys-frames-and-resolution-orde
 **One part, or a whole plate.** `fdm.overhang`, `fdm.bridge_span` and
 `fdm.bed_fit` also take a **set** of parts and return ONE verdict about it: the
 worst part's number, that part named, how many were checked and how many are past
-the limit, a locator per offending part, and a per-part table in the evidence. The
-other four gates read one number each and judge one part, as they always have. See
-[Many parts](#many-parts).
+the limit, a locator per offending part, and a per-part table in the evidence.
+`fdm.min_wall` and `fdm.print_time_est` do the same from a per-part map, and the
+guard checks every part the projection describes. `fdm.layer_alignment` judges one
+part, and with a set stated its verdict says so. See [Many parts](#many-parts).
 
 ## What this pack settles
 
 - **Does it fit the machine**, with the brim on it, in either XY orientation, and
   under the Z travel.
-- **Is every section thick enough to print reliably** — three perimeters at the
-  nozzle you are actually using.
+- **Is every wall thick enough to print reliably** — three perimeters at the
+  nozzle you are actually using, across the layer plane where perimeters print.
 - **Will it need support**, how much of the part is involved, and how bad the worst
-  face is.
+  face is — or, for a part you state prints on support, whether any face is where
+  no support can reach. See [Printing on support](#printing-on-support).
 - **Will the unsupported horizontal spans bridge**, or do they need a chamfer, a
   split, or support — and **is it a bridge at all**, because a ceiling held on one
   side is a cantilever and gets a limit more than ten times smaller.
+- **Does it slice on the named slicer, version and presets**, with no bridge line
+  in the slicer's own toolpaths running unsupported past the maximum
+  (`fdm.slice`, OrcaSlicer 2.4.2, opt-in).
 - **Is the primary load carried across the layer bonds** — the failure a structural
   pack cannot see, because a structural pack computes with bulk properties and a
   printed part is not a bulk material.
@@ -50,7 +56,7 @@ other four gates read one number each and judge one part, as they always have. S
   watertight or is wound inside out, because every face normal in it is a fiction
   and so is every number read off one.
 - **Whether the pack's own rules still apply** — `fdm.process_model_valid` decides
-  whether the other six are entitled to an opinion at all.
+  whether the other seven are entitled to an opinion at all.
 
 ## What it does NOT settle
 
@@ -62,9 +68,13 @@ Read this section before you trust a green sweep from this pack.
   prints. Nothing in the pack can detect that — a tilted panel is a legitimate
   print orientation for some other part — so it is on the model to export the
   print set, and it is stated at the top of this file for that reason.
-- **It is not a slicer.** No gate here runs the actual toolpath. A part can pass
-  every gate and still fail in the slicer on a thin-wall gap-fill artifact, a
-  seam placement, or a cooling conflict between two islands.
+- **One gate slices, and it reads only some of what the slicer did.** `fdm.slice`
+  runs OrcaSlicer 2.4.2 and reads its refusals, its warnings and its bridge lines
+  (see [The slicer gate](#the-slicer-gate)). It does not settle a thin feature the
+  slicer drops from the toolpaths (a 0.15 mm or 0.08 mm fin gives 0 mm³ of
+  extrusion and no warning), the time and mass the slicer estimates, a seam
+  placement, or a cooling conflict between two islands. The other seven gates run
+  no toolpath at all.
 - **It says nothing about dimensional accuracy.** Holes print undersize, outer
   dimensions print oversize, and both depend on the machine, the material and the
   flow calibration. If a feature has a tolerance, that is a *physical* claim
@@ -91,7 +101,21 @@ Read this section before you trust a green sweep from this pack.
 - **Mesh solidity is checked, mesh *quality* is not.** The gates refuse a mesh that
   is not watertight or is wound inside out. They say nothing about sliver triangles,
   a tessellation too coarse to represent the real chamfer angle, or a mesh that is
-  watertight and still self-intersecting in a way `is_watertight` does not see.
+  watertight and still self-intersecting in a way `is_watertight` does not see. Two
+  allowances stand in for quality, and each is stated in every verdict that judges
+  a face or a ceiling region, one part or a set, pass or fail: a face counts past
+  the overhang limit only beyond a 0.5 deg tessellation tolerance, and a ceiling
+  region smaller than one bead's footprint is listed and not judged, the floor and
+  where it came from said.
+- **A support statement is not checked against the slicer.** `supports_by_part`
+  tells `fdm.overhang` and `fdm.bridge_span` that a part prints on support.
+  `fdm.slice` reads its own preset groups, and nothing here checks that the preset
+  a part slices on has support on. Nor is support removal checked: a pocket open to
+  the outside by a hole too small to clear the support from it counts as reachable.
+- **A floor is held to one layer, and no more.** `part_min_floor_mm` (a floor,
+  roof or web, measured along the build axis) is held to one `layer_height_mm` by
+  the guard, so a floor in another unit or under one layer is caught. How many
+  solid layers a skin needs for strength is not judged here.
 - **It does not decide the print orientation.** Everything here measures the part
   *in the orientation it was handed*. Re-orienting changes the overhang, bridge,
   strength and time answers at once, and choosing between those is a design
@@ -120,17 +144,20 @@ Read this section before you trust a green sweep from this pack.
 
 | id | tier | measures | fails when | control |
 |---|---|---|---|---|
-| `fdm.process_model_valid` | 0 | units (absolute extent, volume vs its own bbox, thinnest section vs one bead), nozzle range, layer/nozzle and width/nozzle ratios | any assumption the other gates stand on has stopped holding | `metres_not_millimetres` — every length, area and volume in the projection divided by 1000 to the right power |
+| `fdm.process_model_valid` | 0 | units (absolute extent, volume vs its own bbox, thinnest wall vs one bead, thinnest floor vs one layer), nozzle range, layer/nozzle and width/nozzle ratios — **every part the projection describes** | any assumption the other gates stand on has stopped holding | `metres_not_millimetres` — every length, area and volume in the projection divided by 1000 to the right power |
 | `fdm.bed_fit` | 0 | footprint / (bed − 2× brim), and height / Z — **one part or the whole set** | utilisation > 1.0 on any part | `brim_overflow` — a footprint sized halfway between the brimmed area and the raw bed, from the projection's own brim |
-| `fdm.min_wall` | 0 | thinnest section vs 3 perimeters at the line width | section < minimum | `two_perimeter_wall` — the section cut to two beads of the width the project actually uses |
-| `fdm.layer_alignment` | 0 | utilisation derated by the layer-normal knockdown, strength or modulus per `utilisation_kind` | derated utilisation > 1.0 | `load_across_layers` — load rotated onto the build axis with the utilisation set 15% past the knockdown |
-| `fdm.print_time_est` | 0 | estimated hours and grams | hours > `max_print_time_h` **or** grams > `max_filament_g` | `crawling_speed` — the speed, solved from the gate's own model, that lands the part 15% past the project's time ceiling |
-| `fdm.overhang` | 1 | area past the overhang limit, as a fraction of surface — **one part or the whole set** | fraction > allowance; mesh not a solid; `overhang_limit_deg` ≥ `bridge_ceiling_deg` | `steep_cone` — a cone stood on its apex, 70° half angle |
-| `fdm.bridge_span` | 1 | longest unsupported horizontal span, per ceiling region, classified bridge / cantilever / unanchored — **one part or the whole set** | span > `max_bridge_mm` (bridge), > `max_cantilever_mm` (cantilever), any span at all (unanchored); mesh not a solid | `long_bridge` — a PLATE of three parts whose middle one is an arch spanning 3× the limit between two real anchors |
+| `fdm.min_wall` | 0 | thinnest wall across the layer plane vs 3 perimeters at the line width — **one part or a per-part map** | wall < minimum on any part | `two_perimeter_wall` — the section cut to two beads of the width the project actually uses |
+| `fdm.layer_alignment` | 0 | utilisation derated by the layer-normal knockdown, strength or modulus per `utilisation_kind`. Claim tags `structural`, `layer-alignment` only | derated utilisation > 1.0 | `load_across_layers` — load rotated onto the build axis with the utilisation set 15% past the knockdown |
+| `fdm.print_time_est` | 0 | estimated hours and grams — **one part or a per-part map**, each part its own print. Claim tags `cost`, `print-time` only | hours > `max_print_time_h` **or** grams > `max_filament_g` on any part | `crawling_speed` — the speed, solved from the gate's own model, that lands the part 15% past the project's time ceiling |
+| `fdm.overhang` | 1 | area past the overhang limit plus a 0.5° tessellation tolerance, as a fraction of surface — **one part or the whole set**; on a part stated to print on support, only the faces no support reaches | fraction > allowance; mesh not a solid; limit plus tolerance ≥ `bridge_ceiling_deg` | `steep_cone` — a cone stood on its apex, 70° half angle |
+| `fdm.bridge_span` | 1 | longest unsupported horizontal span, per ceiling region of at least one bead's footprint, classified bridge / cantilever / unanchored — **one part or the whole set**; on a part stated to print on support, only the regions no support reaches | span > `max_bridge_mm` (bridge), > `max_cantilever_mm` (cantilever), any span at all (unanchored); mesh not a solid | `long_bridge` — a PLATE of three parts whose middle one is an arch spanning 3× the limit between two real anchors |
+| `fdm.slice` | 2 | the longest unsupported run of Bridge lines in the toolpaths OrcaSlicer 2.4.2 wrote, on the three presets the project names for each part — **one part or the whole set**. Claim tag `slicer` only | span > `max_bridge_mm`; Orca refuses the part (-50, -52, -102) or warns about it; the mesh is not in print pose; the G-code's extents are not the mesh's | `long_bridge` — the same plate: Orca slices the 90 mm arch "Success." with no warning |
 
 Thresholds and their provenance live inline in `gates/printability.py` and
 `gates/mesh.py` as module constants with docstrings — the brim allowance, the
-three-perimeter rule, the 45° limit, the 0.5× layer-normal ratio, the duty factor.
+three-perimeter rule, the 45° limit and its 0.5° tessellation tolerance, the
+bead-footprint floor on a ceiling region, the 0.5× layer-normal ratio, the duty
+factor.
 Every one of them is overridable from the projection, and every verdict prints the
 value it actually used.
 
@@ -143,18 +170,21 @@ never fall back to a cheaper approximation. A pack that quietly downgrades turns
 ### Prerequisites
 
 `fdm.process_model_valid` is the prerequisite (`needs`) of every other gate here:
-`fdm.overhang`, `fdm.bridge_span`, `fdm.bed_fit`, `fdm.min_wall`, `fdm.layer_alignment`
-and `fdm.print_time_est`. It checks the units and the process envelope the rest of
+`fdm.overhang`, `fdm.bridge_span`, `fdm.bed_fit`, `fdm.min_wall`, `fdm.layer_alignment`,
+`fdm.print_time_est` and `fdm.slice`. It checks the units and the process envelope the rest of
 the pack's arithmetic assumes, so below it failing they are not run, and their
 claims read Skipped, `prerequisite failed: fdm.process_model_valid`.
 
 **A mesh-only project reads Skipped throughout.** A project that publishes meshes and
-no `bbox_mm` gives `fdm.process_model_valid` nothing to check its units against: it
+no extent gives `fdm.process_model_valid` nothing to check its units against: it
 skips itself, so every fdm gate — the mesh gates `overhang` and `bridge_span`
 included, which used to measure — reads `prerequisite not established:
 fdm.process_model_valid (skipped)`. That is the honest reading: the units the overhang
-and bridge numbers are in are unestablished. Publish `fdm.bbox_mm` (one part, in
-print orientation) and the pack runs. There is no mesh-validity guard here, and a
+and bridge numbers are in are unestablished. Publish `fdm.part_bbox_mm` (one part, in
+print orientation) or `fdm.bbox_by_part_mm` (each part of the set) and the pack runs.
+The guard used to read the single box only, so a project that stated its set and no
+single box read Skipped here until somebody picked one part's box by hand — and then
+the guard vouched for that one part. There is no mesh-validity guard here, and a
 prerequisite cannot be another pack's gate, so a mesh the mesh gates cannot read still
 fails in their bodies, not as a prerequisite skip.
 
@@ -199,6 +229,7 @@ mesh_path "build/saddle_clamp.stl"  ->  mover "saddle_clamp"  ->  node "saddle_c
 |---|---|---|
 | `fdm.overhang` | one part: up to twelve `face` pins, each at a face centroid in model coordinates, carrying the angle and the area. A set: the steepest face of each offending part, one pin each | the steepest face first (how bad it gets — an 89° nub prints as a blob), then the largest by area (how much of the part is like this, which is what the gate fails on). Ranking by angle alone pins twelve slivers and misses the shelf; by area alone it misses the nub |
 | `fdm.bed_fit` | one `part` pin per offending part, and only when that part has a mesh to draw | the bounding box is a property of the whole part. There is no face to blame, and this is a tier-0 gate that fires happily on a project that stated a box and exported nothing — a locator aimed at a view that does not exist reads as a broken pack |
+| `fdm.slice` | one `point` per offending part, at the middle of its worst unsupported run, moved from the slicer's bed into the mesh's frame by the centres of the two boxes; a `part` pin per part that fails on pose, a refusal, a warning or its extents | the toolpath says where the bridge line is. A refusal or a warning names no point |
 | `fdm.bridge_span` | one part: none. A set: one `part` pin per offending part | over a set the question has become *which part*, and that it knows exactly. Where the span is is still not something it could defend: it is measured between anchors found by direction, not at a point |
 | `fdm.min_wall`, `fdm.layer_alignment`, `fdm.print_time_est`, `fdm.process_model_valid` | none | none of them resolves to a position. A bridge span is measured between two anchors the gate finds by direction, not at a point it could defend; the rest are arithmetic on the projection |
 
@@ -231,10 +262,13 @@ pack.
 |---|---|---|---|
 | Part envelope | `part_bbox_mm` | `bbox_mm`, `bbox`, `footprint_mm` | `[x, y, z]` extent of ONE part as printed, mm. Not the assembly — that is `cad-solid`'s `assembly_bbox_mm` |
 | Part volume | `part_volume_mm3` | `volume_mm3`, `solid_volume_mm3` | solid volume of that part, mm³. Not the assembly's material total |
-| Thinnest section | `part_min_wall_mm` | `min_wall_mm`, `thinnest_wall_mm`, `min_feature_mm`, `min_section_mm` | MEASURED off the part, mm. `cad-solid`'s `min_wall_mm` is the opposite kind of number — the thinnest wall a *process* allows |
+| Thinnest wall | `part_min_wall_mm` | `min_wall_mm`, `thinnest_wall_mm`, `min_feature_mm`, `min_section_mm` | MEASURED off the part ACROSS THE LAYER PLANE (perpendicular to the build axis, where perimeters print), mm. It was "the thinnest section anywhere", and a 0.395 mm web printed as three 0.12 mm layers then failed the guard's bead rule. `cad-solid`'s `min_wall_mm` is the opposite kind of number — the thinnest wall a *process* allows |
+| Thinnest floor | `part_min_floor_mm` | `min_floor_mm`, `thinnest_floor_mm` | MEASURED ALONG THE BUILD AXIS (a floor, roof or web), mm. Optional. The guard holds it to one `layer_height_mm` |
 | Part mesh | `mesh_path` | `stl_path`, `part_mesh`, `geometry_path` | the exported mesh **in print orientation, bed at z=0** |
 | Build direction | `build_axis` | `layer_normal`, `print_axis` | `[x, y, z]` vector **or an axis name**: `"z"`, `"+Z"`, `"-y"` |
 | Load direction | `load_axis` | `primary_load_axis`, `load_direction` | same two shapes. `load_axis: "z"` used to report *"the projection has no load_axis"*, which reads as "you did not set it" to the one person who knows they did; a value that is present and unreadable now says so, and says what shape it wants |
+| Printing on support | `supports_by_part` | `print_supports` | `{part: {supports: tree \| normal \| none, reason}}`, read by `fdm.overhang` and `fdm.bridge_span`. See [Printing on support](#printing-on-support) |
+| Slicer presets | `slicer_presets` | — | `{machine, process, filament}`: paths to three complete OrcaSlicer preset files, read by `fdm.slice` only, and a group per part name or glob (see [Preset groups per part](#preset-groups-per-part)). It SKIPS without them and never writes one |
 
 The full list, with a unit and a sentence for each key, is
 `selftest/baseline.json` — every key any gate here reads, on a design they all
@@ -264,7 +298,11 @@ So state the set and let the gate do the picking, out loud.
 | Quantity | Primary key | Also accepted, in this order | What it is |
 |---|---|---|---|
 | The print set | `mesh_paths` | `parts`, `part_meshes`, `mesh_path_by_part` | `{name: path}`, one entry per part **in print orientation, bed at z=0**. A bare list of paths works too and takes each name from its filename |
-| Per-part envelope | `bbox_by_part_mm` | `print_bbox_by_part_mm`, `bbox_mm_by_part`, `bboxes_mm` | `{name: [x, y, z]}`, each part's extent as printed, mm |
+| Per-part envelope | `bbox_by_part_mm` | `print_bbox_by_part_mm`, `bbox_mm_by_part`, `bboxes_mm` | `{name: [x, y, z]}`, each part's extent as printed, mm. Read by `fdm.bed_fit` and the guard |
+| Per-part wall | `part_min_wall_by_part_mm` | `min_wall_by_part_mm` | `{name: mm}`, each part's thinnest wall across the layer plane. Read by `fdm.min_wall` and the guard |
+| Per-part floor | `part_min_floor_by_part_mm` | `min_floor_by_part_mm` | `{name: mm}`, each part's thinnest floor along the build axis. Read by the guard |
+| Per-part volume | `part_volume_by_part_mm3` | `volume_by_part_mm3` | `{name: mm^3}`. Read by `fdm.print_time_est` and the guard (against the part's own box) |
+| Per-part area | `surface_area_by_part_mm2` | `area_by_part_mm2` | `{name: mm^2}`, optional; sharpens a part's shell estimate |
 
 Both resolve pack-scoped first, exactly as every other key here does:
 `fdm.mesh_paths` beats bare `mesh_paths`. An entry may also be a dict carrying
@@ -295,6 +333,30 @@ carries no per-part extents it falls back to the single `part_bbox_mm` and adds
 about the one box above and not about them"*. Thirteen skips would be a worse
 answer than the one it can give, and a silent fallback would be the original
 complaint all over again.
+
+`fdm.min_wall` and `fdm.print_time_est` work the same way from their maps. With
+`part_min_wall_by_part_mm` (or `part_volume_by_part_mm3`) stated, every part is
+judged and one verdict names the worst; a part of the set with no number in the
+map is not measured and keeps the set from passing; a map entry that names no
+part of the set is a SKIP naming it. With only the single number, the verdict
+names the part (`part_name`) and says the set it is not about: *"the 13 part(s) in
+`mesh_paths` state no thinnest wall of their own (part_min_wall_by_part_mm), so
+this verdict is about the one number above and not about them"*. What slipped
+through before the maps: those two gates judged one part, the person picked it
+by hand, and no verdict named it. `fdm.print_time_est` estimates each part as its
+own print and gives the set's total if they are printed one after another; that is
+not a plate's time.
+
+`fdm.layer_alignment` has no map: a load case is one load axis and one
+utilisation, about one part. With a set stated, its verdict names the part
+(`part_name`) and says the set it is not about: *"one load case is stated, not one
+per part, so this verdict is about one part and not the rest of the 13 in
+`mesh_paths`"*.
+
+The guard checks every part the projection describes — each box, each volume
+against its own box, each wall against one bead, each floor against one layer —
+and names the part in each problem. Its evidence lists every problem in full,
+because the verdict line is capped.
 
 ### What the verdict says
 
@@ -451,7 +513,17 @@ minute usually means `volume_mm3` is actually cm³.
 - **"51% of surface"** from `fdm.overhang` — this is not a nub, it is the part. Do
   not reach for support settings; reorient it or add a chamfer.
 - **"UNANCHORED"** from `fdm.bridge_span` — a ceiling with nothing under either end.
-  No bridge length saves it; it needs support or a different orientation.
+  No bridge length saves it; it needs support or a different orientation. A region
+  smaller than one bead's footprint (the line width squared, or
+  `min_ceiling_area_mm2`) is not this: it is listed as **"UNDER ONE BEAD"** and not
+  judged. Without that floor, a 0.00 mm² sliver of tessellation scored infinite and
+  became the headline over a real 266 mm² cantilever.
+- **"+0.5 deg tessellation tolerance"** in `fdm.overhang` — a face counts past the
+  limit only beyond it. Chamfers drawn at the 45° rule were measured at 45.00-45.05°
+  flat and 45.0-45.5° revolved, as exported, and failed without it. Set
+  `overhang_tessellation_tol_deg` to 0 to judge the bare angle.
+- **"prints on stated tree support"** — the part is judged on its
+  `supports_by_part` statement. See [Printing on support](#printing-on-support).
 - **"CANTILEVER, 1 anchored edge(s) all to one side"** from `fdm.bridge_span` — a
   shelf projecting into air off a single wall. It is not a bridge of twice the
   length: there is no second landing to pull the strand taut, so it droops from the
@@ -479,6 +551,168 @@ minute usually means `volume_mm3` is actually cm³.
   those parts, not the design. The measured summary for the rest follows it in the
   same line, and the per-part table has the repair message in full.
 
+## Printing on support
+
+Some parts are designed to print on support: a housing with a lip, a part whose
+best orientation leaves a shelf. `fdm.overhang` and `fdm.bridge_span` judged every
+part as printed without support, so such a part failed — truly, and not about the
+design. State it:
+
+```json
+"supports_by_part": {
+  "housing": {"supports": "tree", "reason": "the lip under the face prints on tree supports"}
+}
+```
+
+- **What it changes.** On that part, the faces past the overhang limit and the
+  ceiling regions are carried by the support: they are counted in the verdict and
+  not judged. The question becomes "prints on the stated support", not "prints
+  without support". A claim whose statement says "without support" must not state
+  it.
+- **What it never carries.** A face or a ceiling on a void sealed inside the part
+  (a closed shell wound inward): no support can be put there, so it is judged as if
+  printed without support. A ceiling bridged inside a hollow part is judged at
+  `max_bridge_mm` whatever the statement says.
+- **Every verdict that uses it says so.** One part: *"prints on stated tree support
+  (the lip ...): 40 face(s), 12.5 mm^2, past the limit are carried by it"*. A set:
+  *"2 of 13 part(s) print on stated support: housing (tree), lid (normal)"*.
+- **Read strictly.** An ERROR, naming the entry, for: a name that is not a part
+  (with the closest name), a kind other than `tree`, `normal` or `none`, an empty
+  reason, a key other than `supports` and `reason`, an entry that is not a mapping.
+  Exact names only: a pattern states support for parts nobody named. `none` says
+  what the default is.
+- **A set of boxes and one mesh.** A part set with no mesh in it hands these two
+  gates back to the one `mesh_path`. A statement may still name every part of the
+  set; only the mesh's entry is used, and the verdict says which entries were not:
+  *"supports_by_part for lid not used (no mesh)"*.
+- **Not checked against the slicer.** `fdm.slice` reads its preset groups; nothing
+  here checks that a part stated to print on support slices on a preset with
+  support on. Name both in one place in your model.
+
+## Claim tags
+
+Each gate carries a tag of its own, so a claim can name one question. The broad
+tags stay only on the gates that settle the broad question.
+
+| Tag | Use it on a claim about | Gates that bear on it |
+|---|---|---|
+| `bed-fit` | the part fitting the build volume with its brim | `fdm.bed_fit` |
+| `perimeters` | the thinnest wall carrying three perimeters | `fdm.min_wall` |
+| `overhang` | faces the machine prints without support (or on stated support) | `fdm.overhang` |
+| `bridge-span` | ceilings bridged or cantilevered | `fdm.bridge_span` |
+| `slicer` | the part slicing clean on the named presets | `fdm.slice` |
+| `layer-alignment` | the primary load not carried across the layer bonds | `fdm.layer_alignment` |
+| `print-time` | print time and filament mass | `fdm.print_time_est` |
+| `process-validity` | the pack's own rules applying at all | `fdm.process_model_valid` |
+| `printability`, `fdm`, `additive`, `manufacturability` | the part printing at all | `fdm.bed_fit`, `fdm.min_wall`, `fdm.overhang`, `fdm.bridge_span` and the guard |
+| `structural` | load paths (shared with structural packs) | `fdm.layer_alignment` and the guard |
+| `cost` | money and machine time | `fdm.print_time_est` |
+
+`fdm.process_model_valid` keeps its broad tags on purpose: it decides whether the
+others mean anything, and it is the prerequisite of every one of them.
+
+**The move for an older claim (fdm-print 0.3.0).** `fdm.layer_alignment` and
+`fdm.print_time_est` carried the four broad tags too, so every printability claim
+bound them, and each skipped until a load axis or a speed was stated: a cover that
+carries no load read Skipped, and projects stated a load axis they had no reason
+for to clear it. They carry only their own tags now. A claim tagged
+`printability`, `fdm`, `additive` or `manufacturability` that meant the layer check
+adds `layer-alignment` (or `structural`); one that meant the print time adds
+`print-time` (or `cost`). `fdm.slice` was taken off the broad tags for the same
+reason before.
+
+## The slicer gate
+
+`fdm.slice` is opt-in: it binds only a claim tagged `slicer`, because it runs at tier
+2 (`check --tier 2`) and needs OrcaSlicer, and an unrun or skipped gate keeps its
+claim from reading Checked. Under the `fdm` tags every fdm claim would read Open
+below tier 2. It settles `bridge span`, the string `fdm.bridge_span` settles, so a
+claim on that quantity with a tighter limit is held against both gates.
+
+It needs `slicer_presets` — `{machine, process, filament}`, paths to three complete
+OrcaSlicer preset files, or a group per part (below) — and `max_bridge_mm`. It
+invents neither: without them it SKIPS. `references/slicer.md` says how to install
+Orca 2.4.2 user-space and how to write a complete preset.
+
+Each guard is a silent mode measured on Orca 2.4.2, which said "Success." over all
+of them:
+
+| Orca did | The gate says |
+|---|---|
+| sliced an 80 mm unsupported bridge, no warning | FAIL at ~80 mm, read off the bridge lines that have nothing printed under them |
+| printed an 80 mm bar 2 mm wide as `Overhang wall` only, and an 87 mm roof over 0% infill as `Internal Bridge`, with no `Bridge` line | the same reader on all three roles: FAIL at 79.85 and 87.06 mm |
+| typed the first layer over a support `Bridge` too (the longest Bridge line reads a part whose bridges are all supported as one long free span) | a bridge point is held when any cell within 0.5 mm of it was printed less than two layers plus the support gap below it |
+| dropped a part 15 mm above the bed to the bed | FAIL before the slicer runs: not in print pose |
+| sliced a preset with `enable_suport` misspelled, without the key | ERRORED: a preset key not in the G-code's configuration was not used. A key Orca 2.4.2's own source renames (`wall_infill_order`) must reach the block under its new name; one it retires (`adaptive_layer_height`) is named in the evidence |
+| refused the part (-50, -52, -102) | FAIL in Orca's own words |
+| warned about the part (`warning_message`) | FAIL in Orca's own words |
+| returned another code, crashed, timed out, wrote no result | ERRORED, never a fail; a part that failed beside it still FAILS the gate |
+| ran another release, or wrote a G-code that names another | SKIPPED (the `--help` banner) or ERRORED (the G-code header); a `--help` that exits nonzero or prints no banner is ERRORED: the slicer did not start |
+| wrote arcs (`enable_arc_fitting`) or absolute extrusion | ERRORED: the reader follows straight moves and relative E only |
+| sliced something whose extrusions are not the mesh's extents (±1 mm) | FAIL: the G-code is not this part |
+
+What it reads is measured, not exact: 9.91 mm for a drawn 10 mm bridge, 79.96 for
+80, 89.96 for 90 — 0.04-0.09 mm short, the unsafe side and small. Over the sparse
+tips of tree supports it may read long, because between two tips nothing is printed
+within a cell below the bridge line; look at the slicer's preview there. (The
+figures first read on supported parts came from parts outside the pack and are not
+given: OrcaSlicer 2.4.2 was not on the machine that removed them, so they were not
+measured again on the pack's own probes.) Orca is AGPL-3.0: the pack runs it as a
+subprocess and carries none of its text, its profiles included.
+
+### Preset groups per part
+
+One triple does not fit every part. A part that must print on supports, in another
+material or on another printer was judged on the one global triple, so its verdict
+was about a print nobody would make. So `slicer_presets` also maps a part's name,
+or a glob, to a group of its own:
+
+```json
+"slicer_presets": {
+  "machine":  "presets/printer.json",
+  "process":  "presets/petg-0.20.json",
+  "filament": "presets/petg.json",
+  "hinge_pin": {"machine": "presets/printer.json", "process": "presets/petg-0.20-supports.json",
+                "filament": "presets/petg.json"},
+  "gasket_*":  {"machine": "presets/printer.json", "process": "presets/tpu-0.20.json",
+                "filament": "presets/tpu.json"}
+}
+```
+
+A part slices on, in this order:
+
+1. the group whose key is its name, as the verdict names it (the key of
+   `mesh_paths`, made safe for the viewer: `hinge pin` is `hinge_pin`);
+2. else the one group whose glob (`*`, `?`, `[...]`, case counts) matches it;
+3. else the default triple, the three paths at the top;
+4. else nothing: the part is not sliced and is named in a SKIP.
+
+The default triple is optional when a group names every part (`"*"` is a glob
+too). The order reads no key order: the verdict cache keys `slicer_presets` with
+its keys sorted, so two statements that differ only in key order must mean one
+thing.
+
+It is read strictly, and each of these is ERRORED, with no part sliced:
+
+| Statement | Why it is refused |
+|---|---|
+| a key that is not a role, a part name or a glob with a group (`"filamnet": "..."`) | named with the closest role: a misspelled role read as nothing leaves the triple short |
+| a group with a key other than the three roles, or short of one | a group names all three and takes none from the default: a part's triple from two places would move when the default moves |
+| a key that names no part, or a glob that matches none | named with the closest part name: a misspelled name sends that part back to the default triple, which is the silent mode the groups close |
+| a part two globs match, with no group under its own name | name the part, or narrow a glob: the gate does not pick one |
+| a role that holds a group, or a value that is not a path (a list, a number) | a role takes one path; a part named like a role takes a glob that matches it (`"machin[e]"`) |
+
+A default triple short of a role, and a preset file that does not exist, are a
+SKIP, and no part is sliced either. A part that fails before the slicer runs (not
+in print pose) still FAILS beside every one of these, and beside a project that
+states no `slicer_presets` at all: the presets decide which triple a part slices
+on, never whether it is in print pose. The problem is named in the FAIL's detail;
+with no part out of pose, the gate returns the problem in its own word, ERRORED or
+SKIPPED. Only a missing `max_bridge_mm` and a build axis other than +Z skip before
+any part is read. The verdict, the per-part table and each part's `fdm-slice.json`
+(`preset_group`: the key, or `null` for the default) name the presets each part
+sliced on.
+
 ## Where to look next
 
 - `gates/fdm_print_fold.py` — how one verdict is folded out of N parts: the
@@ -490,6 +724,8 @@ minute usually means `volume_mm3` is actually cm³.
   controls are measured against: each fixture moves one number in it and the gate
   under test flips to FAIL. `selftest/baseline_mesh.py` is the source of the solid
   it points at.
+- `references/slicer.md` — installing OrcaSlicer 2.4.2 user-space, and writing
+  the complete presets `fdm.slice` binds its verdict to.
 - `references/orientation.md` — how to choose the print orientation, and why it is
   the single decision that moves strength, finish, support and time at once.
 - `references/geometry_rules.md` — the numeric rules of thumb: holes, threads,

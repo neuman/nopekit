@@ -191,10 +191,35 @@ _MISSING = object()
 # who guessed wrong got a confident verdict about the wrong object.
 BBOX_KEYS = ("part_bbox_mm", "bbox_mm", "bbox", "footprint_mm")
 VOLUME_KEYS = ("part_volume_mm3", "volume_mm3", "solid_volume_mm3")
+#: The thinnest wall ACROSS THE LAYER PLANE: a section measured perpendicular to
+#: the build axis, where the slicer lays perimeters side by side. What slipped
+#: through when PACK.md called it "the thinnest section anywhere in the part": a
+#: horizontal web 0.395 mm thick, printed as about three layers of 0.12 mm, was
+#: stated here, and the guard's bead rule failed it as "another unit or cannot be
+#: printed", so every gate behind the guard read Skipped on a sound part. A
+#: section along the build axis is a count of layers, not of beads, and it has its
+#: own key below.
 MIN_WALL_KEYS = ("part_min_wall_mm", "min_wall_mm", "thinnest_wall_mm",
                  "min_feature_mm", "min_section_mm")
+#: The thinnest section ALONG THE BUILD AXIS (a floor, a roof, a horizontal web),
+#: mm. Optional. The guard holds it to one layer, as it holds a wall to one bead.
+#: *Rejected:* folding it into ``part_min_wall_mm`` with a rule per direction (one
+#: key cannot say which direction its number was measured in), and holding it to
+#: a count of solid layers (that is a strength rule nobody here has a source for;
+#: one layer is the floor below which the section cannot be printed at all).
+MIN_FLOOR_KEYS = ("part_min_floor_mm", "min_floor_mm", "thinnest_floor_mm")
+#: ``{part: mm}`` maps for a print set: the same quantities, one per part. The
+#: names are the part set's (``fdm_print_parts.part_set``). A map wins over its
+#: single number, as a set wins over a single ``mesh_path``: it is the more
+#: complete statement, and the verdict names the key it read.
+MIN_WALL_BY_PART_KEYS = ("part_min_wall_by_part_mm", "min_wall_by_part_mm")
+MIN_FLOOR_BY_PART_KEYS = ("part_min_floor_by_part_mm", "min_floor_by_part_mm")
+VOLUME_BY_PART_KEYS = ("part_volume_by_part_mm3", "volume_by_part_mm3")
+AREA_BY_PART_KEYS = ("surface_area_by_part_mm2", "area_by_part_mm2")
 LOAD_AXIS_KEYS = ("load_axis", "primary_load_axis", "load_direction")
-BUILD_AXIS_KEYS = ("build_axis", "layer_normal", "print_axis")
+BUILD_AXIS_KEYS = _PARTS.BUILD_AXIS_KEYS
+NOZZLE_KEYS = ("nozzle_d_mm", "nozzle_diameter_mm", "nozzle_d")
+LAYER_KEYS = ("layer_height_mm", "layer_h_mm", "layer_height")
 
 
 def _look(ctx: GateContext, names: Sequence[str], default: Any = _MISSING) -> Any:
@@ -247,6 +272,72 @@ def _skip(gate_id: str, names: Sequence[str], what: str,
         skip_reason=f"the projection has no {spelled} ({what}); "
                     f"add it to the model and re-run",
     )
+
+
+def _set_note(ctx: GateContext, what: str, map_key: str | None = None) -> str:
+    """What a single-number verdict adds when the projection also states a set.
+
+    ``fdm.bed_fit`` has said this since the set landed. The single-number gates
+    did not: with thirteen meshes in ``mesh_paths`` and one ``part_min_wall_mm``,
+    ``fdm.min_wall`` judged one part and its verdict named none, which is the
+    complaint the part set was written to end (packs:holdout). So the part is
+    named when the model names it (``part_name``), and a stated set that this
+    number is not about is said. Only ``part_name`` names the part here: ``part``
+    and ``name`` are words a project may use for something else.
+
+    ``map_key`` is the per-part map the set could state instead. ``None`` is a
+    quantity with no per-part map: ``fdm.layer_alignment``'s load case, one load
+    axis and one utilisation. What slipped through in review of the holdout fixes:
+    that gate judged one part with no word on which, beside thirteen in the set.
+    """
+    note = ""
+    name = _look(ctx, ("part_name",), None)
+    if isinstance(name, str) and name.strip():
+        note = f"; part {_PARTS.sanitise(name)}"
+    parts = _PARTS.part_set(ctx)
+    if parts and not parts.problem:
+        if map_key:
+            note += (f"; the {len(parts)} part(s) in `{parts.source}` state no {what} "
+                     f"of their own ({map_key}), so this verdict is about the one "
+                     f"number above and not about them")
+        else:
+            note += (f"; one {what} is stated, not one per part, so this verdict is "
+                     f"about one part and not the rest of the {len(parts)} in "
+                     f"`{parts.source}`")
+    return note
+
+
+def _per_part_problem(gate_id: str, problem: str) -> Verdict:
+    """A per-part map that cannot be read SKIPS, naming the key.
+
+    The pack's rule for a set key stated in a shape it cannot read: never a quiet
+    fall-back to the single number, which would answer a question about one part
+    that was asked about several."""
+    return Verdict(gate=gate_id, passed=False, skipped=True,
+                   skip_reason=f"{problem}; nothing was judged — fix the key or remove it")
+
+
+def _set_names(ctx: GateContext, gate_id: str, values: "Any"):
+    """``(names, source, None)`` for a per-part map, or ``(None, None, verdict)``.
+
+    With a part set stated, the map's names must be the set's: a name the set does
+    not hold is a misspelt part, and the set's part with no number is reported as
+    not measured rather than passed. With no set, the map names the parts.
+    """
+    parts = _PARTS.part_set(ctx)
+    if parts.problem:
+        return None, None, Verdict(gate=gate_id, passed=False, skipped=True,
+                                   skip_reason=parts.problem)
+    if not parts:
+        return list(values.values), values.source, None
+    names = [p.name for p in parts]
+    unknown = sorted(set(values.values) - set(names))
+    if unknown:
+        return None, None, _per_part_problem(
+            gate_id, f"{values.source} names {', '.join(map(repr, unknown[:4]))}, which "
+                     f"is not a part in `{parts.source}` ({', '.join(names[:6])}"
+                     f"{'...' if len(names) > 6 else ''})")
+    return names, f"{parts.source} + {values.source}", None
 
 
 def _look_named(ctx: GateContext, names: Sequence[str]) -> tuple[Any, str]:
@@ -311,40 +402,9 @@ def _floats(value: Any, n: int) -> list[float] | None:
     return out if len(out) == n else None
 
 
-#: Axis NAMES this pack accepts wherever it wants a direction. Both gates that
-#: read a direction take a vector; a name is the spelling everybody reaches for
-#: first, and refusing it silently is the failure below.
-AXIS_NAMES: dict[str, list[float]] = {
-    "x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0],
-}
-
-
-def _direction(value: Any) -> list[float] | None:
-    """A direction from an ``[x, y, z]`` vector OR an axis name, else None.
-
-    Accepted: ``[0, 0, 1]``, ``"z"``, ``"+Z"``, ``"-y"``, ``"z_axis"``.
-
-    The string form is here because the vector-only version produced the worst
-    kind of message. A project set ``load_axis: "z"``, which is what a person
-    writes, and the gate reported *"the projection has no load_axis /
-    primary_load_axis"* — which reads as "you did not set it" to the one reader
-    who knows they did, and sends them looking in the model for a key that is
-    already there. A value the gate cannot read and a value that is absent are
-    different findings and must not share a sentence. See :func:`_direction_problem`
-    for what the unreadable case says now.
-    """
-    if isinstance(value, str):
-        text = value.strip().lower().replace(" ", "").replace("-axis", "").replace("_axis", "")
-        sign = 1.0
-        if text[:1] in "+-":
-            sign = -1.0 if text[0] == "-" else 1.0
-            text = text[1:]
-        if text[-1:] in "+-" and len(text) == 2:      # "z-" as well as "-z"
-            sign = -1.0 if text[-1] == "-" else sign
-            text = text[:-1]
-        base = AXIS_NAMES.get(text)
-        return [sign * c for c in base] if base else None
-    return _floats(value, 3)
+#: The axis names and the parser, one copy for the pack: ``fdm_print_parts.py``.
+AXIS_NAMES = _PARTS.AXIS_NAMES
+_direction = _PARTS.direction
 
 
 def _direction_problem(name: str, value: Any) -> str:
@@ -361,7 +421,7 @@ def _direction_problem(name: str, value: Any) -> str:
 @gate(
     id="fdm.bed_fit",
     title="Part fits the build volume once the brim is on it",
-    claims=["manufacturability", "fdm", "additive", "printability"],
+    claims=["manufacturability", "fdm", "additive", "printability", "bed-fit"],
     tier=Tier.INSTANT,
     settles="bed fit",
     # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
@@ -582,8 +642,11 @@ def _bed_fit_over_set(ctx: GateContext, parts) -> Verdict:
 # --------------------------------------------------------------------------- #
 @gate(
     id="fdm.min_wall",
-    title="Thinnest section carries at least three perimeters",
-    claims=["manufacturability", "fdm", "additive", "printability"],
+    title="Thinnest wall across the layer plane carries at least three perimeters",
+    # `perimeters` is this gate's own tag: a claim about the three-perimeter rule
+    # binds it and nothing else here. The broad four stay, because a thin wall IS
+    # a printability finding (see PACK.md, "Claim tags").
+    claims=["manufacturability", "fdm", "additive", "printability", "perimeters"],
     tier=Tier.INSTANT,
     settles="wall thickness",
     # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
@@ -601,31 +664,69 @@ def _bed_fit_over_set(ctx: GateContext, parts) -> Verdict:
     ),
 )
 def min_wall(ctx: GateContext) -> Verdict:
-    """Thinnest section vs ``PERIMETERS_MIN`` perimeters at the nozzle diameter.
+    """Thinnest wall across the layer plane vs ``PERIMETERS_MIN`` perimeters.
+
+    The wall is measured perpendicular to the build axis, where the slicer lays
+    perimeters side by side (``MIN_WALL_KEYS`` says what slipped through when it
+    was "the thinnest section anywhere"). A floor, roof or web is measured along
+    the build axis and is a count of layers; this gate does not judge it.
 
     The threshold comes from ``NOZZLE_MIN_WALL_MM`` when the nozzle is in the
     table, and from ``PERIMETERS_MIN * extrusion width`` otherwise. An explicit
     ``extrusion_width_mm`` in the projection wins over the table, because a
     project that has tuned its line width knows more than the table does.
 
+    Given ``part_min_wall_by_part_mm`` it judges every part and returns one
+    verdict naming the worst, as the set gates do (:func:`_min_wall_over_set`).
+
     What this does NOT check: whether the thin section is thin *enough to matter*
     structurally. A 1 mm cosmetic fin failing this gate is a nuisance; a 1 mm
     load path failing it is a broken part. The gate cannot tell them apart, and
     a project that wants that distinction should carry two parameters.
     """
+    walls = _PARTS.per_part(ctx, MIN_WALL_BY_PART_KEYS,
+                            "the thinnest wall across the layer plane, mm")
+    if walls.problem:
+        return _per_part_problem("fdm.min_wall", walls.problem)
+    if walls.values:
+        return _min_wall_over_set(ctx, walls)
+
     thin = _look(ctx, MIN_WALL_KEYS, _MISSING)
     if thin is _MISSING:
         return _skip("fdm.min_wall", MIN_WALL_KEYS,
-                     "the thinnest section MEASURED anywhere in the part, mm — "
-                     "cad-solid's min_wall_mm is the opposite kind of number, the "
-                     "thinnest wall a PROCESS allows", ctx)
+                     "the thinnest wall MEASURED across the layer plane of the part "
+                     "(perpendicular to the build axis), mm — cad-solid's min_wall_mm "
+                     "is the opposite kind of number, the thinnest wall a PROCESS "
+                     "allows", ctx)
+    rule = _wall_rule(ctx)
+    if isinstance(rule, Verdict):
+        return rule
+    limit, bead, source = rule
+    thin = float(thin)
+    perims = thin / bead if bead > 0 else 0.0
+    return Verdict(
+        gate="fdm.min_wall",
+        passed=thin >= limit,
+        measured=round(thin, 3),
+        limit=round(limit, 3), comparator=">=",
+        units="mm",
+        detail=f"thinnest wall across the layer plane {thin:.2f} mm = {perims:.1f} "
+               f"beads vs {limit:.2f} mm minimum ({source})"
+               + _set_note(ctx, "thinnest wall", MIN_WALL_BY_PART_KEYS[0]),
+    )
 
-    nozzle = _look(ctx, ("nozzle_d_mm", "nozzle_diameter_mm", "nozzle_d"), _MISSING)
+
+def _wall_rule(ctx: GateContext):
+    """``(limit, bead, source)`` for the three-perimeter rule, or a SKIP.
+
+    One copy for the one-part and the many-part path, so the two cannot come to
+    judge walls against different beads (rule 2).
+    """
+    nozzle = _look(ctx, NOZZLE_KEYS, _MISSING)
     if nozzle is _MISSING:
         return _skip("fdm.min_wall", ("nozzle_d_mm", "nozzle_diameter_mm"),
                      "the nozzle diameter the part will be printed with, mm")
-
-    thin, nozzle = float(thin), float(nozzle)
+    nozzle = float(nozzle)
     width = _look(ctx, ("extrusion_width_mm", "line_width_mm"), _MISSING)
     if width is not _MISSING:
         bead = float(width)
@@ -642,17 +743,45 @@ def min_wall(ctx: GateContext) -> Verdict:
         bead = limit / PERIMETERS_MIN if PERIMETERS_MIN else nozzle
         source = (f"{PERIMETERS_MIN} perimeters at a {nozzle:.2f} mm nozzle"
                   + ("" if table is not None else ", off-table"))
+    return limit, bead, source
 
-    perims = thin / bead if bead > 0 else 0.0
-    return Verdict(
-        gate="fdm.min_wall",
-        passed=thin >= limit,
-        measured=round(thin, 3),
-        limit=round(limit, 3), comparator=">=",
-        units="mm",
-        detail=f"thinnest section {thin:.2f} mm = {perims:.1f} beads vs "
-               f"{limit:.2f} mm minimum ({source})",
-    )
+
+def _min_wall_over_set(ctx: GateContext, walls) -> Verdict:
+    """Every part's thinnest wall against the one rule, the worst part named.
+
+    The score is the limit over the wall, so above 1.0 is a wall thinner than
+    three beads, and the fold's ranking (worst first) is the thinnest wall for the
+    rule. A part of the set with no number in the map is not measured, stays in
+    the denominator, and keeps the set from passing.
+    """
+    names, source, bail = _set_names(ctx, "fdm.min_wall", walls)
+    if bail is not None:
+        return bail
+    rule = _wall_rule(ctx)
+    if isinstance(rule, Verdict):
+        return rule
+    limit, bead, rule_source = rule
+    outcomes = []
+    for name in names:
+        thin = walls.values.get(name)
+        if thin is None:
+            outcomes.append(_FOLD.skipped_part(
+                name, f"{walls.source} states no thinnest wall for this part"))
+            continue
+        outcomes.append(_FOLD.measured_part(
+            name, score=limit / thin, measured=round(thin, 3), limit=round(limit, 3),
+            note=f"at {thin:.2f} mm = {thin / bead:.1f} beads across the layer plane vs "
+                 f"{limit:.2f} mm minimum",
+            row=f"{thin:.3f}\t{thin / bead:.2f}"))
+    summary = _FOLD.write_table(
+        ctx, "fdm-min-wall-parts.txt", "fdm.min_wall", source, outcomes,
+        header_lines=[f"minimum {limit:.2f} mm ({rule_source}); score is the minimum "
+                      f"over the part's thinnest wall across the layer plane"],
+        columns="wall_mm\tbeads")
+    return _FOLD.fold("fdm.min_wall", outcomes, source=source, units="mm",
+                      quantity="thinnest wall", evidence=[summary],
+                      extra_detail=f"minimum {limit:.2f} mm ({rule_source})",
+                      comparator=">=")
 
 
 # --------------------------------------------------------------------------- #
@@ -661,7 +790,15 @@ def min_wall(ctx: GateContext) -> Verdict:
 @gate(
     id="fdm.layer_alignment",
     title="Primary load is not carried across the layer bonds",
-    claims=["manufacturability", "fdm", "additive", "structural", "printability"],
+    # A STRUCTURAL screen, tagged only as one. What slipped through with the four
+    # broad tags it shared with every fdm gate: a claim that a cover fits the bed,
+    # has thick walls and needs no support bound this gate too, and it skips until
+    # a load axis is stated, so the claim read Skipped on a part that carries no
+    # load; projects stated a load axis they had no reason for to clear it. A
+    # claim on layer loading carries `structural` or `layer-alignment` (PACK.md,
+    # "Claim tags"; the move for older claims is written there). fdm.slice was
+    # taken off the broad tags for the same reason.
+    claims=["structural", "layer-alignment"],
     tier=Tier.INSTANT,
     settles="layer-normal load alignment",
     # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
@@ -800,7 +937,8 @@ def layer_alignment(ctx: GateContext) -> Verdict:
             units="deg from layer plane",
             detail=f"load at {phi:.0f} deg to the layer plane ({build_note}), "
                    f"knockdown {knock:.2f}x; ANGLE ONLY — no 'utilisation' in the "
-                   f"projection, so the derating was not applied to a margin",
+                   f"projection, so the derating was not applied to a margin"
+                   + _set_note(ctx, "load case"),
         )
 
     util = float(util)
@@ -813,7 +951,7 @@ def layer_alignment(ctx: GateContext) -> Verdict:
         units="derated utilisation",
         detail=f"load at {phi:.0f} deg to the layer plane ({build_note}): "
                f"{kind} utilisation {util:.2f} ({util_key}) / knockdown {knock:.2f} "
-               f"= {derated:.2f} vs 1.00 ({ratio_note})",
+               f"= {derated:.2f} vs 1.00 ({ratio_note})" + _set_note(ctx, "load case"),
     )
 
 
@@ -823,7 +961,10 @@ def layer_alignment(ctx: GateContext) -> Verdict:
 @gate(
     id="fdm.print_time_est",
     title="Estimated print time within the project's ceiling",
-    claims=["manufacturability", "fdm", "additive", "cost", "printability"],
+    # A COST question, tagged only as one, for the reason fdm.layer_alignment is:
+    # with the broad tags every printability claim bound it and read Skipped
+    # until a print speed was stated.
+    claims=["cost", "print-time"],
     tier=Tier.INSTANT,
     settles="print time",
     # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
@@ -859,11 +1000,57 @@ def print_time_est(ctx: GateContext) -> Verdict:
     parts where travel dominates. It is here to catch the order-of-magnitude
     mistake — the part that is a three-day print, the part that will not fit on
     one spool — not to schedule a farm. When the number matters, slice it.
+
+    Given ``part_volume_by_part_mm3`` it estimates every part as its own print
+    and returns one verdict naming the part nearest a ceiling, with the set's
+    total if the parts are printed one after another (:func:`_time_over_set`).
     """
+    volumes = _PARTS.per_part(ctx, VOLUME_BY_PART_KEYS, "the part's solid volume, mm^3")
+    if volumes.problem:
+        return _per_part_problem("fdm.print_time_est", volumes.problem)
+    if volumes.values:
+        return _time_over_set(ctx, volumes)
+
     vol = _look(ctx, VOLUME_KEYS, _MISSING)
     if vol is _MISSING:
         return _skip("fdm.print_time_est", ("volume_mm3", "solid_volume_mm3"),
                      "the part's solid volume, mm^3")
+    proc = _time_process(ctx)
+    if isinstance(proc, Verdict):
+        return proc
+    vol = float(vol)
+    if vol <= 0:
+        return Verdict(
+            gate="fdm.print_time_est", passed=False,
+            detail=f"volume {vol}, speed {proc['speed']}, layer {proc['layer_h']}, width "
+                   f"{proc['width']}: a non-positive value here makes the estimate "
+                   f"meaningless",
+        )
+    area = _look(ctx, ("surface_area_mm2", "area_mm2"), _MISSING)
+    est = _estimate(vol, None if area is _MISSING else float(area), proc)
+    worst = max(est["time_frac"], est["mass_frac"])
+    return Verdict(
+        gate="fdm.print_time_est",
+        passed=worst <= 1.0,
+        measured=round(worst, 3),
+        limit=1.0, comparator="<=",
+        units="of limit",
+        detail=f"ESTIMATE ~{est['hours']:.1f} h of {proc['limit_h']:.0f} h, "
+               f"~{est['grams']:.0f} g of {proc['limit_g']:.0f} g "
+               f"({est['extruded'] / 1000.0:.1f} cm^3 at {proc['infill']:.0%} infill, "
+               f"{est['shell']}) — {proc['layer_h']:.2f} mm layers at "
+               f"{proc['speed']:.0f} mm/s x {DUTY_FACTOR:.2f} duty; {est['driver']} is "
+               f"the binding one at {worst:.2f} of its ceiling. Not a slice."
+               + _set_note(ctx, "volume", VOLUME_BY_PART_KEYS[0]),
+    )
+
+
+def _time_process(ctx: GateContext):
+    """The process half of the estimate, read once for one part or a set, or a SKIP.
+
+    Shared by both paths so a set's parts are estimated on the same machine,
+    speed and ceilings as a single part would be (rule 2).
+    """
     speed = _look(ctx, ("print_speed_mm_s", "speed_mm_s"), _MISSING)
     if speed is _MISSING:
         return _skip("fdm.print_time_est", ("print_speed_mm_s", "speed_mm_s"),
@@ -872,58 +1059,97 @@ def print_time_est(ctx: GateContext) -> Verdict:
     if layer_h is _MISSING:
         return _skip("fdm.print_time_est", ("layer_height_mm",),
                      "the layer height, mm")
-    nozzle = _look(ctx, ("nozzle_d_mm", "nozzle_diameter_mm", "nozzle_d"), _MISSING)
+    nozzle = _look(ctx, NOZZLE_KEYS, _MISSING)
     width = _look(ctx, ("extrusion_width_mm", "line_width_mm"), nozzle)
     if width is _MISSING:
         return _skip("fdm.print_time_est", ("extrusion_width_mm", "nozzle_d_mm"),
                      "the extrusion width (or the nozzle diameter to stand in for "
                      "it), mm")
-
-    vol, speed, layer_h, width = float(vol), float(speed), float(layer_h), float(width)
-    if min(vol, speed, layer_h, width) <= 0:
+    speed, layer_h, width = float(speed), float(layer_h), float(width)
+    if min(speed, layer_h, width) <= 0:
         return Verdict(
             gate="fdm.print_time_est", passed=False,
-            detail=f"volume {vol}, speed {speed}, layer {layer_h}, width {width}: "
-                   f"a non-positive value here makes the estimate meaningless",
+            detail=f"speed {speed}, layer {layer_h}, width {width}: a non-positive "
+                   f"value here makes the estimate meaningless",
         )
+    return {
+        "speed": speed, "layer_h": layer_h, "width": width,
+        "infill": float(_look(ctx, ("infill_fraction", "infill"), 0.20)),
+        "perims": int(_look(ctx, ("perimeters", "wall_count"), PERIMETERS_MIN)),
+        "density": float(_look(ctx, ("filament_density_g_cm3", "density_g_cm3"),
+                               FILAMENT_DENSITY_G_CM3_DEFAULT)),
+        "limit_h": float(_look(ctx, ("max_print_time_h", "print_time_limit_h"),
+                               MAX_PRINT_TIME_H_DEFAULT)),
+        "limit_g": float(_look(ctx, ("max_filament_g", "max_filament_mass_g",
+                                     "spool_g"), MAX_FILAMENT_G_DEFAULT)),
+    }
 
-    infill = float(_look(ctx, ("infill_fraction", "infill"), 0.20))
-    perims = int(_look(ctx, ("perimeters", "wall_count"), PERIMETERS_MIN))
-    area = _look(ctx, ("surface_area_mm2", "area_mm2"), _MISSING)
-    extruded_mm3, shell_src = _pm.extruded_volume_mm3(
-        vol, infill=infill, perimeters=perims, width=width,
-        surface_area_mm2=None if area is _MISSING else float(area))
 
-    hours = _pm.print_hours(extruded_mm3, speed, layer_h, width)
-    density = float(_look(ctx, ("filament_density_g_cm3", "density_g_cm3"),
-                          FILAMENT_DENSITY_G_CM3_DEFAULT))
-    mass_g = _pm.grams(extruded_mm3, density)
+def _estimate(vol: float, area: float | None, proc: dict) -> dict:
+    """Hours, grams and the fraction of each ceiling for one part. Decides nothing.
 
-    limit_h = float(_look(ctx, ("max_print_time_h", "print_time_limit_h"),
-                          MAX_PRINT_TIME_H_DEFAULT))
-    limit_g = float(_look(ctx, ("max_filament_g", "max_filament_mass_g",
-                                "spool_g"), MAX_FILAMENT_G_DEFAULT))
+    Whichever ceiling is closer is reported, as a fraction of itself, so one number
+    answers "is this print orderable" for both. The raw hours and grams are in the
+    detail either way: a reader who only cares about time should not have to divide
+    anything to find it.
+    """
+    extruded, shell = _pm.extruded_volume_mm3(
+        vol, infill=proc["infill"], perimeters=proc["perims"], width=proc["width"],
+        surface_area_mm2=area)
+    hours = _pm.print_hours(extruded, proc["speed"], proc["layer_h"], proc["width"])
+    grams = _pm.grams(extruded, proc["density"])
+    time_frac = hours / proc["limit_h"] if proc["limit_h"] > 0 else float("inf")
+    mass_frac = grams / proc["limit_g"] if proc["limit_g"] > 0 else float("inf")
+    return {"extruded": extruded, "shell": shell, "hours": hours, "grams": grams,
+            "time_frac": time_frac, "mass_frac": mass_frac,
+            "driver": "time" if time_frac >= mass_frac else "filament mass"}
 
-    # Report whichever ceiling is closer, as a fraction of itself, so one number
-    # answers "is this print orderable" for both. The raw hours and grams are in
-    # the detail either way: a reader who only cares about time should not have
-    # to divide anything to find it.
-    time_frac = hours / limit_h if limit_h > 0 else float("inf")
-    mass_frac = mass_g / limit_g if limit_g > 0 else float("inf")
-    driver = "time" if time_frac >= mass_frac else "filament mass"
 
-    return Verdict(
-        gate="fdm.print_time_est",
-        passed=max(time_frac, mass_frac) <= 1.0,
-        measured=round(max(time_frac, mass_frac), 3),
-        limit=1.0, comparator="<=",
-        units="of limit",
-        detail=f"ESTIMATE ~{hours:.1f} h of {limit_h:.0f} h, ~{mass_g:.0f} g of "
-               f"{limit_g:.0f} g ({extruded_mm3 / 1000.0:.1f} cm^3 at {infill:.0%} "
-               f"infill, {shell_src}) — {layer_h:.2f} mm layers at {speed:.0f} mm/s "
-               f"x {DUTY_FACTOR:.2f} duty; {driver} is the binding one at "
-               f"{max(time_frac, mass_frac):.2f} of its ceiling. Not a slice.",
-    )
+def _time_over_set(ctx: GateContext, volumes) -> Verdict:
+    """Every part as its own print, one verdict, the part nearest a ceiling named.
+
+    A part of the set with no volume in the map is not estimated and keeps the set
+    from passing. The total is the sum of the parts printed one after another: it
+    is not a plate's time, which this pack does not lay out.
+    """
+    names, source, bail = _set_names(ctx, "fdm.print_time_est", volumes)
+    if bail is not None:
+        return bail
+    proc = _time_process(ctx)
+    if isinstance(proc, Verdict):
+        return proc
+    areas = _PARTS.per_part(ctx, AREA_BY_PART_KEYS, "the part's surface area, mm^2")
+    if areas.problem:
+        return _per_part_problem("fdm.print_time_est", areas.problem)
+    outcomes = []
+    total_h = total_g = 0.0
+    for name in names:
+        vol = volumes.values.get(name)
+        if vol is None:
+            outcomes.append(_FOLD.skipped_part(
+                name, f"{volumes.source} states no volume for this part"))
+            continue
+        est = _estimate(vol, areas.values.get(name), proc)
+        total_h += est["hours"]
+        total_g += est["grams"]
+        worst = max(est["time_frac"], est["mass_frac"])
+        outcomes.append(_FOLD.measured_part(
+            name, score=worst, measured=round(worst, 3), limit=1.0,
+            note=f"at ~{est['hours']:.1f} h and ~{est['grams']:.0f} g, {est['driver']} "
+                 f"binding at {worst:.2f} of its ceiling",
+            row=f"{est['hours']:.2f}\t{est['grams']:.1f}\t{est['driver']}"))
+    summary = _FOLD.write_table(
+        ctx, "fdm-print-time-parts.txt", "fdm.print_time_est", source, outcomes,
+        header_lines=[f"ceilings {proc['limit_h']:.0f} h and {proc['limit_g']:.0f} g per "
+                      f"print; {proc['layer_h']:.2f} mm layers at {proc['speed']:.0f} mm/s "
+                      f"x {DUTY_FACTOR:.2f} duty; an ESTIMATE, not a slice",
+                      "score is the nearer ceiling's fraction, each part its own print"],
+        columns="hours\tgrams\tbinding")
+    return _FOLD.fold(
+        "fdm.print_time_est", outcomes, source=source, units="of limit",
+        quantity="print time and filament mass", evidence=[summary],
+        extra_detail=f"ESTIMATE, each part its own print; one after another ~{total_h:.1f} "
+                     f"h and ~{total_g:.0f} g in all. Not a slice")
 
 
 # --------------------------------------------------------------------------- #
@@ -1031,34 +1257,78 @@ def process_model_valid(ctx: GateContext) -> Verdict:
 
     Passing this gate does not make the part printable. It means the rest of this
     pack is entitled to an opinion.
+
+    **Over a print set** it checks every part the projection describes: each
+    extent in ``bbox_by_part_mm``, each volume in ``part_volume_by_part_mm3``
+    against that part's own box, each wall in ``part_min_wall_by_part_mm``
+    against one bead and each floor in ``part_min_floor_by_part_mm`` against one
+    layer, every problem named with its part. What slipped through when it read
+    only ``part_bbox_mm``: a project that stated its set and no single box
+    read Skipped here, so every gate behind it read Skipped too, until the person
+    picked one part's box by hand — and then the guard vouched for one part.
+
+    **A wall and a floor are different counts.** A wall across the layer plane is
+    a whole number of beads, so one under a bead is another unit or unprintable.
+    A floor along the build axis is a whole number of layers, so it is held to one
+    layer, not one bead (``MIN_WALL_KEYS`` says what slipped through when the two
+    shared one rule).
     """
     problems: list[str] = []
     notes: list[str] = []
 
+    parts = _PARTS.part_set(ctx)
+    set_boxes = [] if parts.problem else [(p.name, p.bbox) for p in parts
+                                          if p.bbox is not None]
+    # The per-part maps are read here only to be checked. A map this guard cannot
+    # read is named in the detail and NOT counted as a problem: the gate that
+    # reads it (fdm.min_wall, fdm.print_time_est) refuses it in its own verdict,
+    # and failing here would skip every gate behind the guard, bed fit included,
+    # over a key bed fit never reads.
+    maps = {}
+    for keys, what in ((MIN_WALL_BY_PART_KEYS, "a wall, mm"),
+                       (MIN_FLOOR_BY_PART_KEYS, "a floor, mm"),
+                       (VOLUME_BY_PART_KEYS, "a volume, mm^3")):
+        found = _PARTS.per_part(ctx, keys, what)
+        if found.problem:
+            notes.append(f"not read: {found.problem}")
+        maps[keys[0]] = found.values
+
     bbox = _floats(_look(ctx, BBOX_KEYS, None), 3)
-    if bbox is None:
+    if bbox is None and not set_boxes:
         # Not a pass. An absolute bound on one length is the anchor every other
         # check here hangs off, and with no extent to measure, no unit has been
         # verified — reporting "process model applies" for a projection nothing
         # was checked against is precisely the lie this gate exists to prevent.
-        return _skip("fdm.process_model_valid", BBOX_KEYS,
-                     "the part's [x, y, z] extent in mm — with no length in the "
-                     "projection no unit can be verified, and every other gate "
-                     "here is standing on the assumption that it is millimetres")
+        return _skip("fdm.process_model_valid", BBOX_KEYS + ("bbox_by_part_mm",),
+                     "the part's [x, y, z] extent in mm, or each part's in "
+                     "bbox_by_part_mm — with no length in the projection no unit can "
+                     "be verified, and every other gate here is standing on the "
+                     "assumption that it is millimetres")
 
-    longest = max(abs(v) for v in bbox)
-    if longest < UNIT_SANITY_MIN_MM:
-        problems.append(
-            f"longest dimension {longest:g} — below {UNIT_SANITY_MIN_MM:g} mm, so "
-            f"the model is almost certainly in metres ({longest * 1000:.0f} mm?) "
-            f"and every threshold in this pack is out by 1000x")
-    elif longest > UNIT_SANITY_MAX_MM:
-        problems.append(
-            f"longest dimension {longest:g} — above {UNIT_SANITY_MAX_MM:g} mm, so "
-            f"the model is in a unit this pack was not written for, or the "
-            f"geometry is broken")
-    else:
-        notes.append(f"extent {longest:.0f} mm reads as millimetres")
+    def named(label: str | None, text: str) -> str:
+        return f"{label}: {text}" if label else text
+
+    extents = ([(None, bbox)] if bbox is not None else []) + set_boxes
+    sane = []
+    for label, box in extents:
+        longest = max(abs(v) for v in box)
+        if longest < UNIT_SANITY_MIN_MM:
+            problems.append(named(label,
+                f"longest dimension {longest:g} — below {UNIT_SANITY_MIN_MM:g} mm, so "
+                f"the model is almost certainly in metres ({longest * 1000:.0f} mm?) "
+                f"and every threshold in this pack is out by 1000x"))
+        elif longest > UNIT_SANITY_MAX_MM:
+            problems.append(named(label,
+                f"longest dimension {longest:g} — above {UNIT_SANITY_MAX_MM:g} mm, so "
+                f"the model is in a unit this pack was not written for, or the "
+                f"geometry is broken"))
+        else:
+            sane.append(longest)
+    if sane and len(extents) == 1:
+        notes.append(f"extent {sane[0]:.0f} mm reads as millimetres")
+    elif sane:
+        notes.append(f"{len(sane)} of {len(extents)} extents read as millimetres "
+                     f"(longest {max(sane):.0f} mm)")
 
     # ---- internal consistency, which is what catches cm and inches ---------- #
     # A single absolute floor only sees a 1000x error. Centimetres (a 9 mm part)
@@ -1066,33 +1336,48 @@ def process_model_valid(ctx: GateContext) -> Verdict:
     # PACK.md promises this gate notices them. What gives them away is that the
     # part stops agreeing with the OTHER numbers in the same projection: its
     # stated volume no longer fits inside its own bounding box, or its thinnest
-    # section is narrower than one bead of the nozzle printing it.
-    box_vol = abs(bbox[0] * bbox[1] * bbox[2])
+    # wall is narrower than one bead of the nozzle printing it.
+    fills = []
+    pairs = []
     vol = _look(ctx, VOLUME_KEYS, _MISSING)
-    if vol is not _MISSING and box_vol > 0:
-        vol = float(vol)
-        fill = vol / box_vol
-        if vol <= 0:
-            problems.append(
-                f"volume_mm3 {vol:g} is not positive — a solid has volume; this is "
-                f"a broken projection, not a thin part")
+    if vol is not _MISSING and bbox is not None:
+        pairs.append((None, float(vol), bbox))
+    boxes_by_name = dict(set_boxes)
+    for name, part_vol in maps[VOLUME_BY_PART_KEYS[0]].items():
+        if name in boxes_by_name:
+            pairs.append((name, part_vol, boxes_by_name[name]))
+    for label, part_vol, box in pairs:
+        box_vol = abs(box[0] * box[1] * box[2])
+        if box_vol <= 0:
+            continue
+        fill = part_vol / box_vol
+        if part_vol <= 0:
+            problems.append(named(label,
+                f"volume_mm3 {part_vol:g} is not positive — a solid has volume; this is "
+                f"a broken projection, not a thin part"))
         elif fill > 1.0:
-            problems.append(
-                f"volume_mm3 {vol:g} is {fill:.1f}x its own bounding box "
-                f"({bbox[0]:g}x{bbox[1]:g}x{bbox[2]:g} = {box_vol:g}) — geometrically "
+            problems.append(named(label,
+                f"volume_mm3 {part_vol:g} is {fill:.1f}x its own bounding box "
+                f"({box[0]:g}x{box[1]:g}x{box[2]:g} = {box_vol:g}) — geometrically "
                 f"impossible, so the two are in different units (a bbox in cm with a "
-                f"volume in mm^3 gives exactly this)")
+                f"volume in mm^3 gives exactly this)"))
         elif fill < MIN_SOLID_FILL_FRACTION:
-            problems.append(
-                f"volume_mm3 {vol:g} fills {fill:.2e} of its bounding box (floor "
+            problems.append(named(label,
+                f"volume_mm3 {part_vol:g} fills {fill:.2e} of its bounding box (floor "
                 f"{MIN_SOLID_FILL_FRACTION:g}) — that is a volume quoted in cm^3 under "
                 f"a key that says mm^3, or geometry this pack's shell-and-infill model "
-                f"does not describe")
+                f"does not describe"))
         else:
-            notes.append(f"volume fills {fill:.2f} of the bbox")
+            fills.append(fill)
+    if fills and len(pairs) == 1:
+        notes.append(f"volume fills {fills[0]:.2f} of the bbox")
+    elif fills:
+        notes.append(f"{len(fills)} volume(s) fill {min(fills):.2f}-{max(fills):.2f} of "
+                     f"their boxes")
 
     nozzle = _look(ctx, ("nozzle_d_mm", "nozzle_d", "nozzle_diameter_mm"), _MISSING)
-    layer = _look(ctx, ("layer_height_mm", "layer_h_mm", "layer_height"), _MISSING)
+    layer = _look(ctx, LAYER_KEYS, _MISSING)
+    layer = None if layer is _MISSING else float(layer)
     if nozzle is not _MISSING:
         nozzle = float(nozzle)
         known = sorted(NOZZLE_MIN_WALL_MM)
@@ -1101,8 +1386,7 @@ def process_model_valid(ctx: GateContext) -> Verdict:
                 f"nozzle {nozzle:g} mm is outside the {known[0]:g}-{known[-1]:g} mm range "
                 f"this pack's wall and bridging rules were written for — extrapolating "
                 f"them is guesswork, not a measurement")
-        if layer is not _MISSING:
-            layer = float(layer)
+        if layer is not None:
             ratio = layer / nozzle if nozzle else float("inf")
             if ratio > LAYER_NOZZLE_RATIO_MAX:
                 problems.append(
@@ -1132,28 +1416,76 @@ def process_model_valid(ctx: GateContext) -> Verdict:
             else:
                 notes.append(f"width/nozzle {wr:.2f} inside {lo}-{hi}")
 
-        # The other unit cross-check, and the one that catches inches. A printed
-        # section is a whole number of beads, so a part cannot HAVE a section
-        # narrower than one bead of the nozzle printing it. A model in cm reports
-        # a 3.2 mm wall as 0.32; in inches, as 0.126. Both are below any nozzle in
-        # the table and neither is below the absolute metres floor.
+        # The other unit cross-check, and the one that catches inches. A wall
+        # across the layer plane is a whole number of beads, so a part cannot HAVE
+        # one narrower than one bead of the nozzle printing it. A model in cm
+        # reports a 3.2 mm wall as 0.32; in inches, as 0.126. Both are below any
+        # nozzle in the table and neither is below the absolute metres floor.
+        walls = []
         thin = _look(ctx, MIN_WALL_KEYS, _MISSING)
-        if thin is not _MISSING and nozzle > 0:
-            thin = float(thin)
-            if thin <= 0:
-                problems.append(
-                    f"min_wall_mm {thin:g} is not positive — a section has thickness")
-            elif thin < nozzle:
-                problems.append(
-                    f"thinnest section {thin:g} mm is narrower than one {nozzle:g} mm "
-                    f"bead ({thin / nozzle:.2f} beads) — a printed section is a whole "
-                    f"number of beads, so either the lengths are in another unit "
-                    f"(x25.4 = {thin * 25.4:.2f} mm if inches, x10 = {thin * 10:.2f} mm "
-                    f"if cm) or the feature cannot be printed at all")
+        if thin is not _MISSING:
+            walls.append((None, float(thin)))
+        walls += list(maps[MIN_WALL_BY_PART_KEYS[0]].items())
+        beads = []
+        for label, wall in walls:
+            if nozzle <= 0:
+                break
+            if wall <= 0:
+                problems.append(named(label,
+                    f"min_wall_mm {wall:g} is not positive — a section has thickness"))
+            elif wall < nozzle:
+                problems.append(named(label,
+                    f"thinnest wall across the layer plane {wall:g} mm is narrower than "
+                    f"one {nozzle:g} mm bead ({wall / nozzle:.2f} beads) — a wall across "
+                    f"the layer plane is a whole number of beads, so either the lengths "
+                    f"are in another unit (x25.4 = {wall * 25.4:.2f} mm if inches, x10 = "
+                    f"{wall * 10:.2f} mm if cm) or the feature cannot be printed at all. "
+                    f"A floor or web along the build axis is a count of layers: state it "
+                    f"as part_min_floor_mm"))
             else:
-                notes.append(f"thinnest section {thin / nozzle:.1f} beads wide")
+                beads.append(wall / nozzle)
+        if beads and len(walls) == 1:
+            notes.append(f"thinnest wall {beads[0]:.1f} beads wide")
+        elif beads:
+            notes.append(f"{len(beads)} walls {min(beads):.1f}+ beads wide")
+
+    # A floor, roof or web along the build axis is a whole number of LAYERS, so it
+    # is held to one layer. Without a layer height there is nothing to hold it to,
+    # and the detail says it was not checked rather than passing it.
+    floors = []
+    floor = _look(ctx, MIN_FLOOR_KEYS, _MISSING)
+    if floor is not _MISSING:
+        floors.append((None, float(floor)))
+    floors += list(maps[MIN_FLOOR_BY_PART_KEYS[0]].items())
+    if floors and layer is None:
+        notes.append(f"{len(floors)} floor(s) not checked: no layer_height_mm")
+    elif floors and layer > 0:
+        counts = []
+        for label, value in floors:
+            if value <= 0:
+                problems.append(named(label,
+                    f"min_floor_mm {value:g} is not positive — a section has thickness"))
+            elif value < layer:
+                problems.append(named(label,
+                    f"thinnest section along the build axis {value:g} mm is under one "
+                    f"{layer:g} mm layer ({value / layer:.2f} layers) — a floor is a "
+                    f"whole number of layers, so either the lengths are in another unit "
+                    f"or the feature cannot be printed at all"))
+            else:
+                counts.append(value / layer)
+        if counts:
+            notes.append(f"thinnest floor {min(counts):.1f} layers deep")
 
     checked = "; ".join(notes) or "nothing checkable in the projection"
+    # Every problem in full, one per line. The spine caps a verdict line, and over
+    # a set the third part's problem would be cut from the detail: the count in
+    # `measured` is always every problem, and this file names each one.
+    evidence = []
+    if problems:
+        evidence = [ctx.out_path("fdm-process-model-problems.txt")]
+        with open(evidence[0], "w", encoding="utf-8") as fh:
+            fh.write(f"# fdm.process_model_valid — {len(problems)} problem(s)\n")
+            fh.write("".join(f"{line}\n" for line in problems))
     return Verdict(
         gate="fdm.process_model_valid",
         passed=not problems,
@@ -1162,4 +1494,5 @@ def process_model_valid(ctx: GateContext) -> Verdict:
         units="problems",
         detail=("; ".join(problems) if problems
                 else f"process model applies — {checked}"),
+        evidence=evidence,
     )

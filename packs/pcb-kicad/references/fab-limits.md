@@ -7,14 +7,29 @@ a staged copy.
 
 ## The run
 
-1. Pick the row: the board's copper layer count (its layer table's `*.Cu` entries)
+1. Pick the service: `pcb_fab_service` names it, and may be left out when the
+   file has one. Several services and none named is a skip that names them; a
+   name the file lacks, or a file with no services, is an error.
+2. Hold the board to the service. Each dielectric material its stackup names
+   (every `(material ...)` of a layer KiCad names `dielectric N`, sublayers
+   included), and each via kind it holds, must be one the service lists, or the
+   gate skips, naming the gap. A board that states no stackup is KiCad's default
+   FR4 core (the job file `kicad-cli` 9.0.9 writes for such a board says
+   `"Material": "FR4"`). A via written `blind` or `buried` is blind when one of
+   its layers is `F.Cu` or `B.Cu` and buried when neither is: KiCad 9 writes
+   `blind` for both, and KiCad 10 tells them apart. Material names compare
+   without case or punctuation, so `FR-4` is `FR4` and `FR408-HR` is not.
+   (What slipped through, in the review for handheld boards: a flex wearable on
+   polyimide and an HDI board with microvias were held to the standard FR-4
+   rows, and could pass on rules that are not their process.)
+3. Pick the row: the board's copper layer count (its layer table's `*.Cu` entries)
    and `pcb_copper_oz_outer` (1 oz when absent, said as `[pack default]`). A row's
    `layers` is inclusive; its `oz` is `(lo, hi]`. No row is a skip.
-2. Write the row, after the file's `common` rules, as the staged board's
+4. Write the row, after the service's `common` rules, as the staged board's
    `.kicad_dru`, each rule named `fab_<name>`. The project's own `.kicad_dru` is
    left out of this run: a rule written to relax a constraint for one net would
    relax the fab too.
-3. Copy the `.kicad_pro` with every board-setup minimum (`min_*`) set to 0 but
+5. Copy the `.kicad_pro` with every board-setup minimum (`min_*`) set to 0 but
    the minimum clearance, set to the fab's own; and every constrained type the
    project set to `ignore` raised to `error`. KiCad lets a pad's, footprint's or
    zone's local clearance override every custom rule and holds it only at the
@@ -22,7 +37,7 @@ a staged copy.
    `--severity-all`: either would relax the fab as a custom rule would. Net
    classes, exclusions (each a person's waiver of one finding) and everything
    else stay.
-4. Count the findings whose type is one the rules constrain, except silk on silk
+6. Count the findings whose type is one the rules constrain, except silk on silk
    (below). The detail line groups the count by type, with the fab rule behind
    each. Everything else in the run (silk clipped by the mask, unconnected items)
    is `pcb.drc`'s, judged there under the project's own rules and severities: one
@@ -45,9 +60,9 @@ braced UUID lowercase and dashed. A pad with no id, a padded one, a braced stamp
 or any other text gets a random one; then every silk overlap is counted, and the
 line says why.
 
-What slipped through: on a real 4-layer board the fab run counted the 18
-silk-on-silk overlaps that `pcb.drc` also found as past JLCPCB's limits, 190
-findings where 172 were the fab's, and the detail line read "Silkscreen overlap"
+What slipped through: on a board with silk on silk, the fab run counted every
+silk-on-silk overlap that `pcb.drc` also found as past JLCPCB's limits, beside the
+findings that were the fab's, and the detail line read "Silkscreen overlap"
 three times, so nobody could see that no copper was past a limit. The first fix
 matched pads on the file's text alone, and in review a silk line drawn across a
 pad with no id, an uppercase id or a legacy stamp passed. A project that set
@@ -88,6 +103,12 @@ From jlcpcb.com/capabilities/pcb-capabilities, read 2026-10-17, each number quot
 in the file beside it. Where the page gives a recommended and an absolute
 minimum, the file uses the absolute: this is the fab's floor, not good practice.
 
+One service, `standard`: FR-4 with mechanically drilled through vias, as the page
+read on 2026-11-24 puts its standard options ("mechanical drilling, regular
+trace/space"); blind and buried vias and laser microvias are its advanced
+options, with limits of their own that the file does not hold. A flex, rigid-flex
+or HDI board therefore skips on this file.
+
 | | 1-2 layers, 1 oz | 1-2 layers, 2 oz | multilayer, 1 oz | multilayer, 2 oz |
 |---|---|---|---|---|
 | track, spacing | 0.10 mm | 0.16 mm | 0.09 mm | 0.15 mm |
@@ -103,7 +124,14 @@ option on boards 1 mm thick or less.
 ## Adding a fab
 
 Copy `jlcpcb.json`, keep its shape, and quote every number from the fab's page
-with the day you read it. A `silk_clearance` rule must carry the condition
+with the day you read it. A fab file lists `services`, each with a `name`, the
+dielectric `materials` it builds (as KiCad names them in a stackup: `FR4`,
+`Polyimide`), its `via_types` (some of `through`, `blind`, `buried`, `micro`),
+and its own `common` rules and `tables` of rows. A file in the shape before
+services (`common` and `tables` at the top, pcb-kicad 0.2.0 and before) is
+refused, with the move named: it never says which process its numbers are for.
+A second process at the same fab (its flex service, its HDI service) is a second
+service in the same file, never a second file. A `silk_clearance` rule must carry the condition
 `A.Type == 'Pad' || B.Type == 'Pad'` (silkscreen to pad): the count takes every
 finding that names the run's silk rule as the fab's, so any other silk rule would
 put silk on silk, which is `pcb.drc`'s, into it; and its minimum must be above

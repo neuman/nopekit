@@ -29,6 +29,13 @@ So the two halves are asserted together, here, on sealed fixtures:
 4. **A bond-line-scale overlap PASSES when declared and FAILS when not.** Both
    halves are needed: without the second the declaration might be doing nothing,
    and a mechanism that does nothing is worse than none because people trust it.
+   The overlap is 0.03 mm: thicker than the prismatic depth tolerance, thinner
+   than the bonded one.
+4b. **A seated layer PASSES with nothing declared**, and a real interference of the
+   same shape still FAILS. Two coincident faces left 0.005 mm into each other by
+   tessellation share a layer whose volume is ten times the volume tolerance; the
+   layer is measured on the shared solid and is thinner than the depth tolerance,
+   so the volume is waived as on a bonded joint. A 0.084 mm layer is not waived.
 5. **A wildcard, a missing reason, and a sliding pair are all REFUSED**, each
    failing the gate on the declaration rather than being honoured or dropped.
 
@@ -206,12 +213,14 @@ def main() -> int:                                     # noqa: C901 - a flat che
 
     # -- 4. a bond-line overlap: declared passes, undeclared fails ---------- #
     #
-    # 0.01 mm over the full 20 x 20 mm face: 4 mm^3, which is twenty times the
-    # prismatic VOLUME tolerance and a fifth of the bonded DEPTH tolerance. That
-    # combination is the whole argument for the declaration — the volume is large
-    # because the joint is large, and the penetration is tessellation-scale.
-    print("\n4. a bond-line-scale overlap (0.01 mm over the whole 20 x 20 mm face)")
-    meshes, _ = _blocks(box - 0.01)
+    # 0.03 mm over the full 20 x 20 mm face: 12 mm^3, sixty times the prismatic
+    # VOLUME tolerance and three fifths of the bonded DEPTH tolerance. It was
+    # 0.01 mm, exactly the prismatic depth tolerance, until a seated layer that
+    # thin passed with nothing declared (4b): the declaration is now for a layer
+    # thicker than tessellation noise between flat faces and within the bonded
+    # tolerance, which is what a bond line between two tessellations is.
+    print("\n4. a bond-line-scale overlap (0.03 mm over the whole 20 x 20 mm face)")
+    meshes, _ = _blocks(box - 0.03)
     undeclared = gates.clash(_ctx(gates, meshes))
     declared = gates.clash(_ctx(gates, meshes, bonded_joints=bond))
     row = _row(_pairs(gates, declared))
@@ -225,6 +234,24 @@ def main() -> int:                                     # noqa: C901 - a flat che
           f"volume_mm3={row.get('volume_mm3')!r} tolerance_mm3={row.get('tolerance_mm3')!r}")
     check("the reason is carried into the evidence",
           bool(row.get("bond_reason")), f"bond_reason={row.get('bond_reason')!r}")
+
+    # -- 4b. a seated layer passes undeclared; a real one does not ---------- #
+    print("\n4b. a seated layer (0.005 mm over the whole face) and a 0.084 mm one")
+    meshes, _ = _blocks(box - 0.005)
+    verdict = gates.clash(_ctx(gates, meshes))
+    row = _row(_pairs(gates, verdict))
+    check("a 0.005 mm layer passes with nothing declared",
+          verdict.passed and not verdict.skipped, verdict.detail)
+    check("it is recorded as a seated layer, its volume over the tolerance",
+          row.get("seated") is True and float(row.get("volume_mm3") or 0.0) > 0.2,
+          f"seated={row.get('seated')!r} volume_mm3={row.get('volume_mm3')!r}")
+    meshes, _ = _blocks(box - 0.084)
+    verdict = gates.clash(_ctx(gates, meshes))
+    row = _row(_pairs(gates, verdict))
+    check("a 0.084 mm layer still fails", not verdict.passed and not verdict.skipped,
+          verdict.detail)
+    check("and is not called seated", row.get("seated") is False,
+          f"seated={row.get('seated')!r} layer_mm={row.get('layer_mm')!r}")
 
     # -- 5. the three refusals ---------------------------------------------- #
     print("\n5. declarations the gate must refuse")

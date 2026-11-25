@@ -170,12 +170,18 @@ def write_table(ctx: Any, filename: str, gate_id: str, source: str,
 
 def fold(gate_id: str, outcomes: Sequence[PartOutcome], *, source: str, units: str,
          quantity: str, evidence: Sequence[str] = (),
-         extra_detail: str = "") -> Verdict:
+         extra_detail: str = "", comparator: str = "<=") -> Verdict:
     """One verdict over the whole set, honest about which part and how many.
 
     ``quantity`` is what the numbers mean in one or two words ("area fraction
     past the overhang limit"); it appears in the skip reason, where there is no
     measurement to speak for itself.
+
+    ``comparator`` is how the worst part's ``measured`` reads against its
+    ``limit``. Every set gate was a ceiling until ``fdm.min_wall`` took a set,
+    and a wall is a floor: printed as ``<=``, its pass would read "3.2 mm <=
+    1.26 mm" beside a part that is thick enough. The score stays the fold's one
+    ranking either way (above 1.0 offends), so only the printed comparison moves.
 
     The outcome ladder, worst first:
 
@@ -238,7 +244,8 @@ def fold(gate_id: str, outcomes: Sequence[PartOutcome], *, source: str, units: s
 
     if past:
         return Verdict(gate=gate_id, passed=False,
-                       measured=best.measured, limit=best.limit, comparator="<=", units=units,
+                       measured=best.measured, limit=best.limit, comparator=comparator,
+                       units=units,
                        detail=_with(measured_clause + skip_clause, extra_detail),
                        evidence=list(evidence), locators=locators)
 
@@ -265,7 +272,7 @@ def fold(gate_id: str, outcomes: Sequence[PartOutcome], *, source: str, units: s
             evidence=list(evidence))
 
     return Verdict(gate=gate_id, passed=True, measured=best.measured,
-                   limit=best.limit, comparator="<=", units=units,
+                   limit=best.limit, comparator=comparator, units=units,
                    detail=_with(measured_clause, extra_detail),
                    evidence=list(evidence))
 

@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "gate": "bracket.bed_fit",
+  "rho": "f0c514b86e949dbd7af254b3cfeab61b6c7b466c65fbb888703c003991ba7683",
+  "code": {
+    "digest": "9fdf57d7941a26cf0a8a9f07382ac77dc910b1614e5dfda32faf1ddb5cf56850",
+    "files": [
+      "gates/structural.py"
+    ],
+    "fallback": ""
+  },
+  "spine": "9814dfd748adb421d69563472f0fca5604e466f16217c82a7c4d9ea058c00b7a",
+  "reads": {
+    "params": [
+      [
+        [
+          "bbox"
+        ],
+        "825decac98037d7ccab4d12b957b9ca035cf767156684b5450241b5551c7cd4f"
+      ],
+      [
+        [
+          "bbox_max"
+        ],
+        "6386ed92114f5215be698e0cf8fb27967546193121e1dc5d97fa2720abcba343",
+        73.5
+      ],
+      [
+        [
+          "config",
+          "bed_xy"
+        ],
+        "e40b60a387a432ca8472e6430cc34a33e6c8e5034d2bd824ac8064932c602335",
+        220.0
+      ],
+      [
+        [
+          "config",
+          "brim_mm"
+        ],
+        "2fbdc71b23395e14fa7d5b76d72cd17d618f8c0dca6fb840f309652f68884277",
+        8.0
+      ],
+      [
+        [
+          "usable_bed"
+        ],
+        "189276defaef4b6edcc003a8c6236c6016d813e958048fef7acff0854be10062",
+        204.0
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "model": null,
+    "opaque": []
+  },
+  "instruments": {},
+  "verdict": {
+    "passed": true,
+    "measured": 73.5,
+    "limit": 204.0,
+    "units": "mm",
+    "comparator": "<=",
+    "settles": "bed fit",
+    "detail": "74 x 30 x 7 mm vs 204 mm usable (220 bed - 2x8 brim)",
+    "evidence": [],
+    "locators": [],
+    "claims": [
+      "manufacturability",
+      "fdm",
+      "bed-fit",
+      "footprint"
+    ],
+    "tier": 0,
+    "pack": ""
+  },
+  "digest": "dcd14c5409ae190bb3545b2d3b68bf8f679c5685784ffd26b716ff30e7aec50a"
+}

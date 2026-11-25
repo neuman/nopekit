@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import unittest
 from unittest import mock
@@ -379,3 +380,165 @@ class TheBundledAutorouteRefusesWithoutItsTools(_env.EnvCase):
         proc = self._run({"NOPEKIT_PROPOSAL_DIR": ""})
         self.assertEqual(proc.returncode, 2, proc.stderr)
         self.assertIn("nopekit propose pcb.autoroute", proc.stderr)
+
+
+class TheBundledSchematicWriterWritesOnlyItsProposal(_env.EnvCase):
+    """pcb-kicad's ``pcb.schematic_from_board`` reads the board and KiCad's stock
+    symbols, and writes only under ``$NOPEKIT_PROPOSAL_DIR``: the project around it
+    is as it was, whether it wrote its three files or refused."""
+
+    RUN = os.path.join(_env.REPO, "packs", "pcb-kicad", "proposers", "schematic_from_board.py")
+    ASSETS = os.path.join(_env.REPO, "packs", "pcb-kicad", "selftest", "assets")
+    STOCK = next((d for d in (os.environ.get("KICAD9_SYMBOL_DIR", ""), "/usr/share/kicad/symbols")
+                  if d and os.path.isfile(os.path.join(d, "Device.kicad_sym"))), None)
+
+    def _tree(self, root):
+        return sorted((os.path.relpath(os.path.join(dp, f), root),
+                       os.path.getsize(os.path.join(dp, f)))
+                      for dp, _dn, fs in os.walk(root) for f in fs)
+
+    def _run(self, symbols: dict):
+        project = self.tmp()
+        for name in ("esd_guard.kicad_pcb", "esd_guard.kicad_pro"):
+            shutil.copyfile(os.path.join(self.ASSETS, name), os.path.join(project, name))
+        with open(os.path.join(project, "s.json"), "w", encoding="utf-8") as fh:
+            json.dump(symbols, fh)
+        out = self.tmp()
+        before = self._tree(project)
+        proc = _env.run([sys.executable, self.RUN, "--board", "esd_guard.kicad_pcb",
+                         "--symbols", "s.json"], cwd=project,
+                        env={"NOPEKIT_PROPOSAL_DIR": out})
+        self.assertEqual(self._tree(project), before, "it wrote outside its proposal dir")
+        return proc, out
+
+    def _symbols(self):
+        with open(os.path.join(self.ASSETS, "esd_guard.symbols.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_a_refusal_writes_nothing(self):
+        symbols = self._symbols()
+        symbols["symbols"].pop("U1")
+        proc, out = self._run(symbols)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(os.listdir(out), [])
+
+    def test_a_proposal_is_three_files_in_its_dir(self):
+        if self.STOCK is None:
+            self.skipTest("needs KiCad's stock symbols")
+        proc, out = self._run(self._symbols())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(os.listdir(out)), ["esd_guard.kicad_sch",
+                                                   "esd_guard.schematic.json", "sym-lib-table"])
+
+    def test_a_multi_unit_part_is_three_files_in_its_dir(self):
+        """The power board, whose Q1 is a two-unit symbol: the writer refused it
+        (exit 2) before every unit was placed; now it writes its three files, and
+        still nothing outside its directory."""
+        if self.STOCK is None:
+            self.skipTest("needs KiCad's stock symbols")
+        project, out = self.tmp(), self.tmp()
+        shutil.copyfile(os.path.join(self.ASSETS, "power_board.kicad_pcb"),
+                        os.path.join(project, "p.kicad_pcb"))
+        D.write_json(os.path.join(project, "s.json"), {"symbols": {
+            "J1": "Connector:USB_C_Receptacle_USB2.0_16P", "R*": "Device:R", "C*": "Device:C",
+            "U1": "Battery_Management:MCP73833-xxx-UN", "TH1": "Device:Thermistor_NTC",
+            "F1": "Device:Polyfuse", "BT1": "Connector_Generic:Conn_01x02",
+            "U2": "Battery_Management:AP9101CK", "Q1": "Transistor_FET:FDS6890A",
+            "J6": "Connector_Generic:Conn_01x02", "J1?": "Connector_Generic:Conn_01x08"}})
+        before = self._tree(project)
+        proc = _env.run([sys.executable, self.RUN, "--board", "p.kicad_pcb", "--symbols",
+                         "s.json"], cwd=project, env={"NOPEKIT_PROPOSAL_DIR": out})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._tree(project), before, "it wrote outside its proposal dir")
+        self.assertEqual(sorted(os.listdir(out)), ["p.kicad_sch", "p.schematic.json",
+                                                   "sym-lib-table"])
+        self.assertEqual(sorted(D.read_json(os.path.join(out, "p.schematic.json"))["units"]),
+                         ["Q1"])
+
+
+class TheBundledBatteryDraftWritesOnlyItsProposal(_env.EnvCase):
+    """pcb-kicad's ``pcb.battery_record_draft`` reads the boards it is given and
+    writes only under ``$NOPEKIT_PROPOSAL_DIR``, a draft and its summary; a
+    refusal writes nothing. It needs no KiCad: the pack's reader is enough."""
+
+    RUN = os.path.join(_env.REPO, "packs", "pcb-kicad", "proposers", "battery_record_draft.py")
+    BOARD = os.path.join(_env.REPO, "packs", "pcb-kicad", "selftest", "assets",
+                         "power_board.kicad_pcb")
+
+    _tree = TheBundledSchematicWriterWritesOnlyItsProposal._tree
+
+    def _run(self, *boards: str, env=None):
+        project, out = self.tmp(), self.tmp()
+        shutil.copyfile(self.BOARD, os.path.join(project, "power_board.kicad_pcb"))
+        before = self._tree(project)
+        argv = [a for b in boards for a in ("--board", b)]
+        proc = _env.run([sys.executable, self.RUN, *argv], cwd=project,
+                        env={"NOPEKIT_PROPOSAL_DIR": out, **(env or {})})
+        self.assertEqual(self._tree(project), before, "it wrote outside its proposal dir")
+        return proc, out
+
+    def test_a_draft_is_two_files_in_its_dir(self):
+        proc, out = self._run("power_board.kicad_pcb")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(os.listdir(out)), ["power_board.power_draft.json",
+                                                   "power_board.power_records.json"])
+        self.assertIn("a draft settles nothing", proc.stdout)
+
+    def test_a_refusal_writes_nothing(self):
+        for boards in (("gone.kicad_pcb",), ("power_board.kicad_pcb",) * 2):
+            with self.subTest(boards=boards):
+                proc, out = self._run(*boards)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertEqual(os.listdir(out), [])
+
+    def test_outside_propose_it_refuses(self):
+        proc, out = self._run("power_board.kicad_pcb", env={"NOPEKIT_PROPOSAL_DIR": ""})
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("nopekit propose pcb.battery_record_draft", proc.stderr)
+
+
+class ProposeRunsEachBundledPcbProposer(_env.EnvCase):
+    """``nopekit propose`` on a project holding a copy of the pack's power board,
+    for the draft and for the schematic writer (a multi-unit part on it): each
+    file it wrote is one input record, proposed by its proposer at its basis, and
+    nothing else in the project moves."""
+
+    BOARD = TheBundledBatteryDraftWritesOnlyItsProposal.BOARD
+
+    def setUp(self):
+        self.root = D.bracket(os.path.join(self.tmp(), "b"))
+        shutil.copyfile(self.BOARD, os.path.join(self.root, "power_board.kicad_pcb"))
+
+    def _propose(self, pid: str, *argv: str) -> list[str]:
+        before = D.tree(self.root)
+        proc = _env.nopekit(["propose", pid, "--", *argv], cwd=self.root)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        after = D.tree(self.root)
+        written = sorted(p for p in set(after) | set(before) if after.get(p) != before.get(p))
+        found = {stem: D.read_json(path) for stem, path in store._record_files(self.root,
+                                                                              "inputs")}
+        mine = {stem: rec for stem, rec in found.items() if rec.get("proposer") == pid}
+        self.assertEqual(written, sorted([f"inputs/{stem}.json" for stem in mine]
+                                         + [rec["path"] for rec in mine.values()]))
+        self.assertIn(f"proposed by {pid} (basis model-only)", proc.stdout)
+        return sorted(os.path.basename(rec["path"]) for rec in mine.values())
+
+    def test_the_draft_is_recorded_as_two_inputs(self):
+        self.assertEqual(self._propose("pcb.battery_record_draft", "--board",
+                                       "power_board.kicad_pcb"),
+                         ["power_board.power_draft.json", "power_board.power_records.json"])
+
+    def test_the_schematic_is_recorded_as_three_inputs(self):
+        if TheBundledSchematicWriterWritesOnlyItsProposal.STOCK is None:
+            self.skipTest("needs KiCad's stock symbols")
+        D.write_json(os.path.join(self.root, "power.symbols.json"), {"symbols": {
+            "J1": "Connector:USB_C_Receptacle_USB2.0_16P", "R*": "Device:R", "C*": "Device:C",
+            "U1": "Battery_Management:MCP73833-xxx-UN", "TH1": "Device:Thermistor_NTC",
+            "F1": "Device:Polyfuse", "BT1": "Connector_Generic:Conn_01x02",
+            "U2": "Battery_Management:AP9101CK", "Q1": "Transistor_FET:FDS6890A",
+            "J6": "Connector_Generic:Conn_01x02", "J1?": "Connector_Generic:Conn_01x08"}})
+        self.assertEqual(self._propose("pcb.schematic_from_board", "--board",
+                                       "power_board.kicad_pcb", "--symbols",
+                                       "power.symbols.json"),
+                         ["power_board.kicad_sch", "power_board.schematic.json",
+                          "sym-lib-table"])

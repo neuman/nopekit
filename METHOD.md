@@ -60,14 +60,15 @@ change it. Record, inline and in the ledger:
 The rejected alternatives are the part people skip and the part that pays. The shape
 to aim for:
 
-> *The wider trace was tried first and the router could not close that net through
-> the congested corridor; the narrower one costs ~34 mΩ more and routes.*
+> *A 4.0 mm plate was tried first and deflected 3.75 mm, 7.5x the limit.
+> Deflection goes as one over the cube of the thickness, and the 8.0 mm plate
+> holds it to 0.47 mm.*
 
-> *A rigid catch was tried and rejected: it transferred the drop load into the
-> print's weakest layer boundary.*
+> *PLA was tried and rejected: it creeps under a load it holds all day, and no
+> static analysis sees it.*
 
-> *Do not fit the narrower ribbon. It floats in the wider housing with 4 mm of
-> independent slop at each end.*
+> *Do not fit the shorter screw. It engages two threads in the boss and strips at
+> the first service.*
 
 Each of those closes a question permanently. Without the record, every new agent
 re-litigates every settled number, and the project walks in a circle at full speed.
@@ -151,11 +152,11 @@ design on its own terms — structure, manufacturability, sourcing, thermal, usa
 cost, safety — and let the findings change the numbers before a single output is
 generated. Packs ship their domain's lens list.
 
-A review pass of this kind, run on one small bracket spec, changed four numbers: a
-clearance that was arithmetically zero once a floating part settled under load; a
-bearing edge whose fillet would have turned weight into lift; a cantilever loaded at
-its tip whose root needed a real block rather than a drawn one; and a pre-existing
-carve nobody had noticed. None of it had been built. All of it would have been scrap.
+For example, a pass of this kind on a small bracket spec can find a hole too close
+to an edge once its position tolerance is applied, a wall thinner than two
+extrusion widths of the nozzle that prints it, and a load case that puts a bolt in
+shear when its slot lets it slide. On paper, each costs a line in the spec. After
+the build, each costs the part.
 
 ## 9. Separate what is proven from what is assumed — in public
 

@@ -1,0 +1,11 @@
+{
+  "release": "9.0.9",
+  "kicad_cli": ["9.0.9"],
+  "measured": "2026-11-25",
+  "on": "Ubuntu 24.04, KiCad's own 9.0.9 package (kicad 9.0.9~ubuntu24.04.1): pcbnew imported by the system python3, kicad-cli 9.0.9 from the same package",
+  "shown": [
+    "beside kicad-cli 9.0.9: every keep-out class in tests/test_pcb_kicad.py that runs KiCad, and gate selftest --pack pcb-kicad's two controls for pcb.antenna_keepout",
+    "kicad-cli 9.0.9 names the added area for each item in it, a track included: \"Items not allowed (keepout area 'nopekit_antenna_AE1')\"",
+    "beside kicad-cli 10.0.8 (the kicad/kicad:10.0 image, through a kicad-cli wrapper): a chip antenna's keep-out with a GND track and an RF track in it read pass at 0, where kicad-cli 9.0.9 reads fail at 2 (TheKeepoutPicksAnUnnamedArea); kicad-cli 10.0.8 names no area for a track"
+  ]
+}

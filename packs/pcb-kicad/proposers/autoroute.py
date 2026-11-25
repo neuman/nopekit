@@ -69,9 +69,9 @@ KICAD_PYTHONS = (
 STEM_FILES = (".kicad_pro", ".kicad_dru", ".kicad_sch")
 DIR_FILES = ("sym-lib-table", "fp-lib-table")
 
-#: 20 passes: the baseline board routes in 2, the 4-layer 115-footprint boards
-#: of the source pipeline needed 30-45. Rejected: Freerouting's own default
-#: (unbounded on a board it cannot finish).
+#: 20 passes: the baseline board routes in 2. The larger 4-layer boards of the
+#: source pipeline needed more, which ``--passes`` gives. Rejected: Freerouting's
+#: own default (unbounded on a board it cannot finish).
 DEFAULT_PASSES = 20
 
 #: Wall clock for Freerouting alone. The proposer's own budget is

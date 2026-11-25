@@ -1,7 +1,7 @@
 {
   "name": "pcb-kicad",
-  "version": "0.1.0",
-  "description": "Checks a KiCad board and its schematic: DRC, ERC, schematic parity, connectivity, pin names, IPC-2221 trace heating, a fab's limits, ngspice measurements, and fit in its enclosure.",
+  "version": "0.3.0",
+  "description": "KiCad board and schematic checks: DRC with rules probed, ERC, parity, pin names, trace heating, fab limits, ngspice, enclosure fit, land patterns, battery rules, mis-mating, USB-C, antenna keep-outs.",
   "settles": [
     "design rule violations",
     "pcb design rule check",
@@ -34,7 +34,7 @@
     "minimum drill size",
     "annular ring",
     "silkscreen text height",
-    "manufacturable at jlcpcb",
+    "manufacturable at the named fab",
     "simulated circuit measurement",
     "spice simulation",
     "supply droop",
@@ -43,14 +43,41 @@
     "enclosure fit",
     "part taller than its cavity",
     "component collides with the lid",
-    "board to case clearance"
+    "board to case clearance",
+    "footprint land agrees with the vendor drawing",
+    "land pattern",
+    "pad positions on the datasheet drawing",
+    "charge temperature window",
+    "charge temperature headroom",
+    "battery charger thermistor",
+    "thermistor network at its tolerance corners",
+    "charge voltage",
+    "charge current",
+    "charger within the cell's datasheet limits",
+    "overcharge under a single fault",
+    "fault protection of a conductor",
+    "fuse protects its conductor",
+    "overload band",
+    "fuse interrupt rating",
+    "short-circuit protection of a conductor",
+    "deep-discharge cutoff",
+    "cell undervoltage protection",
+    "connector mis-mating",
+    "wrong cable in a connector",
+    "reversed battery",
+    "usb-c cc termination",
+    "usb-c data in both orientations",
+    "antenna keep-out",
+    "copper in a radio module's antenna keep-out",
+    "copper under the antenna",
+    "ground pour under a module antenna"
   ],
   "claim_classes": [
     "pcb",
     "printed-circuit-board",
     "electronics",
     "design-rules",
-    "connectivity",
+    "net-connectivity",
     "copper-connectivity",
     "netlist",
     "pin-map",
@@ -58,16 +85,29 @@
     "trace-width",
     "current-capacity",
     "power-integrity",
-    "manufacturability",
-    "clearance",
+    "pcb-manufacturability",
+    "copper-clearance",
     "schematic",
     "electrical-rules",
     "schematic-parity",
     "fab-limits",
     "circuit-simulation",
     "enclosure-fit",
-    "packaging",
-    "interference"
+    "land-pattern",
+    "battery-safety",
+    "charge-protection",
+    "charge-temperature",
+    "charge-limits",
+    "charge-voltage",
+    "charge-current",
+    "overcurrent-protection",
+    "deep-discharge",
+    "mismate",
+    "connector-keying",
+    "usb-c",
+    "charging-interface",
+    "antenna-keepout",
+    "rf-layout"
   ],
   "provides_gates": [
     "pcb.board_readable",
@@ -79,7 +119,15 @@
     "pcb.parity",
     "pcb.fab_rules",
     "pcb.spice",
-    "pcb.enclosure_fit"
+    "pcb.enclosure_fit",
+    "pcb.land_pattern",
+    "pcb.charge_temperature",
+    "pcb.charge_limits",
+    "pcb.fault_current",
+    "pcb.discharge_cutoff",
+    "pcb.mismate",
+    "pcb.usbc_receptacle",
+    "pcb.antenna_keepout"
   ],
   "provides_generators": [],
   "provides_proposers": [
@@ -88,6 +136,18 @@
       "basis": "established",
       "description": "Routes a KiCad board with Freerouting (headless, one thread) and proposes the routed copy; the DRC gates judge it once adopted.",
       "run": "proposers/autoroute.py"
+    },
+    {
+      "id": "pcb.schematic_from_board",
+      "basis": "model-only",
+      "description": "Writes a KiCad schematic from a board's pad nets on KiCad's stock symbols, every unit of a multi-unit part placed, so ERC and parity can run; parity checks it once adopted.",
+      "run": "proposers/schematic_from_board.py"
+    },
+    {
+      "id": "pcb.battery_record_draft",
+      "basis": "model-only",
+      "description": "Drafts the power records from a design's boards and pin names (a cell by --battery, a Battery library, a BT ref or a connector valued as one), each datasheet number a FILL value; it settles nothing.",
+      "run": "proposers/battery_record_draft.py"
     }
   ],
   "requires_tools": [
@@ -95,7 +155,8 @@
     "ngspice"
   ],
   "requires_python": [
-    "cadquery"
+    "cadquery",
+    "pcbnew"
   ],
   "max_tier": 1,
   "lenses": [
@@ -107,10 +168,12 @@
     "a connector that fits the wrong cable",
     "parts not in the library",
     "a part taller than its cavity",
-    "a simulation of a different circuit"
+    "a simulation of a different circuit",
+    "a cell nobody charged hot or cold",
+    "metal and a hand around the antenna"
   ],
   "authors": [],
   "licence": "Apache-2.0",
-  "origin": "extracted from an autonomous board pipeline that generated, routed and DRC-checked two 4-layer boards headlessly; its chat logs and history showed which checks caught real defects and which passed defects a person later found. The KiCad knowledge is generic (file format, kicad-cli, the stock libraries); no project's design came with it.",
+  "origin": "extracted from an autonomous board pipeline that generated, routed and DRC-checked multilayer boards headlessly; its chat logs and history showed which checks caught real defects and which passed defects a person later found. The KiCad knowledge is generic (file format, kicad-cli, the stock libraries); no project's design came with it.",
   "basis": "established"
 }

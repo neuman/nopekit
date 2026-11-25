@@ -37,7 +37,27 @@ PACKS_DIR = os.path.join(REPO, "packs")
 #: from a parent project (see docs/ORIGINS.md) and carries its method, not its
 #: content — a leaked identifier means a pack is documenting somebody else's device
 #: instead of its own domain.
-FORBIDDEN = ("cyberdeck", "gripster", "thumbdeck", "keymat", "snap dome")
+#:
+#: Lower case: the scan lowers the text it reads, so an entry with a capital
+#: letter never matches (``test_every_word_is_found`` holds it).
+#:
+#: General-packs Z1 adds the six after "snap dome", each a string only the parent
+#: spells, found in the handheld cut and gone from the tree before it was added: a
+#: firmware board name a test copied, the parent's own driver module, its radio
+#: module's grant id, two of its CAD part names and its DRC rule's name (renamed by
+#: P3, and its body by Z1). What slipped through before them: the five words held,
+#: and every one of these sat in packs, docs, spine docstrings and tests, because
+#: none of them spells a forbidden word.
+#: *Rejected:* common parts the parent also used (every reference design names
+#: them, and a pack for handheld electronics must be free to); the grant id's
+#: prefix alone (it is the module maker's, on every module it certifies); the DRC
+#: rule's condition (a natural rule for any ground pad: only its name is the
+#: parent's); a hash of each word in place of the word (the scan matches a
+#: substring anywhere in a file, and a hash matches only a token whose edges the
+#: scan is told).
+FORBIDDEN = ("cyberdeck", "gripster", "thumbdeck", "keymat", "snap dome",
+             "handdeck", "tmag5273_nub", "2alph-e73", "grip_lid", "back_left",
+             "gnd_pad_edge")
 
 
 def _pack_dirs():
@@ -299,8 +319,22 @@ def _scratch_pack(case: unittest.TestCase, *, baseline: dict, fixture: str = "to
 #: and ``convection``'s own control (``fan_stopped``) fails it. The edge
 #: ``steady_state_temp -> <guard>`` lands once the Biot half of ``time_constant``
 #: is its own evaluator (a pack follow-up).
+#: hand-ergonomics (general-packs E1, E2) has two gates and no edge between
+#: them. ``ergo.digit_reach``'s validity guard on the survey's range (handle
+#: 25-50 mm, users 17 and older) is the spine's operating context: outside it a
+#: pass reads Gap, which is what a guard gate's edge would give. Its input guard,
+#: ``ergo.layout_agrees`` (E2: the declared layout against the exported scene),
+#: is tier 1 above a tier-0 analysis, so the registry refuses it as a
+#: prerequisite (a tier inversion); it covers the reach claim's tag instead, so
+#: the claim waits for both. An edge would not be isolated either:
+#: ``face_cluster_out_of_reach`` moves the declared layout only, so the guard would
+#: fail it. The keyword test holds both descriptions to saying so ("validity
+#: regime", "validity guard of digit_reach's inputs").
 NO_EDGE_YET = {"thermal-analytic": "no gate is a pure validity guard yet: time_constant "
-                                   "also measures, h_agreement compares representations"}
+                                   "also measures, h_agreement compares representations",
+               "hand-ergonomics": "the operating context is digit_reach's validity guard; "
+                                  "its input guard, layout_agrees, is tier 1 above a tier-0 "
+                                  "analysis, so it covers the reach tag, not a needs edge"}
 
 
 def _keyword_guards(registry: gates_mod.Registry) -> list[str]:
@@ -947,6 +981,7 @@ class ControlsAreSealed(unittest.TestCase):
 #: that gains or loses an edge turns ``test_the_edges_are_these`` red instead of
 #: quietly re-defining what the isolation test checks.
 EDGES: dict[str, list[tuple[str, str]]] = {
+    "topology-simp": [(d, "simp.case_valid") for d in ("simp.displacement", "simp.stress")],
     "beam-analytic": [
         ("beam.deflection", "beam.model_validity"),
         ("beam.deflection_ratio", "beam.model_validity"),
@@ -958,11 +993,12 @@ EDGES: dict[str, list[tuple[str, str]]] = {
     ],
     "fdm-print": [(d, "fdm.process_model_valid") for d in (
         "fdm.overhang", "fdm.bridge_span", "fdm.bed_fit", "fdm.min_wall",
-        "fdm.layer_alignment", "fdm.print_time_est")],
+        "fdm.layer_alignment", "fdm.print_time_est", "fdm.slice")],
     "fluids-analytic": [("fluid.drag", "fluid.flow_regime"),
                         ("fluid.pipe_pressure_drop", "fluid.flow_regime")],
     "cad-solid": [("cad.wall_thickness", "cad.watertight"),
                   ("cad.clash", "cad.is_volume"),
+                  ("cad.clearance", "cad.is_volume"),
                   ("cad.assembly_connected", "cad.is_volume")],
     # Two, not five (review of P2.2): bom.complete also fails on any unpriced
     # line, which says nothing about a ship date, a capability rule or a source
@@ -971,9 +1007,20 @@ EDGES: dict[str, list[tuple[str, str]]] = {
     "openmodelica": [("modelica.result_claim", "modelica.solution_valid"),
                      ("modelica.mirror_agrees", "modelica.solution_valid"),
                      ("modelica.simulates", "modelica.compiles")],
-    # The reader's guard before the two gates that read the board with it; KiCad's
+    # The reader's guard before the gates that read the board with it; KiCad's
     # own gates read the file themselves and need none.
-    "pcb-kicad": [(d, "pcb.board_readable") for d in ("pcb.pin_names", "pcb.net_width")],
+    "pcb-kicad": [(d, "pcb.board_readable")
+                  for d in ("pcb.pin_names", "pcb.net_width", "pcb.land_pattern")],
+    # The replay before the three gates that read what it wrote: an image or a
+    # setting of firmware that does not build, or not from CI's own job, is not
+    # the design's (general-packs F1; F2 adds fw.tx_power's, which zmk.tx_power
+    # had). fw.build's edge on the CI guard went in general-packs J3: the guard
+    # now skips a build it cannot read (inside an action, a Python script), and
+    # the spine never runs a gate whose prerequisite skipped, so fw.build reads
+    # the guard's choice itself and replays such a build.
+    "firmware-ci": [("fw.image_fits", "fw.build"),
+                    ("fw.sleep_wake", "fw.build"),
+                    ("fw.tx_power", "fw.build")],
     # A chain: nothing reaches a pressure drop past a guard that did not pass.
     "cfd-openfoam": [("cfd.regime", "cfd.case_readable"),
                      ("cfd.mesh_quality", "cfd.case_readable"),
@@ -1132,8 +1179,9 @@ _SPINE_EXTRA = frozenset({"pack_dir", "pack_dirs"})
 #: §4.0.4 item 1) — measured before P2.3 changed anything (C6, R-4's first
 #: step). Each of their packs' baselines reaches the gate through ``params``.
 EXTRA_CHANNEL = {
-    "cad-solid": ("cad.assembly_connected", "cad.clash", "cad.degenerate_faces",
-                  "cad.is_volume", "cad.wall_thickness", "cad.watertight"),
+    "cad-solid": ("cad.assembly_connected", "cad.clash", "cad.clearance",
+                  "cad.degenerate_faces", "cad.is_volume", "cad.wall_thickness",
+                  "cad.watertight"),
     "sourcing": ("bom.availability", "bom.complete", "bom.cost", "bom.currency", "bom.moq",
                  "bom.process_rules", "bom.single_source"),
 }
@@ -1185,7 +1233,9 @@ class TheExtraChannel(unittest.TestCase):
     in the open, after D5 (R-6: a strengthening): each of those thirteen now
     declares a known-good fixture (``good=``) that hands its gate the same
     ``extra`` keys as its known-bad one, and the corpus shows zero hits — the
-    planted pack's one is ``ControlsArePaired``'s."""
+    planted pack's one is ``ControlsArePaired``'s. Edited again at cad-solid
+    0.2.0: ``cad.clearance`` joined the mesh gates on the same channel, with its
+    known-good fixture declared from the start."""
 
     def _hits(self, host_of) -> tuple[dict[str, list[str]], list[str]]:
         hits: dict[str, list[str]] = {}
@@ -1413,7 +1463,10 @@ class ControlsAreIsolated(unittest.TestCase):
             if edges:
                 declared[name] = sorted(edges)
         self.assertEqual(declared, {name: sorted(e) for name, e in EDGES.items()})
-        self.assertEqual(sum(len(e) for e in declared.values()), 43)
+        # Base 45, one PCB edge, three firmware edges (firmware-ci's: F1 replaced
+        # firmware-zmk's three, F2 added fw.tx_power's, and J3 dropped fw.build's
+        # on the CI guard) and two print/CAD edges.
+        self.assertEqual(sum(len(e) for e in declared.values()), 51)
         registry = gates_mod.Registry()
         gates_mod.load_project_gates(os.path.join(REPO, "examples", "bracket"), registry)
         self.assertEqual(sorted(_declared_edges(registry)), sorted(BRACKET_EDGES))
@@ -2096,6 +2149,16 @@ class NoLeakedProvenance(unittest.TestCase):
         not prose, and the word inside one is noise."""
         root = self._plant({"mesh.stl": b"solid\x00" + self._word().encode() + b"\x00"})
         self.assertEqual(_leaks(root), [])
+
+    def test_every_word_is_found(self):
+        """Each entry, planted in capitals in a file of its own, is reported at its
+        own index: an entry the lowered text can never hold (a capital in it)
+        refuses nothing (general-packs Z1)."""
+        planted = {f"notes/{i}.md": f"intro\n{word.upper()}\n"
+                   for i, word in enumerate(FORBIDDEN)}
+        self.assertEqual(sorted(_leaks(self._plant(planted))),
+                         sorted(f"{os.path.join('notes', f'{i}.md')}: FORBIDDEN[{i}]"
+                                for i in range(len(FORBIDDEN))))
 
     def test_a_virtualenv_is_skipped(self):
         """Third-party code is not this repository's content, and some of it

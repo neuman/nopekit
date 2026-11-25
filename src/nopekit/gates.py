@@ -327,7 +327,17 @@ def scope_of(gate_id: str) -> str:
 #: A verdict is ONE LINE of context. A whole sweep should cost tens of lines,
 #: because each check emits one dense line and puts the volume in files; a gate
 #: that dumps its log into `detail` turns a 40-gate sweep into 4,000 lines of
-#: context nobody reads. Detail is collapsed to a single line and capped here.
+#: context nobody reads. Detail is collapsed to a single line and capped here,
+#: and so are a skip reason and an error (`_stamp`): one budget for every
+#: word a gate says. What slipped through (holdout, general packs): a skip
+#: reason and an error were cut at 200 while detail kept 500, so the clause a
+#: person must act on — "set X", "install Y", "hide it and state a height in Z"
+#: — usually the last one, was the part cut, and every reader (the terminal,
+#: `--json`, the report) repeated the cut text. *Rejected:* 200 for the two
+#: reasons (the cut above); cutting only on display and storing the whole
+#: reason (an entry is tracked, and a gate that dumps its log into its reason
+#: would put that log in git); asking every pack to put its remedy first (a
+#: rule each gate must remember, and a reason long enough is still cut).
 _DETAIL_MAX = 500
 
 #: How much of a crashing gate's traceback survives into `detail`. The last
@@ -1877,8 +1887,8 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float, cpu: float = 0.0) 
         measured=_plain_number(verdict.measured),
         limit=_plain_number(verdict.limit),
         detail=_one_line(detail),
-        skip_reason=_one_line(verdict.skip_reason, 200),
-        error=_one_line(error, 200),
+        skip_reason=_one_line(verdict.skip_reason),
+        error=_one_line(error),
     )
 
 

@@ -1,6 +1,6 @@
 {
   "name": "cad-solid",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Validates that exported solids are real solids, that placed parts do not interfere, and that every part is held by something: watertightness, validity, clash, contact coverage, envelope, wall.",
   "settles": [
     "watertightness",
@@ -19,11 +19,13 @@
     "bounding box",
     "envelope fit",
     "centre of mass",
-    "minimum wall thickness"
+    "minimum wall thickness",
+    "minimum clearance"
   ],
   "claim_classes": [
     "geometry",
     "mesh",
+    "mesh-validity",
     "cad",
     "assembly",
     "fit",
@@ -34,7 +36,8 @@
     "interference",
     "connectivity",
     "linkage",
-    "mechanical"
+    "mechanical",
+    "clearance"
   ],
   "provides_gates": [
     "cad.bounding",
@@ -43,6 +46,7 @@
     "cad.degenerate_faces",
     "cad.wall_thickness",
     "cad.clash",
+    "cad.clearance",
     "cad.assembly_connected"
   ],
   "provides_views": [
@@ -52,7 +56,8 @@
   "requires_tools": [],
   "requires_python": [
     "trimesh",
-    "numpy"
+    "numpy",
+    "manifold3d"
   ],
   "max_tier": 1,
   "lenses": [

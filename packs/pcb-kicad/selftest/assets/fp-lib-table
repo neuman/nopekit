@@ -1,5 +1,5 @@
 (fp_lib_table
 	(version 7)
-	(lib (name "Connector_PinHeader_2.54mm")(type "KiCad")(uri "${KICAD9_FOOTPRINT_DIR}/Connector_PinHeader_2.54mm.pretty")(options "")(descr ""))
-	(lib (name "Package_TO_SOT_SMD")(type "KiCad")(uri "${KICAD9_FOOTPRINT_DIR}/Package_TO_SOT_SMD.pretty")(options "")(descr ""))
+	(lib (name "Connector_PinHeader_2.54mm")(type "KiCad")(uri "${KIPRJMOD}/lib/Connector_PinHeader_2.54mm.pretty")(options "")(descr ""))
+	(lib (name "Package_TO_SOT_SMD")(type "KiCad")(uri "${KIPRJMOD}/lib/Package_TO_SOT_SMD.pretty")(options "")(descr ""))
 )

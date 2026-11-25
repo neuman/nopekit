@@ -120,9 +120,9 @@ def sanitise(name: str) -> str:
 
     Anything outside :data:`_KEEP` becomes ``_``, and runs collapse to a single
     ``_``. The collapse is the load-bearing part: ``MOVER_SEPARATOR`` is ``__``,
-    so a part called ``lid  left`` would otherwise sanitise to ``lid__left`` and
+    so a part called ``end  cap`` would otherwise sanitise to ``end__cap`` and
     :func:`nopekit.site.derive_explode` would file it as a *body of the mover
-    ``lid``* — silently merging two parts into one exploded group, with both
+    ``end``* — silently merging two parts into one exploded group, with both
     parts' locators landing on whichever one the viewer isolated.
 
     An empty result (a part named ``"???"``) becomes ``part``; :func:`movers`
@@ -153,7 +153,7 @@ def movers(parts: Iterable[str]) -> dict[str, str]:
     A collision takes a ``-2``, ``-3`` ... suffix in sorted order. It is rare and
     it is a smell (two parts whose names differ only in punctuation), so the
     suffix is visible in the viewer rather than hidden: a reader who sees
-    ``back_left-2`` learns that something upstream is naming parts carelessly.
+    ``guide_roller-2`` learns that something upstream is naming parts carelessly.
     """
     out: dict[str, str] = {}
     taken: set[str] = set()

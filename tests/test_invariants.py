@@ -256,6 +256,67 @@ class CouldNotMeasureIsNeverANumber(unittest.TestCase):
         self.assertEqual(v.measured, 0.42)
 
 
+class AReasonKeepsItsRemedy(unittest.TestCase):
+    """A skip reason and an error keep the budget a detail has
+    (``gates._DETAIL_MAX``), so the clause a person acts on survives to every
+    reader. What slipped through (holdout, general packs): the two were cut at
+    200 characters while a detail kept 500, and a pack's remedy clause — "set
+    X", "install Y" — usually the last one, was the part cut, in the terminal,
+    in ``--json`` and in REPORT.md alike."""
+
+    #: The clause a person must act on, at the end of a reason as packs write
+    #: it, about 330 characters in: past the old cut, inside the budget.
+    REMEDY = "state a height for each in the model's part_heights_mm, then check again"
+
+    def _run(self, **verdict):
+        reg = gates_mod.Registry()
+
+        @gates_mod.gate(id="g.reason", claims=["C1"], registry=reg,
+                        negative_control=NegativeControl(fixture="x:y"))
+        def reason(ctx):
+            return Verdict(gate="g.reason", **verdict)
+
+        ctx = gates_mod.GateContext(root=".", ledger=_ledger(_claim()), model=None,
+                                    params={}, out_dir=".", tier=0,
+                                    log=lambda _m: None, extra={})
+        spec, fn = reg.get("g.reason")
+        return spec, gates_mod.run_gate(spec, fn, ctx)
+
+    def _long(self) -> str:
+        head = ("the design names 3 placed part(s) with no body and no stated "
+                "height: P1, P2 and P3, each read from the assembly as placed; a part "
+                "with no body cannot be judged against the enclosure it sits in, and "
+                "a height this evaluator guessed would read as a measurement; ")
+        text = head + self.REMEDY
+        self.assertGreater(len(text), 200, "the reason must reach past the old cut")
+        self.assertLess(len(text), gates_mod._DETAIL_MAX)
+        return text
+
+    def test_a_skip_reason_keeps_its_last_clause_to_the_report(self):
+        spec, v = self._run(skipped=True, skip_reason=self._long())
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertTrue(v.skip_reason.endswith(self.REMEDY), v.skip_reason)
+        md = report_mod.render_markdown(_ledger(_claim(gates=["g.reason"]), verdicts=[v]),
+                                        _Reg([spec]))
+        self.assertIn(self.REMEDY, md)
+
+    def test_an_error_keeps_its_last_clause_to_the_report(self):
+        spec, v = self._run(passed=False, error=self._long())
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertTrue(v.error.endswith(self.REMEDY), v.error)
+        md = report_mod.render_markdown(_ledger(_claim(gates=["g.reason"]), verdicts=[v]),
+                                        _Reg([spec]))
+        self.assertIn(self.REMEDY, md)
+
+    def test_a_reason_past_the_budget_is_still_cut_and_marked(self):
+        """Negative control: the budget still holds. A gate that dumps its log
+        into its reason is cut to one line, and the cut says so."""
+        _spec, v = self._run(skipped=True, skip_reason="log line\n" * 400)
+        self.assertLessEqual(len(v.skip_reason), gates_mod._DETAIL_MAX)
+        self.assertTrue(v.skip_reason.endswith("..."), v.skip_reason[-40:])
+        self.assertNotIn("\n", v.skip_reason)
+
+
 class RegistryRefusesLoggers(unittest.TestCase):
     """(c) A gate that cannot demonstrate failure is a logger. Rule 5, mechanical."""
 

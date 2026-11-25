@@ -9,10 +9,12 @@ SKIPS and names the key; it never substitutes a value only the project can know.
 
 | parameter | units | used by | notes |
 |---|---|---|---|
-| `bbox_mm` | mm, `[x, y, z]` | `bed_fit` | the part's extent **in its print orientation** |
+| `part_bbox_mm` | mm, `[x, y, z]` | `bed_fit`, `process_model_valid` | the part's extent **in its print orientation** (also read as `bbox_mm`) |
 | `bed_x_mm`, `bed_y_mm`, `bed_z_mm` | mm | `bed_fit` | the machine. `bed_xy_mm` accepted for a square bed |
 | `brim_mm` | mm per side | `bed_fit` | domain default 5.0 |
-| `min_wall_mm` | mm | `min_wall` | the **thinnest section anywhere in the part** |
+| `part_min_wall_mm` | mm | `min_wall`, `process_model_valid` | the **thinnest wall across the layer plane** (perpendicular to the build axis, where perimeters print); held to three beads by `min_wall` and one bead by the guard. Also read as `min_wall_mm` |
+| `part_min_floor_mm` | mm | `process_model_valid` | the **thinnest section along the build axis** (a floor, roof or web); held to one layer. Optional. A 0.4 mm web is three 0.12 mm layers, not a third of a bead |
+| `bbox_by_part_mm`, `part_min_wall_by_part_mm`, `part_min_floor_by_part_mm`, `part_volume_by_part_mm3` | `{part: value}` | `bed_fit`, `min_wall`, `print_time_est`, `process_model_valid` | the same quantities for each part of a print set; each verdict names the worst part |
 | `nozzle_d_mm` | mm | `min_wall`, `print_time_est` | |
 | `extrusion_width_mm` | mm | `min_wall`, `print_time_est` | overrides the nozzle table when present |
 | `perimeters` | count | `print_time_est` | default 3 |
@@ -31,10 +33,13 @@ SKIPS and names the key; it never substitutes a value only the project can know.
 | `layer_normal_modulus_ratio` | ratio | `layer_alignment` | default 0.85 — applied to a **deflection** utilisation |
 | `mesh_path` | path | `overhang`, `bridge_span` | relative to the project root |
 | `overhang_limit_deg` | deg | `overhang` | default 45 |
+| `overhang_tessellation_tol_deg` | deg | `overhang` | default 0.5 — a face counts past the limit only beyond it; a chamfer drawn at the rule reads a few hundredths to half a degree past it once exported |
 | `overhang_area_allow_frac` | 0–1 | `overhang` | default 0.005 |
 | `bridge_ceiling_deg` | deg | `overhang`, `bridge_span` | default 80; the angle at which a face stops being an overhang and becomes a bridge |
 | `max_bridge_mm` | mm | `bridge_span` | default 30 — a ceiling anchored on **opposite** sides |
 | `max_cantilever_mm` | mm | `bridge_span` | default 2 — a ceiling anchored on **one** side, which droops instead of pulling taut |
+| `min_ceiling_area_mm2` | mm² | `bridge_span` | default one bead's footprint (line width squared) — a smaller ceiling region is listed and not judged |
+| `supports_by_part` | `{part: {supports, reason}}` | `overhang`, `bridge_span` | a part stated to print on `tree` or `normal` support: only what no support reaches (a void sealed inside the part) is judged |
 
 ## Feature rules
 
@@ -68,7 +73,8 @@ will not go together.
 **Overhangs.** 45° is the design rule. Between 45° and about 60° a well-cooled
 machine will usually produce something acceptable but rough, and `fdm.overhang` will
 flag it — which is correct, because "usually" is not a specification. Past 60° it
-needs support.
+needs support. A chamfer drawn at exactly 45° is not flagged: the gate allows 0.5°
+for tessellation, which is what an exported chamfer leans past its drawn angle.
 
 **Bridges.** Under 20 mm reliably; to 30 mm with visible sag on the underside and a
 lumpy first layer above; past that, expect to lose the face. Two bridges crossing

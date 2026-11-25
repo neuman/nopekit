@@ -31,6 +31,8 @@ from nopekit.util import NopekitError
 #: SPEC §5.4's table, pinned as data: every bundled evaluator's basis. A change is
 #: a decision, recorded in SPEC.md §8's phase-2 list, never a drift.
 BUNDLED_BASES: dict[str, str] = {
+    "simp.case_valid": "model-only",
+    **{g: "established" for g in ("simp.volume", "simp.displacement", "simp.stress")},
     **{g: "sourced" for g in ("beam.deflection", "beam.deflection_ratio",
                               "beam.bending_stress", "beam.shear_stress", "beam.buckling",
                               "beam.bearing", "beam.model_validity")},
@@ -38,10 +40,41 @@ BUNDLED_BASES: dict[str, str] = {
     **{g: "model-only" for g in ("cad.bounding", "cad.watertight", "cad.degenerate_faces",
                                  "cad.wall_thickness", "cad.clash", "cad.assembly_connected")},
     "cad.is_volume": "established",
+    "cad.clearance": "established",
     **{g: "established" for g in ("pcb.drc", "pcb.unconnected", "pcb.erc", "pcb.parity",
                                   "pcb.spice", "pcb.enclosure_fit")},
-    **{g: "sourced" for g in ("pcb.pin_names", "pcb.net_width", "pcb.fab_rules")},
-    "pcb.board_readable": "model-only",
+    # general-packs P5: charge_temperature replaces charge_protection and
+    # fault_current replaces fuse_conductor, both sourced as before;
+    # charge_limits is new and sourced (each limit a cell or charger datasheet
+    # value in a record, against a published bound).
+    **{g: "sourced" for g in ("pcb.pin_names", "pcb.net_width", "pcb.fab_rules",
+                              "pcb.charge_temperature", "pcb.charge_limits",
+                              "pcb.fault_current", "pcb.discharge_cutoff")},
+    **{g: "model-only" for g in ("pcb.board_readable", "pcb.land_pattern")},
+    # general-packs P6: usbc_receptacle holds CC termination to the Type-C
+    # specification's Rd and Rp tables (Release 2.0, Tables 4-24 and 4-25);
+    # mismate is this pack's own rule on the wrong fits a person states, with
+    # no outside source for which ones count.
+    "pcb.usbc_receptacle": "sourced",
+    "pcb.mismate": "model-only",
+    # general-packs P8: antenna_keepout holds no copper on any layer under a
+    # module's antenna, the module vendors' guidance (Espressif's hardware design
+    # guidelines), on the footprint's own keep-out or a vendor drawing; KiCad's
+    # DRC and zone filler decide what lies in it. Its area choice and a drawing's
+    # registration are the pack's glue, as pcb.fab_rules hands KiCad a fab's numbers.
+    "pcb.antenna_keepout": "sourced",
+    # general-packs F1: firmware-ci replaces firmware-zmk. The guard follows
+    # GitHub's documented shell and continue-on-error behaviour; the replay's
+    # verdict is the toolchain's own exit code in the job's container; the image
+    # and wake rules follow the bootloader's or partition table's cited layout and
+    # each stack's sleep documentation. F2: fw.tx_power reads the stack's own
+    # Kconfig resolution by rules cited to each stack's Kconfig and sources; its
+    # setter scan is the pack's own and only moves a verdict toward a fail or a
+    # skip, so the gate stays sourced (zmk.tx_power, which it replaces, was
+    # established: it judged one symbol and no setter).
+    "fw.build": "established",
+    **{g: "sourced" for g in ("fw.ci_job", "fw.image_fits", "fw.sleep_wake",
+                              "fw.tx_power")},
     "cfd.case_readable": "model-only",
     **{g: "model-only" for g in ("aero.case_readable", "aero.reference")},
     **{g: "sourced" for g in ("aero.regime", "aero.domain")},
@@ -51,7 +84,7 @@ BUNDLED_BASES: dict[str, str] = {
     **{g: "established" for g in ("cfd.mesh_quality", "cfd.converged", "cfd.pressure_drop")},
     **{g: "model-only" for g in ("fdm.overhang", "fdm.bridge_span", "fdm.bed_fit",
                                  "fdm.min_wall", "fdm.layer_alignment", "fdm.print_time_est",
-                                 "fdm.process_model_valid")},
+                                 "fdm.process_model_valid", "fdm.slice")},
     **{g: "sourced" for g in ("fluid.drag", "fluid.pipe_pressure_drop", "fluid.flow_regime",
                               "fluid.buoyancy", "fluid.freeboard", "fluid.metacentric",
                               "fluid.righting_arm")},
@@ -65,8 +98,17 @@ BUNDLED_BASES: dict[str, str] = {
     **{g: "sourced" for g in ("thermal.conduction", "thermal.convection", "thermal.radiation",
                               "thermal.fin_efficiency", "thermal.steady_state_temp",
                               "thermal.time_constant", "solar.collector_output",
-                              "solar.stagnation", "solar.irradiance")},
+                              "solar.stagnation", "solar.irradiance",
+                              "thermal.skin_temperature")},
     "thermal.h_agreement": "model-only",
+    # general-packs E1: a count of ANSUR 1988 subjects through the survey's own
+    # definitions (TR89-044 (125), (129), (130)); the girth term and the 20 deg
+    # posture tolerance are the pack's, named in its PACK.md.
+    "ergo.digit_reach": "sourced",
+    # general-packs E2: two representations of one design held to agree, with
+    # tessellation tolerances (0.5 mm, 1.0 mm) that are pack constants; no
+    # outside source says what agreement is enough.
+    "ergo.layout_agrees": "model-only",
 }
 
 #: The bracket's own evaluators (a project, per gate).

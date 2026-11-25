@@ -273,8 +273,8 @@ def assembly(ctx: ViewContext) -> View | None:
 Then give the gate somewhere to point:
 
 ```python
-locators=[Locator(view="assembly", target="back_left",
-                  label="0.41 mm^3 into grip_lid_left", value=0.41)]
+locators=[Locator(view="assembly", target="carriage",
+                  label="0.41 mm^3 into guide_roller", value=0.41)]
 ```
 
 Three things to get right:

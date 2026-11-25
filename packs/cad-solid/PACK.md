@@ -27,7 +27,8 @@ also the representation where a part the CAD kernel calls valid stops being vali
 | "no two placed parts share material" | `cad.clash` |
 | "every part is held by something, and the pairs declared to touch still do" | `cad.assembly_connected` |
 | "the part fits its envelope and balances where it should" | `cad.bounding` |
-| "no wall is thinner than the process allows" | `cad.wall_thickness` |
+| "no wall of a part is thinner than that part's minimum" | `cad.wall_thickness` |
+| "these declared pairs are at least the claim's clearance apart" | `cad.clearance` |
 
 ## What this pack CANNOT settle
 
@@ -46,8 +47,21 @@ assume, and the assumptions are expensive.
   can jam at full travel. Sweeping is `references/travel_sweeps.md`, and it is a
   project's job to export the poses.
 - **`cad.clash` does not measure clearance.** It reports shared material. Two parts
-  0.01 mm apart and two parts 8 mm apart are both "clear". A minimum-gap claim
-  needs a distance query, which this pack does not ship.
+  0.01 mm apart and two parts 8 mm apart are both "clear". A minimum-gap claim is
+  `cad.clearance`'s: tag the claim `clearance` and declare the pairs. A claim tagged
+  only `fit` still binds `cad.clash` alone, and reads Checked on no shared material.
+- **`cad.clearance` measures the nearest approach, at one pose, between meshes.** A
+  sliding part resting on its guide reads 0.0 (measured on the baseline's
+  carriage and housing), so declare the pair whose gap the claim is about, not the
+  pair that touches. On a curved face the mesh gap reads wider than the CAD gap by
+  about twice the chord sag: a true 0.01 mm between R5 cylinders, flats facing,
+  reads 0.058 mm at 32 segments, 0.022 at 64 and 0.013 at 128. Tessellate finer
+  where the limit is small; the gate does not correct the value. It searches 10 mm
+  (`CLEARANCE_SEARCH_MM`): a gap past that reads as the cap, and a limit at or
+  above the cap fails, because it cannot be shown to hold. One condition per
+  project, through the tag: every claim tagged `clearance` must state the same one.
+  A pouch cell's swelling allowance is a clearance pair too, and this limit is the
+  one it meets first: `references/swelling_allowance.md`.
 - **`cad.clash` does not say that two parts touching is wrong** — and it will not be
   talked into it by a boolean kernel. A pair whose bounding boxes meet without
   overlapping on some axis is reported as `contact`, not as a clash, and no boolean
@@ -74,6 +88,23 @@ assume, and the assumptions are expensive.
   the real penetration — a pair that fails it is at least that far in; a pair that
   passes it may still be deeper than the number says on a contact patch much smaller
   than the AABB overlap.
+- **A seated layer is judged on depth, not volume.** Two faces that are one nominal
+  surface, left a few microns into each other by tessellation, share a layer whose
+  volume is that depth times the contact area: a plate seated over 1600 mm² at
+  0.003 mm is 4.8 mm³, and it failed the 0.2 mm³ tolerance with nothing wrong. So
+  the shared solid itself is measured: when all of it lies between two parallel
+  planes no further apart than the pair's depth tolerance (its extent along its
+  axis of least spread, an upper bound on its thickness), the volume tolerance is
+  waived for the pair, as for a bonded joint, and the depth tolerance stands. A
+  0.084 mm layer is not a seated one, and fails. Two contacts at two heights are
+  not one layer. A curved seated layer spreads along its curve and is not waived:
+  declare the part in `organic_parts`, or the pair in `bonded_joints`. *Measured
+  before it was written:* three pairs of a published assembly read 0.00025 to
+  0.0027 mm of equivalent depth, and their shared solids were four 3 mm pads
+  0.0135 mm thick, two bodies 0.6 × 1.3 × 5.9 mm and a crescent 0.85 mm across.
+  The equivalent depth is that loose, and a rule that judged those pairs on it, or
+  scaled the volume tolerance by the box face's area, would have passed two real
+  interferences. None of the three is a seated layer.
 - **`cad.clash` needs a boolean engine that is not shipped with trimesh.** trimesh
   implements no booleans of its own and declares none of manifold3d, Blender or
   OpenSCAD as a dependency. With none of them installed the gate reports **SKIPPED**
@@ -137,9 +168,26 @@ assume, and the assumptions are expensive.
   that is closed at the exported pose can open at full travel, and a chain that is
   continuous standing still can come apart under load. That is `lenses.md`, and
   `references/travel_sweeps.md`.
-- **`cad.wall_thickness` is a sampler, not a proof.** It casts rays from facet
-  centroids along facet normals. A thin region whose thinnest direction is normal to
-  no sampled facet is missed, and a coarsely tessellated curve **under**-reports by
+- **`cad.wall_thickness` is a ray sampler, not a proof.** It casts one ray from the
+  centroid of EVERY facet, along its normal. (It cast from an evenly spaced 4000 of
+  them on a bigger part until 0.2.0, and a watertight 20,492-face part whose 0.5 mm
+  plate had its 12 faces between the samples read PASS at 59.983 mm against a
+  1.0 mm minimum.) Rays across an acute edge between adjacent planar surfaces are
+  excluded: they read about 0 mm at an ordinary corner. A surface is a smooth patch:
+  faces joined across edges whose normals differ by under 30°, so subdivision does
+  not change which surfaces share an edge, and a tessellated chamfer is one surface.
+  (It was a coplanar group until a revolved 45° chamfer on a ledge read a 0.188 mm
+  wall: the chamfer's second strip of triangles was a group of its own that shared
+  no edge with the ledge, and its rays across the feather edge counted.)
+  Nonadjacent flanks count at every draft angle, unless the ray ran past the
+  part's edge (two items down), and so does a smooth surface that faces itself
+  across material (a rounded rim). The old 30-degree normal filter
+  discarded a 0.2-1.2 mm rib drafted 16-20 degrees per side and passed at its
+  supporting block's 5 mm. That angle now applies only to the thin-fold exception
+  at a shared edge: nearly opposed surfaces still count. A rib whose peak is two
+  bevels, each within 30° of its flank, reads as the acute corner a knife-edge rib
+  reads as. A thin region whose thinnest direction is
+  normal to no facet is missed, and a coarsely tessellated curve **under**-reports by
   about `t*(1 - cos(pi/N))` for a wall of thickness `t` across an N-sided
   tessellation — 1.9% of the wall at N=16, 7.6% at N=8 — because the ray leaves one
   chord, which sits inside the true surface, and lands on another. That direction is
@@ -149,6 +197,57 @@ assume, and the assumptions are expensive.
   tessellation, where a ray that does not point at the opposing surface travels
   further than the wall is thick. Treat a pass as "nothing found", never as
   "nothing there".
+- **`cad.wall_thickness` does not cast from a sliver face.** A face whose smallest
+  altitude is under 0.0057 mm has a normal nobody knows to a degree (the load welds
+  an STL's vertices at 1e-4 mm, and that tilts such a face's normal by up to
+  `atan(1e-4 / altitude)`), and its ray goes anywhere: a face of 5.9e-7 mm² on an
+  edge read 0.126 mm where 2.57 mm of material lay. It is not cast from, and the
+  detail counts it. Its neighbours still measure the wall it lies on.
+- **`cad.wall_thickness` does not count a ray that ran past a part's edge.** Two
+  surfaces that share no edge and do not face each other (a flat and a chamfer, a
+  rib's two drafted flanks) are judged at the middle of the ray. The ray is a wall
+  when the two surfaces it joins are the nearest ones there, as they are across a
+  section. It ran past the part's edge when a third surface is nearer, and it ran
+  along a face when the face it hit passes within half its reading times
+  sin 10° of that middle. Neither is counted, and the detail counts them. (Until
+  round 3 of the held-out designs, a 1.35-1.4 mm plate whose edge is a 0.6 mm land
+  under a 45° chamfer read 0.605 mm: a ray from the underside 0.005 mm in from the
+  land ran up beside it to the chamfer. A 1.0 mm wall over a 0.5 mm land read
+  0.699 mm, and a ray from a top tilted 4° read 0.731 mm beside the vertical face
+  it leaned into.) Two surfaces that face each other still count up to an edge, so
+  a plate is its thickness to its edge, and a tie at a concave corner (a groove's
+  root) is a wall. A lip that is thin all the way across still reads thin: a
+  0.75 mm lip with a 0.25 mm land under a 45° chamfer reads 0.487 mm. The costs,
+  measured: a chamfered edge over a land reads as an edge out to about 1.55 times
+  the land's height. A fin or rib drafted 15-30° per side loses the rays just under
+  its top land, so the thinnest ray it counts reads about 1.4 (at 16°) to 1.75 (at
+  29°) times the land, where it read 1.14 to 1.68 times before, and a minimum under
+  that passes even where the top is thinner. A 0.3 mm land on a 1.2 mm base, 1.0 mm
+  tall (24° per side), reads 0.495 mm and passes 0.45 mm, with its top 0.17 mm
+  thinner than that. No test at one ray tells that top from a plate's chamfered
+  edge: each is a wedge cut off by a land. A ridge drafted over 40° per side is not
+  read across where one flank runs the length of the ray; past 45° no flank's ray
+  reaches the other flank at all. (Until the review of round 3, the along-a-face
+  rule used 30°, and a 0.2-1.2 mm rib drafted 31° and 35° per side passed at its
+  5 mm block.)
+- **`cad.wall_thickness` does not judge an exempt part, and a box judges the rays
+  that START in it.** A part in `wall_exempt_parts` is not cast from at all; nothing
+  here checks its thickness, and the detail names it so a reader sees the gap. A
+  `wall_exceptions` box judges each ray whose start point is inside it against the
+  box's `min_mm`. A ray that starts outside the box and crosses the boxed material is
+  judged against the part's minimum. That is a false alarm, never a false pass, when
+  the box is the looser rule (a hinge). A box with a STRICTER minimum holds only the
+  faces inside it, so draw it around every face of the region it is about. Inside a
+  box, rays also leave from a square grid on each face, its cells half the box's
+  `min_mm` wide, so a thin region between two large faces is measured. (Until round
+  3, a housing's box held a 0.4 mm web whose faces each ran on past it, so no face
+  centre lay over it: the box's 27 rays read 1.0 mm, and a web under its 0.36 mm
+  minimum would have passed. The grid reads 0.395 mm.) The boxes of one part may add
+  at most 20,000 rays, or the part's face count when that is larger: about 800 mm²
+  of surface at a 0.4 mm minimum. A box that needs more holds more than a thin
+  region and is refused, named. (Until the review of round 3, the count was of each
+  piece's bounding rectangle, about twice the rays a triangle casts, so a box over
+  400 mm² was refused.)
 - **`cad.degenerate_faces` is not a sliver-quality check.** It finds duplicate
   vertices and numerically zero-area triangles. A 1e-6 mm² needle with a 10,000:1
   aspect ratio passes every gate here and will still wreck a mesher.
@@ -176,8 +275,9 @@ assume, and the assumptions are expensive.
 | `cad.watertight` | 1 | open + non-manifold edges | 0, by definition of a solid | `selftest/bad_meshes.py:holed_box` — +Z facet deleted, 4 open edges |
 | `cad.is_volume` | 1 | parts that are not volumes | 0, by definition | `selftest/bad_meshes.py:flipped_facet` — one triangle wound backwards, still watertight |
 | `cad.degenerate_faces` | 1 | repairs needed (welds + drops) | 0 | `selftest/bad_meshes.py:sliver_pair` — one corner of a closed box emitted twice 1e-6 mm apart, a subset of its faces repointed at the copy, one face spanning the two |
-| `cad.wall_thickness` | 1 | thinnest sampled wall, mm | `process_min_wall_mm` (or `min_wall_mm`) in the projection | `selftest/bad_meshes.py:thin_plate` — a plate at a quarter of that limit |
-| `cad.clash` | 1 | interfering pairs | 0 pairs; per-pair volume **and** depth tolerance | `selftest/bad_meshes.py:overlapping_pair` — two valid boxes sharing 800 mm³ |
+| `cad.wall_thickness` | 1 | the thinnest wall on a pass, and on a fail the wall furthest below its own minimum; one inward ray from every face of every part not exempt, except a sliver face, and a grid of rays in each `wall_exceptions` box; a ray past an edge or along a face not counted, mm. Claim tag `wall`, not `mesh` | each part's own minimum: `process_min_wall_mm_by_part`, else `process_min_wall_mm` (or `min_wall_mm`); a `wall_exceptions` box's `min_mm` for a ray that starts in it | `selftest/bad_meshes.py:thin_plate` — a plate at a quarter of `process_min_wall_mm` |
+| `cad.clash` | 1 | interfering pairs | 0 pairs; per-pair volume **and** depth tolerance; a seated layer, depth only | `selftest/bad_meshes.py:overlapping_pair` — two valid boxes sharing 800 mm³ |
+| `cad.clearance` | 1 | least distance over the declared `clearance_pairs`, by manifold3d's `min_gap`, capped at a 10 mm search, mm. Claim tag `clearance` only | the claim tagged `clearance` (`>=`, in mm), read through `ctx.acceptance` | `selftest/bad_meshes.py:carriage_under_cover` — the carriage made taller, its top 0.01 mm under the cover; `cad.clash` passes it |
 | `cad.assembly_connected` | 1 | parts in no contact at all, groups not joined to the assembly, and the surface-to-surface gap on every DECLARED contact, mm | `max_mating_gap_mm` (or a per-entry `tol_mm`); coverage falls back to the pack's 0.05 mm tessellation floor when the projection states none | `selftest/bad_meshes.py:broken_chain` — the cover 3 mm off the rim it seats on, nothing else changed |
 
 The six mesh gates also declare their **known-good** control,
@@ -211,11 +311,14 @@ python3 packs/cad-solid/selftest/check_clash_contact.py
 | `bad_meshes.py:bonded_sliding_fit` | FAIL — the baseline's own sliding pair declared bonded |
 
 The script also checks the pair that decides whether `bonded_joints` is honest at
-all: a 0.01 mm overlap over a 20 × 20 mm face is 4 mm³, twenty times the prismatic
-volume tolerance and a fifth of the bonded depth tolerance. It must **fail
+all: a 0.03 mm overlap over a 20 × 20 mm face is 12 mm³, sixty times the prismatic
+volume tolerance and three fifths of the bonded depth tolerance. It must **fail
 undeclared and pass declared** — the first half proves the declaration is doing
-something, the second proves it is doing the right thing. It reports NOT EXERCISED,
-never a pass, on a machine with no boolean engine.
+something, the second proves it is doing the right thing. (It was 0.01 mm, exactly
+the prismatic depth tolerance, until a seated layer that thin passed undeclared.)
+And it checks the seated layer both ways: 0.005 mm over the whole face passes with
+nothing declared, and 0.084 mm fails. It reports NOT EXERCISED, never a pass, on a
+machine with no boolean engine.
 
 `cad.assembly_connected` has the same asymmetry and a sharper version of it: the
 direction that needs proving is that an assembled joint comes out CONNECTED, because
@@ -252,16 +355,23 @@ every fixture against an empty projection as well as the baseline, which is the
 sealing probe `tests/test_packs.py::ControlsAreSealed` applies to the declared
 control only.
 
+`cad.wall_thickness` also needs **SciPy or NetworkX** for trimesh's connected
+components, which make its smooth surfaces (`pip install scipy`). Without either
+graph engine it reads Skipped. The surfaces keep an acute-corner exclusion from
+erasing a tapered wall.
+
 `cad.wall_thickness` casts its own rays. trimesh's ray engines are not dependencies
 of trimesh: the pure-python one culls candidates with an `rtree` index and the fast
-one needs an embree binding, so on a machine carrying only what this gate declares
-(`trimesh`, `numpy`) `mesh.ray` raises `ModuleNotFoundError` from inside a property
+one needs an embree binding, so without either `mesh.ray` raises
+`ModuleNotFoundError` from inside a property
 and the gate CRASHES. A crash settles nothing and reads as "the design is wrong"
 rather than "the tool is missing", so the gate uses an accelerated engine when one
 is importable and otherwise falls back to its own vectorised Möller-Trumbore cast —
 the same intersection test, brute-forced over the whole face list instead of culled
 by a spatial index, which is why the accelerated engine is still preferred when it
-is present.
+is present. **Install `rtree` or `embreex` on a detailed part**: it casts from every
+face, and measured on the fallback caster a 53,706-face printed part takes 236 s
+(17 s at the 4000 rays it cast before 0.2.0); a small part takes under a second.
 
 Do not read "fallback" as "degraded", and do not read it as "identical" either.
 **Which caster ran is a fact about the machine, not about the model**: the two agree
@@ -299,7 +409,7 @@ allowed to reach a verdict about the design.
 ### Order matters
 
 The registration order is the sweep order: `bounding`, `watertight`, `is_volume`,
-`degenerate_faces`, `wall_thickness`, `clash`, `assembly_connected`. The three validity gates come before
+`degenerate_faces`, `wall_thickness`, `clash`, `clearance`, `assembly_connected`. The three validity gates come before
 the two measurement gates because **a non-watertight mesh poisons everything
 downstream**. A boolean against a leaking mesh can return an empty intersection
 without raising — so a corrupt part reads as colliding with nothing, which is the
@@ -310,8 +420,9 @@ If `cad.watertight` fails, treat every later verdict on that part as void.
 
 The order above is also an edge (`needs`): `cad.watertight` is the prerequisite of
 `cad.wall_thickness` (ray casting through an open mesh leaks out of the hole), and
-`cad.is_volume` the prerequisite of `cad.clash` and `cad.assembly_connected` (a boolean
-is defined only on a volume). Below a failed guard they are not run, and their claims
+`cad.is_volume` the prerequisite of `cad.clash`, `cad.clearance` and
+`cad.assembly_connected` (a boolean, and a distance between solids, are defined only
+on a volume). Below a failed guard they are not run, and their claims
 read Skipped, `prerequisite failed: cad.watertight` — where `wall_thickness` used to
 skip in its body (read as a missing tool) and `clash` to fail on a non-volume.
 `cad.degenerate_faces` has no prerequisite: its own control, `split_corner_box`, is
@@ -529,7 +640,7 @@ part "guide roller"  ->  mover "guide_roller"  ->  node "guide_roller__0"
   site accepts a mover name as a locator target.
 - **Part names are sanitised** to letters, digits, `-`, `.` and `_`, with runs of
   `_` collapsed. The collapse is load-bearing: `__` is the mover separator, so a
-  part called `lid  left` would otherwise become a *body of the mover* `lid`,
+  part called `end  cap` would otherwise become a *body of the mover* `end`,
   silently merging two parts into one exploded group. A collision after
   sanitisation takes a visible `-2` suffix rather than sharing a node.
 - Both sides compute this from `cad_solid_parts.py`, never from two copies of the
@@ -540,6 +651,7 @@ part "guide roller"  ->  mover "guide_roller"  ->  node "guide_roller__0"
 | Gate | Locator | Why that and not more |
 |---|---|---|
 | `cad.clash` | two per interfering pair — each part, labelled with the shared volume, the equivalent depth and the *other* part | the pair is what interferes; pinning one of the two leaves the part that usually moves dark |
+| `cad.clearance` | two on a failing verdict — each part of the closest pair, labelled with the gap and the limit | the gap is between the two; `min_gap` gives a distance, not the point where it is |
 | `cad.watertight` | the parts with open or non-manifold edges, worst first | it knows which part leaks; the edge indices it counted are not a position |
 | `cad.is_volume` | the parts that are not volumes, labelled with *why* | "winding inconsistent" and "volume ≤ 0, inside-out" send you to two different fixes |
 | `cad.degenerate_faces` | the parts needing repairs, worst first | same: duplicate vertices and needle triangles are fixed at different points in the export chain |
@@ -585,13 +697,22 @@ params = {
     "assembly_com_tol_mm": 1.5,                                      # optional
     # cad.wall_thickness - the thinnest wall the PROCESS allows, a limit
     "process_min_wall_mm": 1.2,
-    "wall_samples": 4000,                                            # optional
+    "process_min_wall_mm_by_part": {"light_pipe": 0.6,              # optional
+                                    "sla_*": 0.5},
+    "wall_exempt_parts": {"cover_glass": "bought; its vendor sets its thickness"},
+    "wall_exceptions": [{"part": "battery_door",                     # optional
+                         "box_mm": [[12.0, -20.0, 0.0], [16.0, 20.0, 2.0]],
+                         "min_mm": 0.4,
+                         "reason": "living hinge, printed flat"}],
+    # cad.clearance - the pairs; the limit is the claim tagged clearance (>= mm)
+    "clearance_pairs": [{"pair": ["rail", "carriage"],
+                         "reason": "the carriage runs past the rail"}],
     # cad.clash
     "clash_tolerance_mm3": 0.2,                                      # optional override
     "clash_tolerances_mm3": {"housing|lid": 3.0},                    # optional, per pair
     "clash_depth_tol_mm": 0.01,                                      # optional override
     "clash_depth_tols_mm": {"housing|lid": 0.05},                    # optional, per pair
-    "organic_parts": ["grip"],                                       # optional
+    "organic_parts": ["handle"],                                     # optional
     "sliding_fits": [["rail", "carriage"]],                          # optional
     "clash_allow": [{"pair": ["housing", "lid"], "reason": "0.1 mm press fit, intended",
                      "role": "required"}],       # role is read by cad.assembly_connected
@@ -615,6 +736,35 @@ repair the defects these gates exist to report and certify a file no other progr
 reads the same way. The one exception is a soup format (`.stl`), which has no vertex
 identity to preserve — see "cannot settle" above.
 
+**Do not put the populated board in `meshes`.** A circuit board with its parts in the
+enclosure is `pcb.enclosure_fit`'s (pcb-kicad): it has a model and a ref for each
+part, so it can say which part touches which wall. Here the whole board is one solid.
+`cad.clash` would name the board and not the part, and `cad.wall_thickness` would
+judge a bought board against the process minimum. The overall width stays with
+`cad.bounding`, through the assembly envelope the projection states.
+
+**The bare board may go in, as the part the enclosure clamps to.** Without it,
+`cad.assembly_connected` reports the covers held by nothing, because the board
+they clamp is not in the assembly. Put in the board body alone — its outline at
+its thickness, no parts (`kicad-cli pcb export stl --board-only`) — and exempt it
+from walls in `wall_exempt_parts`, with its fabricator's stackup as the reason. The
+populated board stays `pcb.enclosure_fit`'s. Where `pcb.enclosure_fit` cannot run
+(no board file, or a KiCad it does not read), the bare board is still the part to
+put in, and the claim names the components nothing judged: "the board fits; its
+parts' clearance to the walls is not checked here".
+
+**A published print STL can stand in for a STEP solid that will not mesh closed.**
+Some STEP files tessellate open (the mesher's fault, not the design's), and the
+designer's own print STL is closed. Register the STL onto the STEP's solid in the
+assembly frame: try the rotations that map axes to axes (24 of them) and the
+translation that matches the two bounding boxes, keep the one with the smallest
+residual between the STL's vertices and the STEP's surface, and state in the
+projection the residual and the two volumes. A registration is a measurement: a
+residual of a few hundredths of a millimetre and volumes that agree to a fraction
+of a percent are the evidence it is the same part. The STL's tessellation is not
+the STEP's, so declare the part in `organic_parts` if its curved faces seat on
+another part.
+
 `meshes` is also read from `solids` or `parts`, and a bare list of paths is accepted
 (names come from the filenames). When no geometry is found, the mesh gates SKIP and
 say which keys they looked for. **They never guess a filename**, because a gate that
@@ -625,10 +775,7 @@ The same refusal applies to geometry written short. `assembly_bbox_mm`,
 a compact spelling, it is two missing axes, and expanding it into a cube would hand
 back a confident PASS on a Y and Z the gate invented. `cad.bounding` SKIPS and names
 the key instead. `assembly_bbox_limit_mm` is the one place a scalar is accepted, because "the
-same in every axis" is a real envelope somebody might mean. `wall_samples`, likewise,
-must be a positive integer if it is present at all: `0` used to become the default
-4000, and a projection that asks for no sampling should be told it will get none, not
-quietly given the maximum.
+same in every axis" is a real envelope somebody might mean.
 
 `cad.assembly_connected` **never skips for want of a declaration.** With nothing
 declared it still answers the question that needs no foresight — every part must be
@@ -636,6 +783,85 @@ held by something, and the assembly must be one connected piece — by building 
 contact graph from the geometry. The declarations above are what it cannot infer:
 WHICH contacts matter, and in what order. Its only skip is an assembly of fewer than
 two parts, where there is genuinely nothing to measure.
+
+### Walls: a minimum per part, exempt parts, boxes
+
+One minimum for every mesh FAILS an ordinary product: a bought part has its
+vendor's thickness, a living hinge or a snap finger is thin on purpose, and a part
+made by another process has another minimum. Lowering the one minimum to clear them
+passes a thin wall anywhere. So `cad.wall_thickness` reads three optional records,
+and judges each part against its own minimum:
+
+1. **`process_min_wall_mm_by_part`**, `{part or pattern: mm}`. A key that is a
+   part's name is that part's minimum. Otherwise a key with `*`, `?` or `[` is a
+   pattern (`fnmatch`, case kept). A part with neither takes `process_min_wall_mm`.
+   Two patterns that match one part must state the same minimum: the verdict cache
+   reads the map with its keys sorted, so an order between patterns would change the
+   verdict and not its key. Name the part to settle it. A pattern that also matches
+   an exempt part governs only the parts that are judged.
+2. **`wall_exempt_parts`**, `{part: reason}`. The part is not judged and the detail
+   names it, before its ray counts, so the 500-character cap on a detail cuts the
+   counts first. With every part exempt the gate SKIPS. Exact names only: a pattern
+   exempts parts nobody named.
+3. **`wall_exceptions`**, `[{part, box_mm, min_mm, reason}]`. `box_mm` is
+   `[[x0, y0, z0], [x1, y1, z1]]` in mm in the assembly frame, low corner first. A
+   ray that starts inside the box is judged against `min_mm`, and inside it rays
+   leave from a grid at half `min_mm` as well as from face centres. The box, its
+   reason, its grid spacing and its thinnest ray go in the evidence
+   (`wall_thickness.json`), and in the detail when the box holds the reported wall.
+
+The gate passes only when every judged ray meets its own minimum. What it reports:
+
+- **A pass reports the thinnest wall** of every judged part, in mm, against the
+  minimum that wall was held to. When another wall is nearer its own minimum, the
+  detail names it too: `thinnest wall 0.450 mm on battery_door ... vs 0.400 mm
+  minimum [wall_exceptions[0] box: ...]; nearest its own minimum: 1.250 mm on shell
+  vs 1.200 mm [process_min_wall_mm]`. The evidence holds both, as `thinnest` and
+  `nearest_its_minimum`.
+- **A fail reports the wall furthest below its own minimum**, against that minimum,
+  and pins it. With more than one minimum in use the detail says `worst wall against
+  its own minimum:`.
+- With one minimum everywhere both are the thinnest wall, and the detail says
+  "thinnest wall" as it always did.
+
+The gate settles `minimum wall thickness` in mm, so a claim on that quantity is
+cross-checked against the reported value. A pass reports the thinnest wall so that
+this check is true: a claim `>= 1.2 mm` reads Failing beside a 0.45 mm hinge, even
+when the hinge meets its box. Until the review of 0.3.0, a pass reported the wall
+nearest its own minimum. A 3.0 mm shell left the hinge as that wall and the claim
+read Failing; a shell thinned to 1.25 mm became that wall and the same claim read
+Checked, with the hinge still there. With a thin region on purpose, state the claim's
+limit at or below the lowest minimum in use (the hinge's 0.4 mm), or the claim is
+false and reads Failing. The verdict's margin on a pass is the thinnest wall's
+against its own minimum. The wall nearest its own minimum can have less: read it in
+the detail.
+
+**This contradicts the "one number in two places" warning, and the contradiction is
+expected.** `check` and `doctor` warn when a verdict's limit and its claim's limit
+differ, because a limit written in two places drifts. With more than one minimum
+in use, the verdict's limit is the minimum of the wall it reports — the hinge's on
+a pass, the failing wall's on a fail — and no single claim limit can equal all of
+them. So for `cad.wall_thickness` with per-part minima or boxes, the warning names
+a second number that is not a copy of the claim's: it is that wall's own minimum.
+Keep the claim at the lowest minimum in use and read the warning as "the reported
+wall was held to another minimum". With one minimum everywhere, the two limits
+must agree, and a warning there is a real drift. (The spine has no way for a gate
+to mark a limit that varies by part, so the warning cannot be left out; that is
+recorded as open.)
+
+An exempt part is outside the measurement, as a mesh that is not in `meshes` is. Its
+thickness is in no value this gate reports, and a claim on `minimum wall thickness`
+says nothing about it.
+
+Each record is read strictly. The gate FAILS, and names the entry, on: a key that
+names or matches no part; a minimum that is not a positive number; a part named both
+exempt and with a minimum or a box; a pattern that matches only exempt parts (it
+judges nothing, so the minimum written for them would be dropped); two patterns that
+disagree on one part; an exemption with no reason or written as a pattern; a box
+entry with any key but `part`, `box_mm`, `min_mm` and `reason` (the nearest one is
+suggested), a missing key, a malformed box, two boxes on one part that touch, a
+box that holds no face of its part, or a box that holds more surface than its grid
+of rays may sample (see "a box judges the rays that START in it").
 
 `max_mating_gap_mm` is a design decision in exactly the way `process_min_wall_mm` is
 — how far apart two parts that are supposed to touch may be before the joint is not a
@@ -680,7 +906,11 @@ the allowlist and the bonded declaration must refuse to cover) and one curved pa
 recognise rather than a placeholder. The `_notes` block in the file names each key
 and its unit. `bonded_joints` is present and **empty**: this enclosure is bolted, not
 bonded, and a declaration invented for a joint that does not exist is how a
-mechanism stops meaning anything.
+mechanism stops meaning anything. The three wall records
+(`process_min_wall_mm_by_part`, `wall_exempt_parts`, `wall_exceptions`) are present
+and empty for the same reason: all four parts are cast in one alloy, none is bought
+and none is thin on purpose, so every wall is judged against the one 2.5 mm minimum.
+Their paths are exercised by `tests/test_cad_solid.py`, on parts built for them.
 
 It also carries all three ways of declaring a required contact, on three real joints:
 the `clash_allow` entry for the cover on the rim is marked `"role": "required"` (the
@@ -690,6 +920,15 @@ resting on the cavity floor that locates it, and `assembly_chains` holds
 which is the ordinary case rather than a mistake — the two declarations say the same
 thing, so they merge into one contact and the tightest tolerance governs. The bonded paths are exercised by the three
 fixtures above instead, on geometry built for them.
+
+It declares two clearance pairs: the carriage at home off the roller stop, 7.0 mm
+apart, which manifold3d measures inside the 10 mm search, and the carriage under the
+cover, 23.0 mm apart, which `cad.clearance` reads as the cap. The first is there so
+the known-good control reaches `min_gap`: with the second alone, a gate that read
+0.0 mm for every pair it measured qualified. It states the claim the gate reads its
+limit from under `_claims`: C1, tagged `clearance`, `>= 1.0 mm`. Every fixture
+hands its gate a ledger of those claims and nothing of the host's, so a host with no
+clearance claim, or another limit, moves no control.
 
 Geometry and numbers come from one place. `selftest/make_baseline_meshes.py` builds
 the four solids as explicit vertex/face lists — never by a boolean, because a
@@ -743,7 +982,10 @@ A scoped key always beats an unscoped one.
 | Volume budget | `assembly_volume_limit_mm3` | `volume_limit_mm3` | optional |
 | Centre of mass | `assembly_com_mm` | `com_mm` | `[X, Y, Z]`, assembly frame |
 | CoM target / tolerance | `assembly_com_target_mm`, `assembly_com_tol_mm` | `com_target_mm`, `com_tol_mm` | optional pair |
-| Minimum wall | `process_min_wall_mm` | `min_wall_mm` | the thinnest wall the PROCESS allows — a limit. `fdm-print`'s `min_wall_mm` is the thinnest section MEASURED in a part, which is the opposite kind of number: publish a measurement under this name and the gate compares the geometry against a threshold nobody chose |
+| Minimum wall | `process_min_wall_mm` | `min_wall_mm` | the thinnest wall the PROCESS allows — a limit. `fdm-print`'s `min_wall_mm` is the thinnest wall MEASURED across a part's layer plane, which is the opposite kind of number: publish a measurement under this name and the gate compares the geometry against a threshold nobody chose. For FDM, the thinnest wall the process can lay is one bead: state the line width (about 0.4-0.45 mm on a 0.4 mm nozzle). A count of perimeters (two or three beads) is a strength rule, and `fdm-print`'s `fdm.min_wall` judges it across the layer plane. State it there, not here: this gate measures in every direction, so a perimeter count here also fails a floor or a web that prints as a few layers |
+| Minimum per part | `process_min_wall_mm_by_part` | — | `{part or pattern: mm}`, a part's own minimum before `process_min_wall_mm` |
+| Parts not judged | `wall_exempt_parts` | — | `{part: reason}`, exact names |
+| Thin regions | `wall_exceptions` | — | `[{part, box_mm, min_mm, reason}]`, a box in the assembly frame; a ray that starts in it is judged at `min_mm` |
 | Mating tolerance | `max_mating_gap_mm` | `mating_tolerance_mm` | how far apart a DECLARED contact may be before the joint is not a joint, mm |
 | Required contacts | `mating_pairs` | `assembly_joints` | `[{pair, reason, tol_mm}]` — pairs that must touch and never interfere |
 | Ordered chains | `assembly_chains` | `mating_chains`, `linkages` | `{name: {chain: [...], reason, tol_mm}}` — every consecutive pair must touch |
@@ -795,7 +1037,9 @@ deviation and a tessellated curve's chord height respectively. Volume answers "h
 much material is shared"; depth answers "how far in", and only the second stays the
 same statement on a 5 mm pin and a 200 mm flange. That asymmetry is also why a
 bonded joint is judged on depth alone: shared volume on a bond line is depth times
-glue area, and the glue area is how big the joint was designed to be. One more
+glue area, and the glue area is how big the joint was designed to be. A seated
+layer is the same shape with nothing declared, and is judged the same way once the
+shared solid itself is measured to be a layer within the depth tolerance. One more
 consequence of the same measure-theoretic fact: the intersection of two solids lies
 inside the intersection of their bounding boxes, so when that box is flat the shared
 volume is zero exactly — no tolerance and no kernel involved.
@@ -810,6 +1054,8 @@ volume is zero exactly — no tolerance and no kernel involved.
 | `cad.degenerate_faces` passes but the mesher still chokes | slivers with non-zero area — outside this pack's claim, see "cannot settle" |
 | `cad.bounding` passes and the part does not fit | the projection's numbers are stale; nothing here re-derives them from the mesh |
 | Clash volumes of a few mm³ on a curved mating face | tessellation noise. Set a **per-pair** tolerance. Raising the global one hides the flat-plate interference you actually care about |
+| A flat seated contact passes with "seated layer(s) judged on depth" | the shared material is a layer within the depth tolerance, measured on the shared solid. Its volume is reported and not judged |
+| A seated contact fails on volume at a tiny equivalent depth | the equivalent depth is a loose lower bound. Read `layer_mm` in `clash_pairs.json`: the shared solid is thicker than the depth tolerance (pads, a crescent, a corner), so the parts do share that much material |
 | Clash volumes of tens of mm³ at a hundredth of a millimetre of depth, on a joint you glued | a bond line. The volume is big because the *joint* is big; declare the pair in `bonded_joints` and read the depth |
 | A huge shared volume reported with `inf` depth or a `0.00 mm²` contact patch | it should be impossible now — the pair is reported as `contact` and never booleaned. If you see it, the two bounding boxes DO overlap on all three axes and the kernel is genuinely confused: check `cad.watertight` and `cad.is_volume` first |
 | Every gate is green and the mechanism obviously does not work | a disconnected part passes every check *about itself*. `cad.assembly_connected` finds a part attached to nothing with no declaration at all; declare the chains as well and it names the step that broke |
@@ -897,21 +1143,35 @@ by every geometry gate in every installed pack, so a wall-thickness failure make
 | `envelope` | the part fitting inside a stated bounding volume | `cad.bounding` |
 | `packaging` | what has to fit around or inside what, at assembly level | `cad.bounding` |
 | `wall` | a minimum or maximum material thickness | `cad.wall_thickness` |
+| `clearance` | declared pairs of parts at least the claim's distance apart, at one pose | `cad.clearance` |
 | `interference` | two named parts sharing material | `cad.clash` |
 | `connectivity` | every part being held by something, and two named parts being in contact | `cad.assembly_connected` |
 | `linkage` | a DECLARED drive or control chain being continuous end to end | `cad.assembly_connected` (only where the chain is declared) |
 | `fit` | a mating pair going together as intended | `cad.clash`, `cad.assembly_connected` |
 | `assembly` | the placed assembly as a whole, in its assembly frame | `cad.clash`, `cad.assembly_connected` |
-| `mesh` | the exported triangle mesh as a file: closure, winding, degeneracy | `cad.watertight`, `cad.is_volume`, `cad.degenerate_faces`, `cad.wall_thickness` |
+| `mesh-validity` | the exported triangle mesh being a valid solid: closure, winding, degeneracy, and nothing else | `cad.watertight`, `cad.is_volume`, `cad.degenerate_faces` |
+| `mesh` | the exported triangle mesh as a file: closure, winding, degeneracy | `cad.watertight`, `cad.is_volume`, `cad.degenerate_faces` |
 | `manufacturability` | a process being able to make the thing as exported | `cad.watertight`, `cad.is_volume`, `cad.degenerate_faces`, `cad.wall_thickness` |
 | `mechanical` | a physical-arrangement assertion that is not purely geometric | `cad.bounding`, `cad.clash`, `cad.assembly_connected` |
-| `geometry` | broad; prefer a narrower tag above whenever one fits | every gate here |
-| `cad` | broad; the domain, not a quantity. Prefer a narrower tag | every gate here |
+| `geometry` | broad; prefer a narrower tag above whenever one fits | every gate here but `cad.clearance` |
+| `cad` | broad; the domain, not a quantity. Prefer a narrower tag | every gate here but `cad.clearance` |
 
-`geometry` and `cad` are listed last on purpose. They are the vocabularies every
-gate in this pack claims, so a claim carrying one of them is covered by all seven —
-useful on a deliberately broad claim ("the exported geometry is sound"), wrong on
-anything specific.
+`geometry` and `cad` are listed last on purpose. Every gate in this pack claims
+them but `cad.clearance`, so a claim carrying one of them is covered by the other
+seven — useful on a deliberately broad claim ("the exported geometry is sound"),
+wrong on anything specific. `cad.clearance` carries `clearance` alone and reads
+its limit from the claim tagged `clearance`. A claim tagged only `geometry` or
+`cad` does not bind it, so that claim says nothing about a gap; a claim on a gap
+carries `clearance`.
+
+**The move for an older claim (cad-solid 0.4.0).** `cad.wall_thickness` carried
+`mesh` beside the three closure gates, so no tag selected closure without the
+process wall, and a claim that the exported file is a valid solid failed on the
+wall minimum. The closure gates now carry `mesh-validity` too, and the wall gate
+no longer carries `mesh`. A claim tagged `mesh` that meant the wall as well adds
+`wall`; a claim about validity alone may move to `mesh-validity`, which no other
+pack uses. `manufacturability` still binds all four: a part that is not closed or
+too thin is not made as exported.
 
 The same list is `claim_classes` in `pack.json`, which is what `nopekit gap` scores
 a claim's quantity against when it is looking for a pack that could settle it. A tag
@@ -926,6 +1186,8 @@ here, so the two are kept in step.
   healthy part sits orders of magnitude below the limit.
 - `references/travel_sweeps.md` — checking a mechanism through its travel instead of
   at the one pose that happened to be saved.
+- `references/swelling_allowance.md` — a pouch cell's swelling allowance as a
+  `cad.clearance` pair, and why it is not a gate.
 - `lenses.md` — the adversarial review dimensions to attack a design from before it
   is built.
 - `sourcing.md` — exchange formats, tessellation settings, and what a vendor's

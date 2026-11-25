@@ -2155,6 +2155,412 @@ and while building it:
 - **Phase 2, built in P0.2 and P2.1:** a solver history is CSV evidence,
   never JSON (a JSON history puts thousands of unit-less numbers into the prose pool).
 
+**Packs for handheld electronics, made general** (2026-11-23, branch
+`general-packs`). The handheld cut of 2026-11-05 (fdm-print 0.2.0, cad-solid 0.2.0,
+pcb-kicad 0.2.0, firmware-zmk 0.1.0) was written for one device. The author's rule:
+a pack on main works across a broad category of designs, here handheld and portable
+electronics (controllers, wearables, keyboards, remotes, sensor tags, trackers,
+e-readers). One firmware, one charger topology, one fab or one module is a profile,
+a baseline or a record inside a general pack, never the pack. "A gate earns its
+place" still holds: fewer, sharper gates. The design came from two independent
+designs per area, a judge per area and a critic across the five; the full designs
+are kept outside the repository with the branch's history.
+
+- **firmware-zmk is deleted; `firmware-ci` replaces it** (scope `fw`).
+  `fw.ci_job` (tier 0) reads the CI workflow and fails a CI that can read green on
+  a failed build (`continue-on-error`, `|| true`, `set +e`, a pipe under a shell
+  with no pipefail). `fw.build` (tier 1, established) replays that workflow with
+  act in its own containers, on a copy of the tree. `fw.image_fits` compares the
+  bytes the image writes with a region from a cited record (bootloader layout,
+  datasheet, partition table), never the build's own linker script. `fw.sleep_wake`
+  checks that an image that can enter deep sleep arms a wake source (ESP-IDF and
+  ZMK first; every other stack skips by name). ZMK becomes one wake profile, one
+  design line and two CI templates. *Rejected:* per-stack build recipes (they skip
+  PlatformIO, Arduino, QMK, the Pico SDK and STM32Cube); pinning, watchdog,
+  brown-out and sleep-current gates (accepted risks or lenses).
+- **No radio pack.** Transmit power becomes `fw.tx_power` in firmware-ci, read from
+  the `.config` or `sdkconfig` the replay returns, against the setting the module's
+  grant was tested at. The antenna keep-out becomes `pcb.antenna_keepout` in
+  pcb-kicad. Antenna to enclosure metal is a lens and a physical claim (a range test
+  in the hand). *Rejected:* a one-gate `radio-firmware` pack with a configure
+  proposer (a pack with no prerequisite edge, and a second home for the build).
+- **`hand-ergonomics` is a new pack** (scope `ergo`). `ergo.digit_reach` (tier 0,
+  sourced, stdlib) computes, for each control, the worst-sex share of subjects who
+  reach it from its grip, from per-subject ANSUR 1988 hand data (public domain),
+  shipped as a derived table with its hashes. `ergo.layout_agrees` (tier 1,
+  model-only) checks the declared layout against the exported scene, on cad-solid's
+  node names. The proposer `ergo.reach_envelope` writes reach maps and design
+  ranges. A person holding a print has the final say: the scaffold ends reach in a
+  physical claim tested by a small-reach and a large-reach tester. *Rejected:* a
+  thumb functional-area model fitted on 20 people and one tablet (not a sourced
+  screen yet); a holding-moment gate (its only limit is the print it would replace).
+- **thermal-analytic gains `thermal.skin_temperature`**: the average temperature of
+  a sealed, fanless handheld's surface from its worst-case dissipation, against a
+  touch limit. *Rejected:* `thermal.charge_window` (a hand-typed record of what
+  `pcb.charge_temperature` reads off the board, so a part swap would not re-run it).
+- **pcb-kicad's power rules take plural records and any protection topology.**
+  `pcb.charge_temperature` replaces `pcb.charge_protection`: charging stops outside
+  each cell's window at the tolerance corners of its sensing network, wherever the
+  cutoff lives (charger, pack protection board, BMS, fuel gauge).
+  `pcb.charge_limits`, `pcb.fault_current` (replaces `pcb.fuse_conductor`) and a
+  general `pcb.discharge_cutoff` follow. New: `pcb.mismate` (a foreseeable
+  mis-mating that joins a source to its return), `pcb.usbc_receptacle` (CC
+  termination and role rules; same-name pins stay with `pcb.pin_names`) and
+  `pcb.antenna_keepout`. The readers grow: KiCad 10 boards, land patterns paired
+  by function, and a fab-service guard. `cad.wall_thickness` reads a minimum per
+  part and process; fdm-print slices with presets per part.
+- **The ORIGINS scrub.** The cut named the parent's parts, refdes, rule names and
+  stories in packs, docs, spine docstrings and README pictures. They go; each lesson
+  stays as a generic story. `FORBIDDEN` grows last, with tokens unique to the
+  parent only.
+- **Packaging.** The wheel's globs missed the KiCad, SPICE and OpenFOAM baselines;
+  a test now checks that every tracked file under `packs/` is bundled.
+- **The holdout.** Before merge, every new or changed pack runs against outside
+  open designs that played no part in writing it (an ESP-IDF handheld, a Zephyr
+  watch, an Arduino watch). A wrong FAIL or SKIP is overfit and is fixed. Their
+  files are never committed (some are GPL).
+- **Order**, one commit each: P1 the docs and docstring scrub; P2 packaging; P3 the
+  pcb-kicad scrub; T1 skin temperature; C1 the wall per part; D1 slicer presets per
+  part; E1 hand-ergonomics' reach; P4 the readers; F1 firmware-ci; F2
+  `fw.tx_power`; P5 the power rules; P6 mismate and USB-C; E2 `ergo.layout_agrees`;
+  P7 enclosure fit; P8 the antenna keep-out; P9 the proposers; Z1 README pictures
+  from each pack's own baseline and `FORBIDDEN`; Z2 the holdout.
+- **P1, built: the scrub outside pcb-kicad and firmware-zmk.** Every clash and
+  locator example in the docs uses cad-solid's own baseline names (carriage,
+  guide_roller, cover). *Rejected:* fresh names (a second vocabulary beside the
+  pack's controls). The parent's stories in METHOD.md, the lenses and the spine's
+  docstrings become generic stories that keep the lesson; spine edits are
+  docstrings only, so the bracket cache stands. fdm-print's baseline presets keep a
+  common 220 x 220 mm bed and PETG: a printer class, not a design value, and the
+  slicer controls were measured on them. Kept as generic and reviewed: the
+  readiness sentence of rule 9 (the method's template) and the routing example of
+  rule 3. Left for later: fdm.slice's provenance readings taken on the parent's
+  parts (D1 re-measures them on the pack's probes) and the example strings in
+  `decisions.py` and `decide --help` (Z1).
+- **P2, built: packaging.** The wheel ships every tracked file under `packs/`;
+  `tests/test_packaging.py` holds it, with the same functions setuptools uses
+  (`glob` from the root, then `fnmatch` for exclusions), and also requires
+  `nopekit.bundled` to be a built package. OpenFOAM cases ship by their three
+  directories, anchored at `<pack>/selftest/assets/<case>/`, one level deep.
+  *Rejected:* `**/*` (ships a contributor's caches and a solver run left in a
+  case); `**/0/*` at any depth (it shipped `processor*/` and `postProcessing/`);
+  each dictionary by name (misses a field a case adds).
+- **P3, built: the pcb-kicad scrub.** The ESD baseline is ST's ESDA6V1BC6 from
+  KiCad's stock library, with the same footprint, model, enclosure and ref.
+  *Rejected:* SRV05-4 and ESDA6V1-5SC6 (no repeated pin name, so the pin_names
+  control plants nothing), SN65220 (its GND pins are drawn apart), SP0505BAHT
+  (five cathodes named K that are not one node). The parent's board lines, counts,
+  widths and rule names are gone from prose and tests; the DRC rule is renamed.
+  Wherever the prose says a part through an opening reads clear, it gives the
+  condition: only an opening wide enough to keep the clearance reads clear. The
+  power board is P5's.
+- **No selection by key order** (C1 and D1, each found alone). The design said
+  "globs in the order written". A parameter's digest sorts its keys, so two
+  statements that differ only in order share one cache key, and an order that
+  decided the result would serve one statement's verdict for the other (invariant
+  7). An exact name wins; otherwise the patterns that match a part must agree (C1)
+  or only one may match (D1), and anything else is refused.
+- **T1, built: `thermal.skin_temperature`** (thermal-analytic 0.2.0, tier 0,
+  sourced, stdlib). For each power state it adds the state's heat sources and
+  solves P = A (h_c + h_r)(T_s - T_a) for the average skin of a sealed shell:
+  Churchill-Chu at the longest dimension, grey-body radiation to the room, no
+  credit for the covered area, a linear stage at its worst corner
+  (vin_max - vout_min) x i_max. The hottest state gives the value; the limit is
+  the claim's, on the tag `average-skin-temperature` only. Inside its measured
+  range (a level device, faces 40-160 mm, rise 5-25 K) the model errs hot, so a
+  PASS is the conservative verdict and a FAIL can be false; outside it, or on a
+  face that points down, some biases err cold, and the docs give their sizes. The
+  peak is `claim physical`'s or a solver's, and the detail says so before anything
+  the 500-character cut could take. `heat_sources` is an object keyed by name.
+  *Rejected:* a list of records (measured: the mutation walk and the trace push
+  only object leaves, so no source number was ever falsified); the touch-limit
+  table as a pack constant (the limit is the claim's); broad tags such as
+  `skin-temperature` (a peak claim would read Checked on an average); an operating
+  context on length alone (the bias also turns on the rise, which the gate
+  computes). Until P5 lands, no bundled gate computes a charger's cutoff
+  temperatures, and the docs say so.
+- **C1, built: `cad.wall_thickness` per part** (cad-solid 0.3.0).
+  `process_min_wall_mm_by_part`, `wall_exempt_parts {part: reason}` (every part
+  exempt: Skipped) and `wall_exceptions [{part, box_mm, min_mm, reason}]` (a ray
+  that starts in the box is held to its minimum). A pass reports the thinnest
+  judged wall against the minimum it was held to, because the gate settles
+  `minimum wall thickness` in mm and a claim on it is cross-checked; the detail
+  also names the wall nearest its own minimum. A fail reports the wall furthest
+  below its own. *Rejected:* the design's worst ratio on a pass (a mm claim read
+  Checked beside a thinner wall); exemption by pattern; a tiny minimum in place
+  of an exemption; a lower minimum for a whole part in place of a box. The
+  populated board stays out of `meshes`; a pouch cell's swelling allowance is a
+  `cad.clearance` recipe, not a gate.
+- **D1, built: `fdm.slice` takes a preset group per part** (fdm-print 0.2.1). A
+  part slices on the group under its own name, else the one glob that matches,
+  else the default; a group names all three roles. Every statement problem waits
+  until the parts are read, so a part out of print pose still FAILS. *Rejected:*
+  partial groups that borrow a role from the default (a part's triple from two
+  places); a key that names no part read as harmless (a misspelling sends the
+  part back to the default). The readings once taken on the parent's parts are
+  generic statements now, not measured again: OrcaSlicer 2.4.2 is not installed
+  here.
+- **E1, built: `hand-ergonomics`** with `ergo.digit_reach` (tier 0, sourced,
+  stdlib), the proposer `ergo.reach_envelope`, the scaffold (REACH, GRIP-POSTURE,
+  REACH-HELD; milestones `reach-first-print`, `reach-board-order`) and the
+  reach-testing skill. The table ships 3,982 subjects of ANSUR 1988, and the
+  loader refuses a table whose sha256 is not the one its provenance names. A share
+  is floored to 0.01% before it is judged, toward the failing side of every claim
+  the gate holds. *Rejected:* half-up rounding (1703 of 1774 men read 96.00% and
+  passed >= 96 one subject short); aliases for any key; a mechanism evaluator on
+  REACH-HELD (every project would start with a warning). The pack has no
+  prerequisite edge and says why in `NO_EDGE_YET`; pack skills are now parsed by
+  the doc-command tests.
+- **P4, built: the pcb-kicad readers** (0.3.0). A board newer than the reader's
+  ceiling (KiCad 9's format 20241229) reads Skipped with the guard's words; the
+  gates that need the guard read "prerequisite not established", the power rules
+  and `pcb.fab_rules` skip the same way. Nets are read by name as well as by code.
+  The ceiling does not move: only KiCad 9.0.9 is installed, so no KiCad 10 board
+  could be saved and checked (an accepted gap; KiCad 9's kicad-cli refuses a
+  format-20260206 board, so its board gates read errored on one). `_land_fit`
+  keeps the full search up to 5040 assignments and past that anchors on pads with
+  a function of their own (KiCad's USB-C 16P fits in 76 tries), with a `pair_by`
+  hook for drawing registration only. A fab file lists `services`; a dielectric or
+  via kind the named service does not list skips and names the gap.
+  `pcb.pin_names` takes series pairs stated per ref. *Rejected:* raising the
+  ceiling on the 10.0 source alone; failing a newer file (a wrong FAIL on every
+  current board); number-first pairing.
+- **A record's numbers sit in objects keyed by id, never in lists** (T1, P5, E1).
+  The mutation walk, the spine's mutation pass and the trace push only an
+  object's leaves; a list is one opaque leaf, so no number in it was ever
+  falsified (measured on T1's first form).
+- **F1, built: `firmware-ci`** (firmware-zmk and its tests and logs deleted). The
+  baseline is an ESP32-S3 ESP-IDF v5.5.6 app with BLE on from the start, 48.3% of
+  its smallest 1 MB slot. The two design lines once taken from parent logs are
+  re-recorded on neutral boards. The image readers are standard library (ELF,
+  UF2, Intel HEX); flash use is rounded up to 0.1% and the pass is decided on
+  bytes. The replay copy walks a tree that is ignored or outside any work tree,
+  then runs `git init` on the copy; one replay runs at a time (act names a
+  container by workflow and job only, and a second replay removed the first's
+  mid-build); another act version skips and names the install line. The guard
+  reads every build command and what follows it, after `;` too, and counts a
+  status check only when it fails the step. `fw.build` matches a step by act's id
+  for it, and decides "the job wrote it" from lstat, not content (a reproducible
+  build rewrites the same bytes). *Rejected:* pyelftools and intelhex (both image
+  gates would skip on CI); accepting ZMK's reusable workflow unmeasured (the guard
+  refuses it, and the templates hold one self-contained ZMK job); an upload step
+  in the baseline (espressif/idf has no node; `--bind` brings files back); a
+  rounded figure judged against 100 (an image 0.05% over its slot passed).
+- **P5, built: the power rules** (pcb-kicad, 15 gates).
+  `pcb.charge_temperature` replaces `pcb.charge_protection`, `pcb.fault_current`
+  replaces `pcb.fuse_conductor`, `pcb.charge_limits` is new and
+  `pcb.discharge_cutoff` keeps its id; the shared readers are `gates/_power.py`.
+  Records are plural and keyed by id (`pcb_batteries`, `pcb_protectors`,
+  `pcb_conductors`, `pcb_matings`). Headroom is in K against 0. Firmware is named
+  and skipped in every rule, and a skip never hides another cell's fail. The
+  fixture's cell and charger figures are re-read from real datasheets; the fuse,
+  protector and pack board are fixture values; the refdes roles are new (BT1,
+  J10/J11). A typo bound holds the cell's record whole, and only the floor on a
+  typed charger value (a typo low there is the one that reads as a pass).
+  *Rejected:* lists for the records; a margin in degC (read as zero-limit);
+  failing a firmware-only stop (firmware is unseen, not absent); moving
+  `spice_number` (it reads 1M as a milliohm).
+- **E2, built: `ergo.layout_agrees`** (tier 1, model-only), the validity guard of
+  `ergo.digit_reach`'s inputs, on the tags `digit-reach` and `control-layout`. It
+  holds the declared layout to the drawn scene: the control set both ways (part
+  `ctl-<id>`), each cap within 0.5 mm of its declared point, each grip centre
+  within 0.5 mm of the drawn handle's axis, and each handle's section no wider
+  than the declared diameter + 1.0 mm (one-sided). The scene is a GLB or
+  cad-solid's mesh map, named as cad-solid's assembly view names it. On the
+  baseline, a button drawn 3 mm up the face reads 97.96% on the declared layout
+  and 94.33% on the drawn one. *Rejected:* loading cad-solid's naming module (its
+  absolute path entered the code digest where cad-solid was not live, so every
+  clone keyed new entries; the names are copied and a test holds the copy); the
+  design's `control__<id>` names (the site's explode merges them into one part); a
+  `needs` edge (a tier inversion).
+- **F2, built: `fw.tx_power`** (firmware-ci, tier 1, needs `fw.build`, sourced,
+  tag `ble-tx-power`). It reads the `.config` or `sdkconfig` the replayed build
+  resolved (and the one ESP-IDF's build record names, because ESP-IDF rewrites
+  sdkconfig only when the configure step changes it), never a second build.
+  Profiles from a closed table checked against sources: Zephyr's controller,
+  nRF Connect SDK's SoftDevice Controller, ESP32-C3/S3's controller; any other
+  stack skips by name. With a run-time path (dynamic control, LE Power Control, a
+  setter call in the repository's sources, an advertising set's requested power)
+  the setting is judged at the highest option the config lists. The limit is the
+  setting the module's grant was tested at, and it is the claim's. With a
+  front-end module a literal is judged as asked for, not capped at the SoC's
+  ceiling (the power is the antenna's). *Rejected:* a configure proposer and a
+  separate radio pack; reading every sdkconfig back (a tracked one the job never
+  configured would stand in for the build's); reading a setter's line only after
+  a `#define` check (calls under `#if` and after `#endif` were dropped).
+- **P6, built: `pcb.mismate`** (model-only) **and `pcb.usbc_receptacle`**
+  (sourced; pcb-kicad, 17 gates). A mating's wrong ways are stated (`modes`) on
+  P5's `pcb_matings`, read whole by every rule; a hazard is two nodes of one
+  source on one net, or a source on another source or its return, protected only
+  beyond a named fault element. The USB-C rule holds CC termination, the role
+  rules and D+ apart from D- to the Type-C specification (Release 2.0, the newest
+  usb.org serves as plain PDF; `gates/usbc.json` cites its tables). USB-C bussing
+  has one home where it can see: `pcb.pin_names` on `pcb_board`, the USB-C rule
+  for every other receptacle. *Rejected:* `polarity_guaranteed` on the battery
+  record (the mating's modes are the one statement); a parser for mismate only
+  (two readings of one record); comparing `v_max` to find one rail.
+- **P7, built: `pcb.enclosure_fit` generalised.** The limit is the claim's
+  (tag `enclosure-fit`, `>=` in mm); `pcb_enclosure_clearance_mm` is refused,
+  naming the move. One rotation about x, then y, then z; several boards in
+  `pcb_enclosure_fits` keyed by id, fitted against each other when their
+  enclosure files hold the same bytes; a contact is one part against one feature
+  with a reason and a region no larger than twice the limit around the part; a
+  part with no model takes a box at a declared height. *Rejected:* the parameter
+  beside the claim (two limits that can disagree); a flip flag or a raw matrix;
+  `{ref: reason}` contacts (the "part against anything" pattern that once hid an
+  interference); grouping boards by path string (`./` split a group, and an
+  overlap passed). Known wrong FAIL, stated: mated board-to-board connectors whose
+  vendor models overlap by design.
+- **X1, built: five fixes found in the merge, and every example of a rejection is
+  the bracket's.** The power board has its schematic now
+  (`make_power_schematic.py`, from `make_power_board.py`'s own parts and nets), so
+  `pcb.charge_temperature`'s defeat check reads a schematic its own run wrote, and
+  its qualification is current: before, a control copied the board alone and the
+  gate asked about a path under its out directory that nothing wrote
+  (`test_cache.OutDirReads`). A fixture that swaps a part copies the schematic
+  with the part swapped; one that moves a net writes none. The P7 tests' STEP
+  writer runs through `_env.run`. firmware-ci's replay lock is the user's
+  (`/tmp/nopekit-<uid>/`, used only while that directory is this uid's own), not
+  the home's: a test's temporary home took a second lock, and act removed one
+  replay's container in the middle of its build. `nopekit model --help` prints
+  (argparse read "-10% and +10%" as a format), and every command's `--help` is
+  tested. `decide`'s refusals and help, the spine's docstrings and METHOD.md's
+  rule 3 give the bracket's loser ("4.0 mm|it deflected 3.75 mm, 7.5x the
+  limit") and PLA that creeps, which closes P1's "left for later";
+  `test_rejections.TheExamplesAreTheBracketsOwn` holds them, a wrapped phrase
+  included. The spine edits are docstrings and comments, so the bracket cache
+  stands. *Rejected:* `$XDG_RUNTIME_DIR` for the lock (a process started outside
+  a login session, from cron, a system service or `env -i`, has none, so two
+  processes of one uid can take two locks); a schematic beside a fixture that
+  moved a net (one that its board no longer matches).
+- **P8, built: `pcb.antenna_keepout`** (tier 1, sourced, tags `antenna-keepout`
+  and `rf-layout`; pcb-kicad, 18 gates). `pcb.drc` holds a footprint's rule area
+  only on the layers the footprint names, and in KiCad 9.0.9 ten of the 31
+  RF_Module footprints with a rule area name fewer than every copper layer (the
+  stock ESP32-S3-WROOM-1 and ESP32-WROOM-32 areas cover F.Cu, In1.Cu and B.Cu, so
+  a pour on In2.Cu ran under the antenna with DRC clean); kicad-cli 9 also judges
+  a pour by its stored fill, with no refill. The gate copies each module's own
+  area to every copper layer, every kind of copper forbidden, and runs KiCad's DRC
+  on two staged copies: the board as stored, and the board after pcbnew's own
+  zone filler, run in a child. A `pcb_antennas` record adds a vendor drawing
+  registered by three or more numbered pads (P4's `pair_by="number"`), a rule
+  area the designer drew, or `none` for an antenna off the board; a module with
+  no keep-out and no record skips by name, and a fail counts beside it. Each
+  other keep-out is taken out of the judged copies (DRC reports an item once,
+  against the first area it lies in), the area is added after the refill (one
+  present during it knocks the pour out), and each stored outline grows to hold
+  its fill (KiCad does not judge a fill outside its outline). In review: a rule
+  area's cutout stays a cutout (KiCad saves it as a further polygon of the same
+  zone, and the gate had made it solid keep-out); a non-plated hole that KiCad
+  flashes on no copper layer is listed apart and not counted; the pass names
+  tracks, vias, other parts' pads and zone fills, and says that copper drawings
+  and text are not judged. *Rejected:* a `needs` edge on the guard (the boards
+  are the records', which the guard never reads, so the gate makes the guard's
+  checks itself); counting a bare hole (the rule is copper); finding copper
+  drawings with this pack's own geometry (a second reading of KiCad's shapes,
+  with the text extents unknown).
+- **P9, built: the proposers.** `pcb.schematic_from_board` places every unit of
+  a multi-unit part, each in its own cell under the part's one ref, the pins all
+  units share on each unit: it refused every such part, so the power board's
+  two-unit Q1 had no schematic and `pcb.erc` and `pcb.parity` skipped there. A
+  one-unit part keeps its ids, so a board with none writes the bytes it wrote
+  before. It finds KiCad's symbols through `KICAD10_SYMBOL_DIR`,
+  `KICAD9_SYMBOL_DIR`, `KICAD_SYMBOL_DIR` and the Linux, macOS and Windows install
+  paths, and names each library by the variable it came through. The new
+  `pcb.battery_record_draft` (model-only) drafts `pcb_batteries`,
+  `pcb_protectors`, `pcb_conductors`, `pcb_matings`, `pcb_usbc` and `pcb_rails`
+  from the boards it is given: refs, values and the pads that pin names or copper
+  show. Every datasheet number, flag, choice, kind and source is a `FILL:` value,
+  so every power rule refuses the draft as written; with each FILL taken from the
+  baseline's own records, all six rules read as the baseline does. In review: a
+  drafted source was a string, and `_power.source` takes any string that says
+  something, so a filled draft passed every power rule with the proposer's words
+  as its source; a drafted source is now a list holding one FILL, which every
+  rule refuses. Two boards of one file name keep their own ids (the folders above
+  the name, nearest first); a netless pad carries nothing; a cell's return drives
+  nothing; a rail's output or input may span pins on one net, and every rail
+  drafted is listed under `keep_or_delete`. *Rejected:* a protector's kind from
+  its pin names (five of the eight stock parts with a cutoff pair are a gauge, a
+  FET driver or monitors, and `kind == "charger"` excuses a charger's acts); a
+  source that says DRAFT in words (any non-empty string passes the reader).
+- **Z1, built: README and the last ORIGINS sweep.** README's pack table is the
+  branch's: thirteen packs; firmware-ci (5 gates) where firmware-zmk was;
+  hand-ergonomics (2 gates); thermal-analytic at 11 gates; pcb-kicad at 18 gates
+  (6 established, 9 sourced, 3 model-only), its words no longer about one kind
+  of cell; and the proposers `pcb.battery_record_draft` and
+  `ergo.reach_envelope`. Three pictures are drawn from the packs' own baselines
+  by scripts committed beside them in `docs/img/packs/`: pcb-kicad's ESD board by
+  `kicad-cli pcb render`, the same board with its tracks removed and routed again
+  by `pcb.autoroute`, and cad-solid's enclosure with its cover lifted. The two
+  pictures they replace were renders of the parent device; every other picture
+  under `docs/img/` was compared by eye with the parent's renders and shows none
+  of its geometry. The sweep set the parent's identifiers, part, net and rule
+  names, dimensions and rare words against the tree. One hit was unique: a
+  pcb-kicad test kept the parent's DRC rule body word for word under a new name,
+  and it now probes a rule of its own. A ZMK board name in `tests/fw_logs/`
+  stays: it is ZMK's stock board, and the logs are upstream's own build of a
+  stock shield. `FORBIDDEN` gains six strings that only the parent spells (a
+  firmware board name a test copied, a driver module, a radio grant id, two CAD
+  part names and a DRC rule name), each confirmed absent first, and a test plants
+  every entry and finds it. *Rejected:* common parts (every reference design
+  names them); the grant id's prefix alone (the module maker's, on every module
+  it certifies); the rule's condition as a forbidden phrase (a natural rule for
+  any ground pad); hashes in place of the words (the scan matches a substring
+  anywhere, and a hash matches only a token whose edges are known); a cad-solid
+  picture with every part lifted (the carriage then floats over an empty housing,
+  and the fit the gates judge is gone); `--quality high` for the routed board's
+  top view (its shading draws a shadow of the headers past the board's edge).
+- **Z2, the holdout, run in three rounds** (2026-11-24 and 25). An agent used the
+  packs as a person would, from the docs only, on four outside open designs no
+  pack author had seen: ZSWatch (nRF5340, Zephyr/NCS, KiCad 10), Watchy v3
+  (ESP32-S3, Arduino), Tanmatsu (ESP32-P4, ESP-IDF, KiCad 10) and Sprig (RP2040,
+  two AAA cells). A judge per design classed every result that was not a clean
+  pass, and three refuters checked each call of overfit, doc gap or real defect.
+  Round 1 confirmed about 40 overfit verdicts and as many doc gaps across every
+  pack, and real defects in all four designs: a charger TS pin on two fixed
+  resistors with no thermistor (Tanmatsu), a thermistor turned off in firmware
+  (ZSWatch), a motor modelled 0.084 mm into its pocket (ZSWatch), antenna shorts
+  and board/schematic value mismatches (Watchy), clearance and ERC errors
+  (Sprig). The designs' files never entered the repository (ZSWatch is GPL).
+- **H1-H6, R1, J1-J5, built: the holdout's fixes.** pcb-kicad reads KiCad 10
+  boards (a fixture saved by KiCad 10.0.8; the controls read the pack's own
+  libraries, and each kicad-cli release has a record its controls are keyed on),
+  stages the libraries a project's tables name, counts in parity what is
+  electrical and what is built (board-only drawings not marked so are counted,
+  said apart), decides every value before it is rounded, judges a stored zone
+  fill beside KiCad's refill, keeps each list's order when it writes a board,
+  and runs the antenna keep-out only on a kicad-cli and pcbnew pair it was
+  measured on. Its power rules judge a primary cell, a cell with no datasheet
+  (judged, then skipped, never errored) and one turned cell of a holder; the
+  fit takes any footprint with a body, a part's leads and a round shape;
+  `pcb_model_dirs` replaces an environment read. firmware-ci shares one replay
+  per check, keeps a log on every outcome, removes its containers, reads back
+  the named images, takes one matrix entry, says who holds the replay lock, and
+  skips (never passes) a build it cannot read inside an action or a script;
+  `fw.build` no longer needs `fw.ci_job`, because both cover `firmware-build`,
+  so a claim still waits for both. hand-ergonomics: a grip states its kind, and
+  a slab grip is an honest skip that the testers settle, never a count from a
+  model fitted to handles. fdm-print and cad-solid: walls and floors are two
+  counts, a 45-degree chamfer passes a 45-degree rule within a stated
+  tessellation tolerance, a sliver or a ray that grazes a convex edge is not a
+  wall, a seated contact is not a clash, and each gate has a tag of its own. The
+  spine: `doctor` runs tier-0 controls only and answers in seconds, names each
+  claim tag that binds gates of more than one live pack, reads two control
+  outcomes no current run can reach as history, and names each evaluator its
+  limits row did not compare; a skip reason or an error keeps 500 characters.
+  *Rejected:* a special case for any one design; a pack constant for a limit
+  that is the claim's; widening a test to pass.
+- **Open after the holdout** (written down, not built). Round 3's fixes were
+  checked by each lane's review and the suite, not again on the four designs.
+  Not built: a 'not applicable' state for a gate that covers no claim (it
+  counts as skipped); a better `gap --propose` ranking (word overlap pulls in
+  unrelated packs); `decide --id`; a limit that varies by part, so a per-part
+  minimum still prints 'one number in two places'; per-state skin limits; a
+  replay of every firmware-ci CI template (each unreplayed one is marked);
+  pcb.antenna_keepout and enclosure_fit under KiCad 10 (they skip a KiCad 10
+  board under KiCad 9's tools and are unmeasured under 10's); the full mutation
+  split with every tool present (OrcaSlicer is not on this machine).
+
 ## 9. Retired
 
 `docs/PLAN.md`, `docs/PLAN-v0.14.md`, `docs/plan/phase-1.md` to `phase-5.md`,

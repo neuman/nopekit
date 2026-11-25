@@ -1,0 +1,14 @@
+firmware-ci's baseline app. Every file here is firmware-ci's own (Apache-2.0, as
+nopekit is), except the six partition rows in partitions.csv.
+
+partitions.csv is ESP-IDF's two-OTA partition table,
+components/partition_table/partitions_two_ota.csv, from
+https://github.com/espressif/esp-idf at v5.5.6 (880a203ae603), with its header
+comment. ESP-IDF is Copyright 2015-2025 Espressif Systems (Shanghai) CO LTD,
+licensed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0).
+
+main/main.c, the two CMakeLists.txt, sdkconfig.defaults and
+github/workflows/build.yml are written for this pack. They call ESP-IDF's public
+APIs (esp_sleep.h, driver/rtc_io.h, nimble/nimble_port.h) and build in ESP-IDF's
+own image, espressif/idf v5.5.6, pinned by digest in the workflow.

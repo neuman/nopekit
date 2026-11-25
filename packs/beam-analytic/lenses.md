@@ -1,12 +1,10 @@
 # Adversarial review lenses — structural, closed form
 
-Run these **before** anything is built or ordered. A review pass on one small
-bracket spec, run along these lines, has changed four numbers before a single
-output was generated: a clearance that was arithmetically zero once a floating
-part settled under load, a bearing edge whose fillet turned weight into lift, a
-cantilever loaded at its tip whose root needed a real block rather than a drawn
-one, and a carve nobody had noticed. None of it had been built. All of it would
-have been scrap.
+Run these **before** anything is built or ordered. On a small bracket spec, a
+pass along these lines can find a hole too close to an edge once its position
+tolerance is applied, a stress check against yield where the load cycles and
+fatigue governs, and a slot that lets a bolt slide so that the bolt is in shear.
+On paper, each costs a line in the spec. After the build, each costs the part.
 
 Each heading is one dimension. Attack from one at a time; a reviewer wearing all
 seven lenses at once wears none.

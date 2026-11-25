@@ -2409,11 +2409,71 @@ SLOW_WALK = {
 class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     """(C12, R-4's detector for the mutation clause) The restated aimed walk
     over every bundled pack gate on its own baseline: no conclusive mutation
-    passes an honest bundled gate — measured 45 gates with a conclusive
-    mutation, 7 walked with none, 27 with no boundary (a value exactly at its
-    limit, mostly a defect count 0 against 0, or no value: aero-openfoam's two
-    tier-0 checks) where trimesh, numpy, omc, kicad-cli, ngspice, cadquery and
-    OpenFOAM v2606 are present — and the planted drifted-limit gate is one hit.
+    passes an honest bundled gate. The integrated registry has 101 gates.
+    The measured split for 99 of them is 54 conclusive, 11 walked with none,
+    34 with no boundary. The two ccx gates have no measured classification yet;
+    they are walked whenever ccx is present and held to the same no-pass rule.
+    The total always includes them, available or not.
+
+    Relative to the original 79: SIMP adds volume (conclusive), an input guard
+    (no boundary) and the two ccx gates; PCB adds two conclusive, one with none
+    and one with no boundary; firmware adds one with none and three with no
+    boundary (firmware-zmk's four did; firmware-ci's four, which replaced them in
+    general-packs F1, do too, measured with act 0.2.97 on 2026-11-24:
+    fw.image_fits walked with none, its baseline's leaves all paths and its value
+    the partition table's, and fw.ci_job, fw.build and fw.sleep_wake with no
+    boundary, as they report no value); fw.tx_power (general-packs F2) adds one
+    walked with none, measured alone with act 0.2.97 on 2026-11-24: it passes at
+    +6 dBm against its claim's 7, and every key it reads is a string (the
+    workflow, the job, the image), so no leaf is walked;
+    fdm.slice adds one conclusive and cad.clearance one with none; hand-ergonomics
+    (general-packs E1) adds ergo.digit_reach, conclusive on hand_grip_diameter_mm
+    (lands at 52 mm, the aimed run fails; its two lists are list leaves, not
+    walked, and the age moves nothing). These are the
+    branch reviews' measurements, not totals guessed from only one branch.
+    thermal.skin_temperature (general-packs T1) adds one conclusive, measured
+    alone on 2026-11-24: eight leaves land and fail (shell_ambient_c,
+    shell_area_m2, and six inside heat_sources: each source's w, the linear
+    charger's vin_max_v and i_max_a), vout_min_v, shell_covered_fraction and
+    shell_emissivity are inconclusive (their walk errors past a bound before it
+    lands) and shell_length_m never lands. The leaves inside heat_sources are
+    reached only because it is an object keyed by name: as the list its design
+    drew, it was one opaque leaf.
+    pcb-kicad's power rules (general-packs P5) replace two conclusive gates and
+    one with no boundary with four conclusive, measured alone on 2026-11-24:
+    pcb.charge_protection counted missing protections against 0 (its baseline
+    sat on its limit: no boundary); pcb.charge_temperature lands on eight
+    leaves (the cell's window, the NTC's R25, B and their tolerances, the
+    charger's trip voltages and bias current), pcb.charge_limits on four (the
+    cell's upper charge voltage and current, the charger's regulation voltage,
+    the PROG constant), pcb.fault_current on six and pcb.discharge_cutoff on
+    the cell's minimum. The charger's regulation voltage landed only after
+    P5's review, measured alone on 2026-11-24: the typo bound had been held
+    on the charger's worst corner, so its walk errored at 4.89 V per cell
+    before it could land.
+    Their records are objects keyed by id for the reason heat_sources is: as
+    lists, every number in them would be one opaque leaf.
+    ergo.layout_agrees (general-packs E2) adds one conclusive, measured alone on
+    2026-11-24: hand_grip_diameter_mm lands at 34 mm (36 mm handles drawn, so
+    the girth check fails both grips: 2 disagreements against 0) and the aimed
+    run fails; the scene path is a string and the two layout lists are list
+    leaves, so neither is walked, and it reads no age.
+    pcb.mismate and pcb.usbc_receptacle (general-packs P6) add two with no
+    boundary, measured alone on 2026-11-24: each counts what it finds against
+    0 (hazards, violations), and its baseline sits on that limit. The power
+    rules beside them kept their landings (8, 4, 6 and 1) after the baseline
+    gained matings and a USB-C record and its FFC signals moved; a mode
+    such as ``{"narrower": 6}`` sits in a list, one opaque leaf, not walked.
+    pcb.enclosure_fit (general-packs P7) stays conclusive, on another leaf,
+    measured alone on 2026-11-24. Before, it landed only on
+    pcb_enclosure_clearance_mm (x3), which moved the limit, not the design.
+    That limit is now the claim's, so the baseline's enclosure was redrawn
+    with the board 4 mm up: the placement's z lands at x1.5, and the aimed run
+    (z 5.52) fails at 0.845 mm against 1.0. The split does not move.
+    pcb.antenna_keepout (general-packs P8) adds one with no boundary, measured
+    alone on 2026-11-24: it counts the items KiCad finds in an antenna's
+    keep-out against 0, and its baseline sits on that limit; its record's
+    leaves are strings (a board, a ref, a value, the keep-out's form).
     Full suite only (~12 s without pcb-kicad's and the OpenFOAM packs' tools,
     about 7.5 min with them before aero-openfoam: their opaque gates re-run
     kicad-cli, ngspice, OpenCascade and OpenFOAM for every rung; cfd-openfoam's
@@ -2441,6 +2501,14 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
 
     def test_no_conclusive_mutation_passes_a_bundled_gate(self):
         kinds = collections.Counter()
+        # The branches had each counted only their own additions. Their measured
+        # split covers 99 gates; nobody measured the two ccx walks. They still
+        # run below when available, and a conclusive pass still fails the test.
+        # Exclude only their unknown classifications from the pinned split, never
+        # from the walk, its no-pass assertion or the 101-gate inventory.
+        unmeasured = {"simp.displacement", "simp.stress"}
+        unmeasured_kinds = collections.Counter()
+        unavailable_known = 0
         passes = []
         unavailable = 0
         trimmed: dict = {}
@@ -2456,6 +2524,7 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
                 registered.add(spec.id)
                 if not gates_mod.availability(spec)[0]:
                     unavailable += 1
+                    unavailable_known += spec.id not in unmeasured
                     continue
                 good = packs_mod.baseline_context(pack_dir, out_dir=self.tmp())
                 slow = SLOW_WALK.get(spec.id)
@@ -2473,9 +2542,14 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
                           file=sys.stderr, flush=True)
                 if v0 is None:
                     kinds["no-boundary"] += 1
+                    if spec.id in unmeasured:
+                        unmeasured_kinds["no-boundary"] += 1
                     continue
                 landing = [w for w in walked if w.kind == "lands"]
-                kinds["conclusive" if landing else "none-conclusive"] += 1
+                kind = "conclusive" if landing else "none-conclusive"
+                kinds[kind] += 1
+                if spec.id in unmeasured:
+                    unmeasured_kinds[kind] += 1
                 for w in landing:
                     after, run = aimed(spec, fn, good, v0, w, margin=MARGIN)
                     if run[0] == "pass":
@@ -2487,10 +2561,12 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
             with self.subTest(gate=gid):
                 self.assertEqual((walked, left),
                                  (SLOW_WALK[gid].walked, SLOW_WALK[gid].not_walked))
-        self.assertEqual(sum(kinds.values()) + unavailable, 79, kinds)
-        if not unavailable:
-            self.assertEqual(dict(kinds), {"conclusive": 45, "none-conclusive": 7,
-                                           "no-boundary": 27})
+        print(f"\nbundled walk: {len(registered)} registered; "
+              f"{dict(kinds)}; {unavailable} unavailable", file=sys.stderr, flush=True)
+        self.assertEqual(sum(kinds.values()) + unavailable, 101, kinds)
+        if not unavailable_known:
+            self.assertEqual(dict(kinds - unmeasured_kinds),
+                             {"conclusive": 54, "none-conclusive": 11, "no-boundary": 34})
 
     def test_the_planted_drifted_limit_is_one_hit(self):
         spec = GateSpec(id="beam.drifted", claims=["x"], tier=Tier.INSTANT,

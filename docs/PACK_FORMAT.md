@@ -265,6 +265,11 @@ Rules, all enforced:
   that describes what they actually assert.** Say so in `PACK.md` and give the
   vocabulary explicitly, because a pack that publishes its tag names is a pack
   whose claims can be written correctly by someone who has never read its code.
+  Your tag table is read beside other packs' tables: a broad word another pack
+  also lists (`connectivity`, `clearance`, `manufacturability`) covers a claim
+  with the gates of both. `nopekit doctor` names each tag that gates of two or
+  more installed packs bind (its `pack-tags` row), and `nopekit check` notes
+  each one a claim carries.
 
   The one gate that *should* bind broadly and narrowly at once is a **validity
   guard** — a slenderness check protecting beam theory, a Biot check protecting
@@ -745,7 +750,7 @@ stays as a documented fallback:
 | `cad-solid` | `assembly_bbox_mm` | `bbox_mm` | the assembled product's envelope |
 | `fdm-print` | `part_bbox_mm` | `bbox_mm`, `bbox`, `footprint_mm` | one printed part, in print orientation |
 | `cad-solid` | `process_min_wall_mm` | `min_wall_mm` | the thinnest wall a process ALLOWS (a limit) |
-| `fdm-print` | `part_min_wall_mm` | `min_wall_mm`, … | the thinnest section MEASURED in a part |
+| `fdm-print` | `part_min_wall_mm` | `min_wall_mm`, … | the thinnest wall MEASURED across a part's layer plane |
 
 **Say the frame and the object in `PACK.md`, in the first paragraph** — which
 object each gate judges, and which coordinate frame it expects the geometry in. It
@@ -1100,7 +1105,7 @@ Rules:
   two bodies are one sub-assembly. Assembly order is intent, not geometry. Pass
   `overrides=` to correct it — they merge per mover, so fixing two parts costs two
   entries, and nodes group by the `__` in `lid__boss_a` (a double underscore,
-  because single ones are ordinary inside part names like `back_left`).
+  because single ones are ordinary inside part names like `guide_roller`).
 
 ### Figures bound to a verdict (`evidence_of`, `recipe`, `BoundContext`)
 
@@ -1293,11 +1298,11 @@ and starts being a debugger:
 ```python
 return Verdict(
     gate="cad.clash", passed=False,
-    detail="1 interfering pair: back_left / grip_lid_left 0.41 mm^3",
+    detail="1 interfering pair: carriage / guide_roller 0.41 mm^3",
     locators=[
-        Locator(view="assembly", target="back_left",
-                label="0.41 mm^3 into grip_lid_left", value=0.41),
-        Locator(view="assembly", target="grip_lid_left"),
+        Locator(view="assembly", target="carriage",
+                label="0.41 mm^3 into guide_roller", value=0.41),
+        Locator(view="assembly", target="guide_roller"),
     ],
 )
 ```

@@ -2,7 +2,7 @@
 // viewer3d.js — the MODEL3D / FIELD viewer, and the verdict overlay on top of it.
 //
 // This module is the reason the site is worth building. A readiness line saying
-// `cad.clash: 1 interfering pair — back_left / arm_boss, 0.41 mm^3` is a sentence
+// `cad.clash: 1 interfering pair — carriage / guide_roller, 0.41 mm^3` is a sentence
 // somebody has to go and act on. The same verdict, carrying two locators, lights
 // both parts up here at the pose where it happens, and the reader is looking at
 // the problem a second later.

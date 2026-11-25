@@ -37,7 +37,7 @@ import unittest
 
 from nopekit import gates as gates_mod
 from nopekit import packs as packs_mod
-from nopekit.models import Ledger, ProjectMeta
+from nopekit.models import Claim, Ledger, NegativeControl, ProjectMeta
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKS_DIR = os.path.join(REPO, "packs")
@@ -230,6 +230,79 @@ class CollisionsAreDetected(unittest.TestCase):
                 "two packs that describe a key identically do not collide")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _tag_registry() -> gates_mod.Registry:
+    """Planted gates from Python: two packs that both bind `shared`, `alpha`
+    alone binding `alpha-own` (twice, from two gates), and a project gate (no
+    pack) that binds `shared` and `alpha-own` too."""
+    registry = gates_mod.Registry()
+    nc = NegativeControl(fixture="selftest/bad.py:bad")
+    for gid, pack, tags in (("alpha.b", "alpha", ["shared", "alpha-own"]),
+                            ("alpha.a", "alpha", ["shared", "alpha-own"]),
+                            ("beta.one", "beta", ["shared"]),
+                            ("project.own", "", ["shared", "alpha-own"])):
+        gates_mod.gate(id=gid, claims=tags, pack=pack, registry=registry,
+                       negative_control=nc)(lambda ctx: None)
+    return registry
+
+
+class TagCollisionsAreDetected(unittest.TestCase):
+    """Two packs, one claim TAG: a claim that carries it is covered by the gates
+    of both (``claims.covers``), so a verdict about another object reads on it.
+    What slipped through (holdout, general packs, three projects):
+    `connectivity`, `clearance`, `interference`, `packaging` and
+    `manufacturability` each bound gates of two or three live packs, and
+    `doctor` diffed only the param keys. `packs.tag_collisions` reads the
+    registered specs; `doctor`'s `pack-tags` row and `check`'s note render it
+    (tests/test_doctor.py, `test_pack_tags`)."""
+
+    def test_a_tag_two_packs_bind_is_named_with_each_packs_gates(self):
+        found = packs_mod.tag_collisions(_tag_registry())
+        self.assertEqual([c.tag for c in found], ["shared"])
+        self.assertEqual(found[0].gates, (("alpha", ("alpha.a", "alpha.b")),
+                                          ("beta", ("beta.one",))))
+        self.assertEqual(found[0].packs, ("alpha", "beta"))
+        self.assertEqual(found[0].carried, ())
+        self.assertEqual(found[0].binds(), "alpha (alpha.a, alpha.b) and beta (beta.one)")
+
+    def test_one_pack_and_a_project_gate_collide_with_nothing(self):
+        """Negative control: `alpha-own` is bound by two gates of one pack and
+        by a project gate. One pack is not two, and a project gate is the
+        project's own wiring."""
+        found = packs_mod.tag_collisions(_tag_registry())
+        self.assertNotIn("alpha-own", [c.tag for c in found])
+        self.assertEqual(packs_mod.tag_collisions(gates_mod.Registry()), [])
+
+    def test_the_claims_that_carry_it_are_named_and_sort_first(self):
+        """A claim carries a tag by a tag or by its id, as `claims.covers` reads
+        it — exactly, so `Shared` is another word. A carried collision sorts
+        before one no claim carries."""
+        registry = _tag_registry()
+        nc = NegativeControl(fixture="selftest/bad.py:bad")
+        for gid, pack in (("alpha.c", "alpha"), ("beta.two", "beta")):
+            gates_mod.gate(id=gid, claims=["aaa-first"], pack=pack, registry=registry,
+                           negative_control=nc)(lambda ctx: None)
+        claims = [Claim(id="C2", statement="s", tags=["shared"]),
+                  Claim(id="C1", statement="s", tags=["shared", "other"]),
+                  Claim(id="C3", statement="s", tags=["Shared"])]
+        found = packs_mod.tag_collisions(registry, claims)
+        self.assertEqual([(c.tag, c.carried) for c in found],
+                         [("shared", ("C1", "C2")), ("aaa-first", ())])
+        self.assertEqual(packs_mod.tag_collisions(registry, [Claim(id="shared",
+                                                                   statement="s")])[0].carried,
+                         ("shared",))
+
+    def test_a_long_family_is_cut_with_a_count(self):
+        registry = gates_mod.Registry()
+        nc = NegativeControl(fixture="selftest/bad.py:bad")
+        for gid, pack in [(f"alpha.g{i}", "alpha") for i in range(5)] + [("beta.one", "beta"),
+                                                                          ("gamma.one", "gamma")]:
+            gates_mod.gate(id=gid, claims=["wide"], pack=pack, registry=registry,
+                           negative_control=nc)(lambda ctx: None)
+        self.assertEqual(packs_mod.tag_collisions(registry)[0].binds(),
+                         "alpha (alpha.g0, alpha.g1, alpha.g2 +2 more), beta (beta.one) "
+                         "and gamma (gamma.one)")
 
 
 class AxisNamesAreRead(unittest.TestCase):

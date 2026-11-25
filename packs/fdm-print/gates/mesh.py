@@ -74,6 +74,8 @@ PARTS = _load_path(os.path.join(os.path.dirname(_HERE), "fdm_print_parts.py"))
 # module: two copies would each carry their own ``MAX_PART_LOCATORS`` and their
 # own idea of what a ``PartOutcome`` is, and the drift would be silent (rule 2).
 FOLD = _load_path(os.path.join(_HERE, "fdm_print_fold.py"))
+#: The mesh loader, shared with ``gates/slicer.py`` (``_mesh_file.py`` says why).
+MESH_FILE = _load_path(os.path.join(_HERE, "_mesh_file.py"))
 
 #: How many faces get a pin before the gate stops drawing them. A part that needs
 #: support usually has thousands of faces past the limit; pinning them all paints
@@ -96,6 +98,33 @@ does not reach 45. Projects override ``overhang_limit_deg`` and should record
 which machine and material the number came from. Rejected: 60 deg as a default —
 it is reachable on a good machine with a tuned profile, and adopting it as the
 default means every pack user inherits one person's tuning."""
+
+OVERHANG_TESSELLATION_TOL_DEG = 0.5
+"""How far past ``overhang_limit_deg`` a face may lean before it counts, degrees.
+
+What slipped through with ``angles > limit`` and no tolerance: a part whose only
+overhangs were 45 deg chamfers, drawn at the 45 deg rule, failed at 5.72% of its
+surface past the limit, and every one of those faces read 45.00-45.05 deg: the
+chamfers as exported. A published housing's revolved chamfers read 45.0-45.5 deg
+(91% of its past-limit area), and it failed at 1.81%; with this tolerance it reads
+0.16%, a pass, while a part whose real 50-60 deg faces fail keeps failing (0.98%
+to 0.92%). Two mechanisms put a face drawn at the rule past it: the exporter's
+precision on a flat chamfer (hundredths of a degree), and on a revolved one a
+facet that joins a chord of one ring to a vertex of the next, which leans past
+the surface by ``(r / h) * (1 - cos(d / 2))`` in its tangent (ring radius ``r``,
+facet height ``h``, angular step ``d``): 0.33 deg at r = 20 mm, h = 0.6 mm,
+d = 3 deg.
+
+0.5 deg covers both as measured, and it is a tenth of the gap between 45 and the
+50-55 deg that well-cooled PLA reaches, so it does not move the rule. The verdict
+prints it. Rejected: 0 (a feature drawn at the rule fails on its tessellation,
+and the fix people reach for is a looser limit, which forgives real overhangs
+too); 0.1 deg (the flat chamfers pass, the revolved ones do not: the housing
+still read 0.46%, one ring away from failing); 1 deg (forgives a face drawn a
+full degree past the person's own rule, and measured no part more than 0.5 deg
+did); deriving the default limit from bead overlap, ``atan(0.5 w / h)`` (60 deg
+at a 0.42 mm line and 0.12 mm layers), which would move every project's limit,
+not only the noise around it. Projects override ``overhang_tessellation_tol_deg``."""
 
 OVERHANG_AREA_ALLOW_FRAC_DEFAULT = 0.005
 """Overhanging area tolerated, as a fraction of total surface area.
@@ -147,6 +176,40 @@ and 5 mm, which is demonstrably printable but arrives visibly curled and is not
 something to certify silently. Projects override ``max_cantilever_mm`` with the
 material and cooling it was measured on."""
 
+CEILING_FLOOR_WIDTH_MM_DEFAULT = 0.4
+"""The line width a ceiling region's area floor is built from when the projection
+states neither ``extrusion_width_mm`` nor ``nozzle_d_mm``, mm. The commonest
+nozzle. The floor is one bead's footprint, ``width ** 2``; see
+:func:`_ceiling_floor`.
+
+What slipped through without a floor: a region with no anchor took a limit of 0,
+so any span on it scored infinite, and a 0.00 mm^2 two-face sliver of one-sided
+ceiling, left by tessellation, outranked a real 266 mm^2, 10 mm cantilever as the
+headline. A part whose only finding was such a sliver would have failed. A region
+smaller than one bead's footprint is not a ceiling the slicer bridges or sags: it
+is less than one line of extrusion. It is listed in the evidence, counted in the
+detail, and not judged.
+
+Rejected: dropping a region narrower than one line width (it needs a width
+measure per region, and the area floor already removes the slivers seen); a floor
+on the height step below the neighbours (a real ceiling one layer up is still a
+ceiling); ranking by area times ratio (an unanchored real region is infinite
+either way, and a pass or fail must still turn on every region, so the headline
+cannot skip a smaller region that fails). Projects override
+``min_ceiling_area_mm2``."""
+
+#: Where a project states that a part prints ON SUPPORT, in order.
+#: ``{part: {"supports": "tree" | "normal" | "none", "reason": "..."}}``, one entry
+#: per part, named as the verdict names it. What slipped through without it: a
+#: housing designed to print on support, with a 3.8 mm cantilever under its lip,
+#: failed ``fdm.bridge_span`` as "without support", which is true and was not the
+#: design. Only ``fdm.slice``'s preset groups knew a part prints on support.
+SUPPORTS_KEYS = ("supports_by_part", "print_supports")
+#: The kinds a statement may name. ``none`` says what the default already is.
+SUPPORT_KINDS = ("tree", "normal", "none")
+#: The only keys an entry may carry.
+SUPPORT_FIELDS = ("supports", "reason")
+
 CANTILEVER_HALF_PLANE_TOL_DEG = 5.0
 """How far the anchors around the worst point may fall short of surrounding it
 before the region is called a cantilever, degrees.
@@ -160,12 +223,9 @@ degree. Rejected: 0 (the perfect-bridge case sits exactly on the boundary and
 floating point puts it on either side of it) and 45 (wide enough to let a genuine
 corner ledge, whose two perpendicular walls span 90 deg, be scored as a bridge)."""
 
-BED_TOLERANCE_MM = 0.05
-"""How close to the lowest point a face must be to count as sitting ON the bed.
-
-This exclusion is not cosmetic. The bottom face of any part is, geometrically, a
-90 deg overhang facing straight down; without excluding it every solid ever
-modelled fails the overhang gate and the gate becomes noise."""
+#: How close to the lowest point a face must be to count as sitting on the bed.
+#: Shared with ``gates/slicer.py`` through ``fdm_print_parts``, where it is documented.
+BED_TOLERANCE_MM = PARTS.BED_TOLERANCE_MM
 
 _MISSING = object()
 
@@ -189,38 +249,11 @@ def _skip(gate_id: str, reason: str) -> Verdict:
     return Verdict(gate=gate_id, passed=False, skipped=True, skip_reason=reason)
 
 
-#: Axis NAMES accepted anywhere this pack wants a direction, alongside the
-#: ``[x, y, z]`` vector form. ``build_axis: "z"`` is what a person writes, and a
-#: reader who writes it must not be told the key is missing.
-AXIS_NAMES = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
-
-#: Where the build direction is stated, primary spelling first. Resolved
-#: pack-scoped first (``fdm.build_axis``) by ``GateContext.param``.
-BUILD_AXIS_KEYS = ("build_axis", "layer_normal", "print_axis")
-
-
-def _direction(value: Any) -> list[float] | None:
-    """A direction from an ``[x, y, z]`` vector OR an axis name, else None.
-
-    Accepted: ``[0, 0, 1]``, ``"z"``, ``"+Z"``, ``"-y"``. Kept in step with
-    ``gates/printability.py``'s ``_direction`` — two gates in one pack disagreeing
-    about what ``build_axis: "z"`` means would be worse than neither accepting it.
-    """
-    if isinstance(value, str):
-        text = value.strip().lower().replace(" ", "").replace("-axis", "").replace("_axis", "")
-        sign = 1.0
-        if text[:1] in "+-":
-            sign = -1.0 if text[0] == "-" else 1.0
-            text = text[1:]
-        base = AXIS_NAMES.get(text)
-        return [sign * c for c in base] if base else None
-    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
-        return None
-    try:
-        out = [float(v) for v in value]
-    except (TypeError, ValueError):
-        return None
-    return out if len(out) == 3 else None
+#: The build direction's keys, its axis names and its parser: one copy in
+#: ``fdm_print_parts.py`` for every gate in this pack (``direction`` says why).
+AXIS_NAMES = PARTS.AXIS_NAMES
+BUILD_AXIS_KEYS = PARTS.BUILD_AXIS_KEYS
+_direction = PARTS.direction
 
 
 def _build_axis(ctx: GateContext):
@@ -238,34 +271,9 @@ def _build_axis(ctx: GateContext):
     return tuple(c / n for c in vec)
 
 
-def _parse_mesh(path: str):
-    """``(mesh, defect, empty)`` for the file at ``path``, or None when there is none.
-
-    The loader :func:`_read_mesh` hands the spine's memo, so it runs once per
-    file per sweep and every gate that asks after that gets the same answer.
-    ``defect`` is decided here, with the parse, because it is a property of the
-    file and both gates want it. ``empty`` is the reason when the file parsed to
-    no faces at all; ``mesh`` and ``defect`` are None then.
-
-    Module-level on purpose: the memo is keyed on the loader's identity, and a
-    function defined inside a gate body is a new object on every call, so it
-    would never hit. A missing file comes back as None rather than raising: its
-    absence is what the gate decides on, and asking through the memo is what
-    records the path as this gate's input either way.
-    """
-    if not os.path.isfile(path):
-        return None
-    import trimesh                                    # noqa: PLC0415 - lazy on purpose
-
-    loaded = trimesh.load_mesh(path, process=True)
-    if isinstance(loaded, trimesh.Scene):
-        try:
-            loaded = loaded.dump(concatenate=True)
-        except TypeError:                              # older trimesh
-            loaded = trimesh.util.concatenate(loaded.dump())
-    if getattr(loaded, "faces", None) is None or len(loaded.faces) == 0:
-        return None, None, f"{os.path.basename(path)} loaded with no faces"
-    return loaded, _solid_defect(loaded, os.path.basename(path)), None
+#: The loader the sweep's memo keys on, shared with ``gates/slicer.py`` so the two
+#: read each part once per sweep (``_mesh_file.parse_mesh`` says why).
+_parse_mesh = MESH_FILE.parse_mesh
 
 
 def _read_mesh(ctx: GateContext, raw: str, label: str):
@@ -353,47 +361,7 @@ def _load_mesh(ctx: GateContext, gate_id: str):
     return mesh, resolved, None
 
 
-def _solid_defect(mesh, name: str) -> str | None:
-    """A one-line description of why this mesh is not a solid, or None.
-
-    **Why this FAILS the gate rather than skipping it.** Every number both mesh
-    gates produce is read off ``face_normals``, and a face normal only means
-    "outward" if the winding says so. Flip the winding and the signed volume goes
-    negative, every overhang angle comes out mirrored, and a part covered in 70
-    deg overhangs reports ``worst face 0.0 deg`` — a confident green about a
-    quantity that was never measured. That is not "the gate could not run", which
-    is what a skip means; it is a defect in the artifact the project handed over,
-    and it is exactly the kind of finding a readiness report exists to carry.
-
-    The pack's own fixture builder has asserted this on the solids it generates
-    since the day it was written, with a comment explaining that mirrored normals
-    would make a control "work" for the wrong reason. The project's mesh gets the
-    same check, for the same reason.
-
-    ``is_winding_consistent`` is deliberately NOT part of the test: an STL is a
-    soup of independent triangles, and a perfectly good solid comes back from the
-    round trip with that flag false while ``is_watertight`` and a positive signed
-    volume both hold. Testing it would fail honest meshes, and a gate that fails
-    honest input gets switched off.
-    """
-    import numpy as np                                 # noqa: PLC0415
-
-    if not mesh.is_watertight:
-        edges = np.sort(mesh.edges, axis=1)
-        _, counts = np.unique(edges, axis=0, return_counts=True)
-        open_edges = int((counts != 2).sum())
-        return (f"{name} is not watertight: {open_edges} edge(s) are not shared by "
-                f"exactly two faces, so it has holes or self-intersects. Inside and "
-                f"outside are undefined on such a mesh, which makes every face "
-                f"normal — and so every overhang and bridge number below — "
-                f"meaningless. Repair the mesh or re-export it as a solid")
-    if mesh.volume <= 0:
-        return (f"{name} has non-positive signed volume ({mesh.volume:.1f} mm^3): its "
-                f"faces are wound inside out. Every overhang angle would come out "
-                f"mirrored, so a part that is nothing but steep overhangs reports "
-                f"0.0 deg and passes. Flip the normals (trimesh: fix_normals) and "
-                f"re-export")
-    return None
+_solid_defect = MESH_FILE.solid_defect
 
 
 def _face_angles(mesh, axis):
@@ -447,13 +415,158 @@ def _on_bed(mesh, axis):
     return height[mesh.faces].max(axis=1) <= lowest + BED_TOLERANCE_MM
 
 
+def _ceiling_floor(ctx: GateContext) -> tuple[float, str]:
+    """``(mm^2, where it came from)``: the smallest ceiling region judged.
+
+    One bead's footprint, the square of the line width: the projection's
+    ``extrusion_width_mm``, else its nozzle, else ``CEILING_FLOOR_WIDTH_MM_DEFAULT``
+    (which says what slipped through without a floor). ``min_ceiling_area_mm2``
+    states it outright.
+    """
+    stated = _look(ctx, ("min_ceiling_area_mm2",), None)
+    if isinstance(stated, (int, float)) and not isinstance(stated, bool):
+        return max(0.0, float(stated)), "min_ceiling_area_mm2"
+    for keys, label in ((("extrusion_width_mm", "line_width_mm"), "line width"),
+                        (("nozzle_d_mm", "nozzle_diameter_mm", "nozzle_d"), "nozzle")):
+        width = _look(ctx, keys, None)
+        if isinstance(width, (int, float)) and not isinstance(width, bool) and width > 0:
+            return float(width) ** 2, f"one bead at the {float(width):g} mm {label}"
+    return (CEILING_FLOOR_WIDTH_MM_DEFAULT ** 2,
+            f"one bead at the {CEILING_FLOOR_WIDTH_MM_DEFAULT:g} mm default width")
+
+
+def _read_supports(ctx: GateContext, names: Sequence[str]):
+    """``({part: (kind, reason)}, key, error)`` for the parts stated to print on support.
+
+    Read strictly, as ``fdm.slice`` reads its preset groups, and each of these is an
+    ERROR naming the entry: a name that is not a part (with the closest one), an
+    entry that is not ``{supports, reason}``, a key outside those two (with the
+    closest), a kind outside ``SUPPORT_KINDS``, a reason that is empty. A misspelt
+    part read as nothing would leave it judged without support with no word, and
+    an unexplained statement is one nobody can delete when the part changes.
+    Exact names only: a pattern states support for parts nobody named. A part
+    stated ``none`` is left out of the map, as an unstated one is.
+    """
+    import difflib                                     # noqa: PLC0415
+
+    raw, key = ctx.first_pack_param_named(SUPPORTS_KEYS, None)
+    if raw is None or raw == {}:
+        return {}, "", ""
+    key = key or SUPPORTS_KEYS[0]
+    if not isinstance(raw, dict):
+        return {}, key, (f"{key} is {type(raw).__name__}; write {{part: {{supports: "
+                         f"{' | '.join(SUPPORT_KINDS)}, reason}}}}")
+    out: dict = {}
+    for name, entry in raw.items():
+        clean = PARTS.sanitise(name)
+        label = f"{key}[{name!r}]"
+        if clean not in names:
+            near = difflib.get_close_matches(clean, list(names), n=1)
+            return {}, key, (f"{label} names no stated part ("
+                             f"{', '.join(list(names)[:6])})"
+                             + (f"; did you mean {near[0]!r}?" if near else ""))
+        if not isinstance(entry, dict):
+            return {}, key, f"{label} is {type(entry).__name__}; write {{supports, reason}}"
+        unknown = sorted(str(k) for k in entry if k not in SUPPORT_FIELDS)
+        if unknown:
+            hint = difflib.get_close_matches(unknown[0], SUPPORT_FIELDS, n=1)
+            return {}, key, (f"{label} has unknown key {unknown[0]!r}"
+                             + (f" (did you mean {hint[0]!r}?)" if hint else "")
+                             + f"; an entry takes {', '.join(SUPPORT_FIELDS)} only")
+        kind = entry.get("supports")
+        if kind not in SUPPORT_KINDS:
+            return {}, key, (f"{label} supports is {kind!r}; say one of "
+                             f"{', '.join(SUPPORT_KINDS)}")
+        reason = entry.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            return {}, key, (f"{label} has no reason: a part stated to print on support "
+                             f"with no reason is one nobody can check when it changes")
+        if kind != "none":
+            out[clean] = (kind, reason.strip())
+    return out, key, ""
+
+
+def _supports_error(gate_id: str, message: str) -> Verdict:
+    return Verdict(gate=gate_id, passed=False, error=message)
+
+
+def _mover_support(ctx: GateContext, parts):
+    """``(support, unused, error)`` on the single-mesh path: the one mesh's entry.
+
+    ``parts`` is the stated part set, empty or with no mesh in it (a set of boxes
+    hands the face gates back to the one mesh). The names a statement may use are
+    that mesh's and the set's: what slipped through with the mesh's name alone
+    was a correct statement for a set of boxes and one mesh, ``{shelf, lid}``,
+    refused as a misspelt ``lid`` and the gate ERRORed; deleting the lid's entry
+    was the only way out, and the gate refused that edit once the lid's mesh was
+    added. Only the mesh's entry is applied, and ``unused`` says which entries
+    were not, so a reader does not take them as judged.
+    """
+    name = PARTS.mover(ctx)
+    names = [name, *(p.name for p in parts if p.name != name)]
+    supported, key, problem = _read_supports(ctx, names)
+    if problem:
+        return None, "", problem
+    others = [n for n in names if n in supported and n != name]
+    unused = ""
+    if others:
+        shown = ", ".join(others[:FOLD.MAX_NAMES_INLINE])
+        more = len(others) - FOLD.MAX_NAMES_INLINE
+        unused = (f"; {key} for {shown}" + (f" and {more} more" if more > 0 else "")
+                  + " not used (no mesh)")
+    return supported.get(name), unused, ""
+
+
+def _cavity_faces(mesh):
+    """Mask of the faces on an ENCLOSED VOID: a closed shell of the part wound inward.
+
+    Support stands on the bed or on the part below a face, so every downward face
+    a support can reach has open air under it that joins the outside. A face on
+    the surface of a void sealed inside the part has none: no support can be put
+    there, and none taken out. That is the one face a supports statement cannot
+    carry, and it is still judged as if printed without support.
+
+    A void is a face-connected shell whose signed volume is negative (its faces
+    point into it). Connected components by hooking and pointer jumping over
+    ``face_adjacency``, numpy only: the mesh gates declare trimesh and numpy, and
+    trimesh's own ``split`` needs a graph engine that neither depends on.
+
+    Not detected: a pocket open to the outside by a hole too small to clear the
+    support from it. That is removal, which PACK.md says this pack does not check.
+    """
+    import numpy as np                                 # noqa: PLC0415
+
+    n = len(mesh.faces)
+    labels = np.arange(n)
+    adj = np.asarray(mesh.face_adjacency, dtype=int).reshape(-1, 2)
+    if len(adj):
+        a, b = adj[:, 0], adj[:, 1]
+        while True:
+            m = np.minimum(labels[a], labels[b])
+            new = labels.copy()
+            for idx in (a, b, labels[a], labels[b]):
+                np.minimum.at(new, idx, m)
+            while True:
+                jumped = new[new]
+                if np.array_equal(jumped, new):
+                    break
+                new = jumped
+            if np.array_equal(new, labels):
+                break
+            labels = new
+    tri = np.asarray(mesh.triangles, dtype=float)
+    signed = np.einsum("ij,ij->i", tri[:, 0], np.cross(tri[:, 1], tri[:, 2])) / 6.0
+    shell = np.bincount(labels, weights=signed, minlength=n)
+    return shell[labels] < 0.0
+
+
 # --------------------------------------------------------------------------- #
 # fdm.overhang
 # --------------------------------------------------------------------------- #
 @gate(
     id="fdm.overhang",
     title="Unsupported faces within the printable overhang angle",
-    claims=["manufacturability", "fdm", "additive", "printability"],
+    claims=["manufacturability", "fdm", "additive", "printability", "overhang"],
     tier=Tier.BUILD,
     settles="overhang angle",
     requires_python=["trimesh", "numpy"],
@@ -484,6 +597,11 @@ def overhang(ctx: GateContext) -> Verdict:
     that is the number that decides whether the part is printable. The angle is in
     the verdict so a human can tell a nub from a surface without opening the mesh.
 
+    A face counts past the limit only when it leans more than
+    ``OVERHANG_TESSELLATION_TOL_DEG`` past it: a chamfer drawn at the rule leans a
+    few hundredths of a degree past it once tessellated (the constant says what
+    slipped through without it).
+
     Two classes of face are excluded, both deliberately:
 
     * **First-layer faces.** The bottom of the part is a 90 deg overhang onto the
@@ -499,9 +617,17 @@ def overhang(ctx: GateContext) -> Verdict:
     on it. So the verdict reports BOTH: the worst angle this gate judged, and the
     steepest downward face on the part regardless of who owns it.
 
-    It also refuses to run at all when ``overhang_limit_deg`` is set at or past
-    ``bridge_ceiling_deg``, because the two selections then have no gap between
-    them and no geometry can trip the gate — see :func:`_inert_overhang`.
+    It also refuses to run at all when ``overhang_limit_deg`` plus the
+    tessellation tolerance reaches ``bridge_ceiling_deg``, because the two
+    selections then have no gap between them and no geometry can trip the gate —
+    see :func:`_inert_overhang`.
+
+    **A part stated to print on support** (``supports_by_part``) changes the
+    question from "prints without support" to "prints on the stated support": its
+    faces past the limit are carried by the support and reported as such, and only
+    a face the support cannot reach — one on a void sealed inside the part
+    (:func:`_cavity_faces`) — is judged. The statement is in every verdict that
+    uses it.
 
     Given a part SET (``mesh_paths`` / ``parts``) it measures every member and
     returns one verdict naming the worst — see :func:`_overhang_over_set`. With a
@@ -518,6 +644,8 @@ def overhang(ctx: GateContext) -> Verdict:
                         OVERHANG_AREA_ALLOW_FRAC_DEFAULT))
     ceiling_deg = float(_look(ctx, ("bridge_ceiling_deg",),
                               BRIDGE_CEILING_DEG_DEFAULT))
+    tol = float(_look(ctx, ("overhang_tessellation_tol_deg",),
+                      OVERHANG_TESSELLATION_TOL_DEG))
 
     # Many parts, one verdict. Resolved before anything is opened, because the set
     # decides WHICH files get opened. An empty set means the projection describes
@@ -529,18 +657,25 @@ def overhang(ctx: GateContext) -> Verdict:
     # normal. Measuring the single stated mesh is strictly more informative than
     # reporting N unmeasurable parts, so the set is only taken when it can answer.
     if parts and PARTS.has_geometry(parts):
-        if limit >= ceiling_deg:
-            return _inert_overhang(limit, ceiling_deg)
-        return _overhang_over_set(ctx, parts, axis, limit, allow, ceiling_deg)
+        if limit + tol >= ceiling_deg:
+            return _inert_overhang(limit, ceiling_deg, tol)
+        supported, _key, problem = _read_supports(ctx, [p.name for p in parts])
+        if problem:
+            return _supports_error("fdm.overhang", problem)
+        return _overhang_over_set(ctx, parts, axis, limit, allow, ceiling_deg, tol,
+                                  supported)
 
     mesh, mesh_path, bail = _load_mesh(ctx, "fdm.overhang")
     if bail is not None:
         return bail
 
-    if limit >= ceiling_deg:
-        return _inert_overhang(limit, ceiling_deg)
+    if limit + tol >= ceiling_deg:
+        return _inert_overhang(limit, ceiling_deg, tol)
+    support, unused, problem = _mover_support(ctx, parts)
+    if problem:
+        return _supports_error("fdm.overhang", problem)
 
-    m = _overhang_measure(mesh, axis, limit, ceiling_deg)
+    m = _overhang_measure(mesh, axis, limit, ceiling_deg, tol, support)
     report = _overhang_faces_file(ctx, ("fdm-overhang.txt",), mesh, mesh_path,
                                   axis, limit, m)
 
@@ -561,44 +696,51 @@ def overhang(ctx: GateContext) -> Verdict:
         measured=round(m["frac"], 5),
         limit=round(allow, 5), comparator="<=",
         units="area fraction",
-        detail=_overhang_note(m, limit, allow, ceiling_deg),
+        detail=_overhang_note(m, limit, allow, ceiling_deg, tol) + unused,
         evidence=[report],
         locators=locators,
     )
 
 
-def _inert_overhang(limit: float, ceiling_deg: float) -> Verdict:
+def _inert_overhang(limit: float, ceiling_deg: float, tol: float = 0.0) -> Verdict:
     """Not a measurement, a refusal.
 
-    Every face past ``limit`` is also past ``ceiling_deg``, so it is handed to
-    ``fdm.bridge_span`` as a ceiling and this gate's selection is empty by
-    construction: it would return "0 faces past it, 0.00% of surface" on a part
-    made entirely of 90 deg overhangs and call that a pass. A gate that cannot
-    fail is a logger (rule 5), so it says so instead of returning a green it has
-    not earned.
+    Every face past ``limit`` (plus the tessellation tolerance) is also past
+    ``ceiling_deg``, so it is handed to ``fdm.bridge_span`` as a ceiling and this
+    gate's selection is empty by construction: it would return "0 faces past it,
+    0.00% of surface" on a part made entirely of 90 deg overhangs and call that a
+    pass. A gate that cannot fail is a logger (rule 5), so it says so instead of
+    returning a green it has not earned.
 
     It is a property of the configuration and not of any one part, so a set of
     thirteen is refused once rather than thirteen times — and refused before any
     mesh is opened, because none of them could change the answer.
     """
     return Verdict(
-        gate="fdm.overhang", passed=False, measured=round(limit, 1),
+        gate="fdm.overhang", passed=False, measured=round(limit + tol, 1),
         limit=round(ceiling_deg, 1), comparator="<", units="deg",
-        detail=f"INERT CONFIGURATION: overhang_limit_deg {limit:.0f} is at or past "
-               f"bridge_ceiling_deg {ceiling_deg:.0f}, so every face this gate could "
-               f"fail on is already excluded as a ceiling and no geometry can ever "
-               f"trip it. Lower overhang_limit_deg below bridge_ceiling_deg, or "
-               f"raise bridge_ceiling_deg if the machine really does bridge from "
-               f"{limit:.0f} deg",
+        detail=f"INERT CONFIGURATION: overhang_limit_deg {limit:.0f}"
+               + (f" plus the {tol:g} deg tessellation tolerance" if tol else "")
+               + f" is at or past bridge_ceiling_deg {ceiling_deg:.0f}, so every face "
+               f"this gate could fail on is already excluded as a ceiling and no "
+               f"geometry can ever trip it. Lower overhang_limit_deg below "
+               f"bridge_ceiling_deg, or raise bridge_ceiling_deg if the machine really "
+               f"does bridge from {limit:.0f} deg",
     )
 
 
-def _overhang_measure(mesh, axis, limit: float, ceiling_deg: float) -> dict:
+def _overhang_measure(mesh, axis, limit: float, ceiling_deg: float, tol: float = 0.0,
+                      support=None) -> dict:
     """Every number this gate reports, for one mesh. It decides nothing.
 
     Split out of the gate body so the one-part path and the many-part path run
     the same measurement rather than two that can drift (rule 2). The gate
     applies the threshold; this says what the part is.
+
+    A face is past the limit when it leans more than ``limit + tol``. With
+    ``support`` (``(kind, reason)``, the part's statement) the faces past the limit
+    that a support can reach are ``carried`` and leave the judged area: only the
+    faces on a sealed void stay in ``past``.
 
     Two classes of face are excluded, both deliberately:
 
@@ -614,7 +756,12 @@ def _overhang_measure(mesh, axis, limit: float, ceiling_deg: float) -> dict:
     bed = _on_bed(mesh, axis)
 
     ceilings = (angles >= ceiling_deg) & (~bed)      # bridges, not supports
-    past = (angles > limit) & (~ceilings) & (~bed)
+    beyond = (angles > limit + tol) & (~ceilings) & (~bed)
+    if support is not None:
+        past = beyond & _cavity_faces(mesh)
+    else:
+        past = beyond
+    carried = beyond & ~past
     n_past = int(past.sum())
     area_past = float(areas[past].sum())
     frac = area_past / total_area if total_area > 0 else 0.0
@@ -629,23 +776,39 @@ def _overhang_measure(mesh, axis, limit: float, ceiling_deg: float) -> dict:
     return {
         "angles": angles, "areas": areas, "past": past, "n_past": n_past,
         "area_past": area_past, "total_area": total_area, "frac": frac,
-        "worst": worst, "worst_all": worst_all,
+        "worst": worst, "worst_all": worst_all, "tol": tol, "support": support,
+        "n_carried": int(carried.sum()), "area_carried": float(areas[carried].sum()),
         "n_ceilings": int(ceilings.sum()), "n_faces": int(len(mesh.faces)),
     }
 
 
-def _overhang_note(m: dict, limit: float, allow: float, ceiling_deg: float) -> str:
+def _support_note(m: dict) -> str:
+    """What a part stated to print on support says, or ``""``."""
+    if m.get("support") is None:
+        return ""
+    kind, reason = m["support"]
+    short = reason if len(reason) <= 60 else reason[:57] + "..."
+    # Kept short: the spine caps a detail at 500 characters, and the clause after
+    # it (``_mover_support``'s entries not used) must fit beside the overhang note.
+    return (f"; prints on stated {kind} support ({short}): {m['n_carried']} face(s), "
+            f"{m['area_carried']:.1f} mm^2, past the limit are carried by it; the "
+            f"{m['n_past']} judged are on a sealed void")
+
+
+def _overhang_note(m: dict, limit: float, allow: float, ceiling_deg: float,
+                   tol: float = 0.0) -> str:
     """The dense line this gate says about one part.
 
     Verbatim in a single-part verdict; the worst part's copy of it is the
     headline of a multi-part one.
     """
-    return (f"worst supportable face {m['worst']:.1f} deg vs {limit:.0f} deg limit; "
+    return (f"worst supportable face {m['worst']:.1f} deg vs {limit:.0f} deg limit "
+            f"(+{tol:g} deg tessellation tolerance); "
             f"{m['n_past']} faces past it covering {m['area_past']:.1f} mm^2 = "
             f"{m['frac'] * 100:.2f}% of surface (allowance {allow * 100:.2f}%); "
             f"steepest downward face on the part {m['worst_all']:.1f} deg, "
             f"{m['n_ceilings']} at or past {ceiling_deg:.0f} deg excluded as "
-            f"ceilings — they are fdm.bridge_span's")
+            f"ceilings — they are fdm.bridge_span's" + _support_note(m))
 
 
 def _overhang_faces_file(ctx: GateContext, where, mesh, mesh_path, axis,
@@ -658,10 +821,15 @@ def _overhang_faces_file(ctx: GateContext, where, mesh, mesh_path, axis,
     order = np.argsort(-angles * past)
     with open(report, "w", encoding="utf-8") as fh:
         fh.write(f"# fdm.overhang — {mesh_path}\n")
-        fh.write(f"# build axis {axis}, limit {limit} deg, {m['n_faces']} faces, "
+        fh.write(f"# build axis {axis}, limit {limit} deg + {m.get('tol', 0.0)} deg "
+                 f"tessellation tolerance, {m['n_faces']} faces, "
                  f"{m['total_area']:.1f} mm^2 total surface\n")
         fh.write(f"# {m['n_past']} faces past the limit, {m['area_past']:.2f} mm^2 "
                  f"({m['frac'] * 100:.3f}% of surface)\n")
+        if m.get("support") is not None:
+            fh.write(f"# prints on stated {m['support'][0]} support: {m['n_carried']} "
+                     f"face(s), {m['area_carried']:.2f} mm^2, carried by it; the faces "
+                     f"below are on a sealed void\n")
         fh.write("face_index\tangle_deg\tarea_mm2\tcentroid_x\tcentroid_y\tcentroid_z\n")
         centroids = mesh.triangles_center
         for i in order[:200]:
@@ -715,8 +883,24 @@ def _overhang_face_locators(mesh, m: dict, limit: float, node: str,
     return locators
 
 
+def _supported_clause(parts, supported: dict) -> str:
+    """The set verdict's word on the parts stated to print on support, or ``""``.
+
+    A part judged on its stated support is a part this verdict did NOT judge as
+    printing without it, and a reader of a pass must see which ones those are.
+    """
+    named = [f"{p.name} ({supported[p.name][0]})" for p in parts if p.name in supported]
+    if not named:
+        return ""
+    shown = ", ".join(named[:FOLD.MAX_NAMES_INLINE])
+    more = len(named) - FOLD.MAX_NAMES_INLINE
+    return (f"{len(named)} of {len(parts)} part(s) print on stated support: {shown}"
+            + (f" and {more} more" if more > 0 else ""))
+
+
 def _overhang_over_set(ctx: GateContext, parts, axis, limit: float, allow: float,
-                       ceiling_deg: float) -> Verdict:
+                       ceiling_deg: float, tol: float = 0.0,
+                       supported: dict | None = None) -> Verdict:
     """Every part in the set measured, one verdict, the worst part named.
 
     Each part gets the same measurement the single-part path runs. The per-part
@@ -725,6 +909,7 @@ def _overhang_over_set(ctx: GateContext, parts, axis, limit: float, allow: float
     about was in the set at all — which is the question the "compute the worst
     part in the model and hand that one over" workaround could never answer.
     """
+    supported = supported or {}
     outcomes = []
     faces_files: list[str] = []
     for part in parts:
@@ -745,7 +930,8 @@ def _overhang_over_set(ctx: GateContext, parts, axis, limit: float, allow: float
                                   label="not a solid — every overhang angle read "
                                         "off it would be a fiction")]))
             continue
-        m = _overhang_measure(mesh, axis, limit, ceiling_deg)
+        m = _overhang_measure(mesh, axis, limit, ceiling_deg, tol,
+                              supported.get(part.name))
         score = (m["frac"] / allow) if allow > 0 else (
             float("inf") if m["frac"] > 0 else 0.0)
         locators: list[Locator] = []
@@ -755,29 +941,40 @@ def _overhang_over_set(ctx: GateContext, parts, axis, limit: float, allow: float
             locators = _overhang_face_locators(mesh, m, limit, part.node, 1)
             faces_files.append(_overhang_faces_file(
                 ctx, ("fdm-overhang", f"{part.name}.txt"), mesh, path, axis, limit, m))
+        support = (f", on stated {m['support'][0]} support carrying {m['n_carried']} "
+                   f"face(s)" if m["support"] is not None else "")
         outcomes.append(FOLD.measured_part(
             part.name, score=score, measured=round(m["frac"], 5),
             limit=round(allow, 5),
+            # The tolerance beside the limit it widens. What slipped through: the
+            # set's headline said "past the 45 deg limit", and only the evidence
+            # table's header said faces to 45.5 deg were forgiven, while PACK.md
+            # said every verdict states it. The worst part's note is the headline.
             note=f"at {m['frac'] * 100:.2f}% of surface past the {limit:.0f} deg "
-                 f"limit vs {allow * 100:.2f}% allowed (worst face {m['worst']:.1f} "
-                 f"deg, {m['n_past']} faces, {m['area_past']:.1f} mm^2)",
+                 f"limit (+{tol:g} deg tessellation tolerance) vs {allow * 100:.2f}% "
+                 f"allowed (worst face {m['worst']:.1f} deg, {m['n_past']} faces, "
+                 f"{m['area_past']:.1f} mm^2{support})",
             path=path,
             row=f"{m['frac']:.5f}\t{m['worst']:.2f}\t{m['worst_all']:.2f}\t"
-                f"{m['n_past']}\t{m['area_past']:.2f}\t{m['total_area']:.1f}",
+                f"{m['n_past']}\t{m['area_past']:.2f}\t{m['total_area']:.1f}\t"
+                f"{m['support'][0] if m['support'] else 'none'}\t{m['n_carried']}",
             locators=locators))
 
     summary = FOLD.write_table(
         ctx, "fdm-overhang-parts.txt", "fdm.overhang", parts.source, outcomes,
         header_lines=[
-            f"build axis {axis}, limit {limit} deg, allowance {allow * 100:.2f}% of "
-            f"surface; faces at or past {ceiling_deg:.0f} deg are ceilings and belong "
-            f"to fdm.bridge_span",
+            f"build axis {axis}, limit {limit} deg + {tol:g} deg tessellation "
+            f"tolerance, allowance {allow * 100:.2f}% of surface; faces at or past "
+            f"{ceiling_deg:.0f} deg are ceilings and belong to fdm.bridge_span",
+            "a part on stated support is judged only on the faces of a sealed void; "
+            "faces_carried is what its support carries",
         ],
         columns=("area_frac\tworst_deg\tworst_downward_deg\tfaces_past\t"
-                 "area_past_mm2\ttotal_area_mm2"))
+                 "area_past_mm2\ttotal_area_mm2\tsupport\tfaces_carried"))
     return FOLD.fold(
         "fdm.overhang", outcomes, source=parts.source, units="area fraction",
-        quantity="overhanging area", evidence=[summary, *faces_files[:3]])
+        quantity="overhanging area", evidence=[summary, *faces_files[:3]],
+        extra_detail=_supported_clause(parts, supported))
 
 
 # --------------------------------------------------------------------------- #
@@ -786,7 +983,7 @@ def _overhang_over_set(ctx: GateContext, parts, axis, limit: float, allow: float
 @gate(
     id="fdm.bridge_span",
     title="Unsupported horizontal spans within the bridgeable maximum",
-    claims=["manufacturability", "fdm", "additive", "printability"],
+    claims=["manufacturability", "fdm", "additive", "printability", "bridge-span"],
     tier=Tier.BUILD,
     settles="bridge span",   # and the cantilever case, which is the same measurement
     requires_python=["trimesh", "numpy"],
@@ -817,7 +1014,8 @@ def bridge_span(ctx: GateContext) -> Verdict:
        ``BRIDGE_CEILING_DEG_DEFAULT``. These are ceilings. Faces in the first
        layer are excluded; they are the bed.
     2. Group them into connected regions by shared edges. One region is one
-       ceiling.
+       ceiling. A region smaller than one bead's footprint (:func:`_ceiling_floor`)
+       is listed and not judged: it is less than one line of extrusion.
     3. Find each region's boundary edges, and call an edge **anchored** when the
        face on the other side of it descends — that is where the ceiling meets a
        wall that carries it down to material below. A boundary edge whose
@@ -847,7 +1045,13 @@ def bridge_span(ctx: GateContext) -> Verdict:
     find a span that only exists between two separately-printed islands. A region
     with no anchored edge at all — a ceiling hanging off nothing — is reported as
     UNANCHORED against a limit of zero, because no span is short enough to save a
-    ceiling that lands on nothing at all.
+    ceiling that lands on nothing at all; the bead floor above keeps a sliver of
+    tessellation from being that region.
+
+    **A part stated to print on support** (``supports_by_part``): its ceiling
+    regions are carried by the support, listed as such and not judged, except a
+    region on a void sealed inside the part, which no support reaches and which
+    is judged as above (see ``fdm.overhang``).
 
     What this does NOT settle: whether the bridge will *look* acceptable, or
     whether a dimensional feature on the bridged face survives. A 25 mm bridge
@@ -860,42 +1064,51 @@ def bridge_span(ctx: GateContext) -> Verdict:
                                    MAX_CANTILEVER_MM_DEFAULT))
     ceiling_deg = float(_look(ctx, ("bridge_ceiling_deg",),
                               BRIDGE_CEILING_DEG_DEFAULT))
+    floor_mm2, floor_src = _ceiling_floor(ctx)
 
     # Many parts, one verdict; an empty set means one part and the original path.
     parts = PARTS.part_set(ctx)
     if parts.problem:
         return _skip("fdm.bridge_span", parts.problem)
     if parts and PARTS.has_geometry(parts):
-        return _bridge_over_set(ctx, parts, axis, limit, cantilever_limit, ceiling_deg)
+        supported, _key, problem = _read_supports(ctx, [p.name for p in parts])
+        if problem:
+            return _supports_error("fdm.bridge_span", problem)
+        return _bridge_over_set(ctx, parts, axis, limit, cantilever_limit, ceiling_deg,
+                                floor_mm2, floor_src, supported)
 
     mesh, mesh_path, bail = _load_mesh(ctx, "fdm.bridge_span")
     if bail is not None:
         return bail
+    support, unused, problem = _mover_support(ctx, parts)
+    if problem:
+        return _supports_error("fdm.bridge_span", problem)
 
-    m = _bridge_measure(mesh, axis, limit, cantilever_limit, ceiling_deg)
+    m = _bridge_measure(mesh, axis, limit, cantilever_limit, ceiling_deg, floor_mm2,
+                        support)
     if m["n_sel"] == 0:
         return Verdict(
             gate="fdm.bridge_span", passed=True, measured=0.0, limit=round(limit, 2), comparator="<=",
             units="mm",
             detail=f"no ceiling faces at or past {ceiling_deg:.0f} deg off the bed — "
-                   f"nothing to bridge ({m['n_faces']} faces checked)",
+                   f"nothing to bridge ({m['n_faces']} faces checked)" + unused,
         )
 
     report = _bridge_regions_file(ctx, ("fdm-bridge-span.txt",), mesh_path, axis,
-                                 limit, cantilever_limit, ceiling_deg, m)
+                                 limit, cantilever_limit, ceiling_deg, m, floor_mm2)
     return Verdict(
         gate="fdm.bridge_span",
         passed=m["worst_ratio"] <= 1.0,
         measured=round(m["worst_span"], 2),
         limit=round(m["worst_limit"], 2), comparator="<=",
         units="mm",
-        detail=_bridge_note(m, limit, cantilever_limit),
+        detail=_bridge_note(m, limit, cantilever_limit, floor_mm2, floor_src) + unused,
         evidence=[report],
     )
 
 
 def _bridge_measure(mesh, axis, limit: float, cantilever_limit: float,
-                    ceiling_deg: float) -> dict:
+                    ceiling_deg: float, floor_mm2: float = 0.0, support=None) -> dict:
     """The span measurement for one mesh. It decides nothing.
 
     Split out of the gate body so the one-part path and the many-part path run
@@ -907,6 +1120,12 @@ def _bridge_measure(mesh, axis, limit: float, cantilever_limit: float,
     own allowance they are. A region with no anchor at all has a limit of zero
     and a ratio of infinity — no span is short enough to save a ceiling that
     lands on nothing.
+
+    Two kinds of region are listed and not judged, so neither can be the worst:
+    one smaller than ``floor_mm2`` (one bead's footprint; ``CEILING_FLOOR_WIDTH_MM_DEFAULT``
+    says what slipped through without it), and, with ``support`` stated, one a
+    support reaches (every region not on a sealed void). The table lists the
+    judged regions first, worst first.
     """
     import numpy as np                                 # noqa: PLC0415
 
@@ -916,7 +1135,8 @@ def _bridge_measure(mesh, axis, limit: float, cantilever_limit: float,
     blank = {"n_sel": 0, "n_faces": int(len(mesh.faces)), "n_regions": 0,
              "worst_ratio": 0.0, "worst_span": 0.0, "worst_limit": limit,
              "worst_note": "no ceiling region", "worst_area": 0.0, "worst_h": 0.0,
-             "rows": []}
+             "rows": [], "n_small": 0, "n_carried": 0, "n_judged": 0,
+             "support": support}
     if n_sel == 0:
         return blank
 
@@ -963,13 +1183,28 @@ def _bridge_measure(mesh, axis, limit: float, cantilever_limit: float,
 
     centroids = mesh.triangles_center
     areas = mesh.area_faces
+    void = _cavity_faces(mesh) if support is not None else None
     worst_ratio = -1.0
     worst_span, worst_note, worst_area, worst_h = 0.0, "no ceiling region", 0.0, 0.0
     worst_limit = limit
-    rows: list[str] = []
+    ranked: list[tuple] = []
+    n_small = n_carried = 0
 
     for root, faces in regions.items():
         faces_arr = np.asarray(faces)
+        area = float(areas[faces_arr].sum())
+        z = float((centroids[faces_arr] @ b).mean())
+        if area < floor_mm2:
+            n_small += 1
+            ranked.append(((2, 0.0), f"{len(faces_arr)}\t{area:.4f}\t{z:.2f}\t\t\t"
+                                     f"UNDER ONE BEAD ({floor_mm2:.3f} mm^2), not judged"))
+            continue
+        if void is not None and not bool(void[faces_arr].any()):
+            n_carried += 1
+            ranked.append(((1, -area), f"{len(faces_arr)}\t{area:.2f}\t{z:.2f}\t\t\t"
+                                       f"CARRIED BY THE STATED {support[0].upper()} "
+                                       f"SUPPORT, not judged"))
+            continue
         region_mask = np.zeros(len(mesh.faces), dtype=bool)
         region_mask[faces_arr] = True
 
@@ -997,9 +1232,6 @@ def _bridge_measure(mesh, axis, limit: float, cantilever_limit: float,
         for a, c in ((0, 1), (1, 2), (2, 0)):
             samples = np.vstack((samples, 0.5 * (plane[tri[:, a]] + plane[tri[:, c]])))
 
-        area = float(areas[faces_arr].sum())
-        z = float((centroids[faces_arr] @ b).mean())
-
         if not anchors:
             lo, hi = samples.min(axis=0), samples.max(axis=0)
             span = float(np.linalg.norm(hi - lo))
@@ -1026,42 +1258,82 @@ def _bridge_measure(mesh, axis, limit: float, cantilever_limit: float,
                 # free tip of a cantilever and the span is its projection, once.
                 span, region_limit = reach, cantilever_limit
                 note = f"CANTILEVER, {len(anchors)} anchored edge(s) all to one side"
+        if void is not None:
+            note += ", on a sealed void no support reaches"
 
         ratio = (span / region_limit) if region_limit > 0 else (
             float("inf") if span > 0 else 0.0)
-        rows.append(f"{len(faces_arr)}\t{area:.2f}\t{z:.2f}\t{span:.2f}\t"
-                    f"{region_limit:.2f}\t{note}")
+        ranked.append(((0, -ratio), f"{len(faces_arr)}\t{area:.2f}\t{z:.2f}\t{span:.2f}\t"
+                                    f"{region_limit:.2f}\t{note}"))
         if ratio > worst_ratio:
             worst_ratio = ratio
             worst_span, worst_note, worst_area, worst_h = span, note, area, z
             worst_limit = region_limit
 
+    n_judged = len(regions) - n_small - n_carried
+    if n_judged == 0:
+        worst_ratio, worst_span, worst_limit = 0.0, 0.0, limit
+        worst_note = "no ceiling region judged"
+    rows = [row for _key, row in sorted(ranked, key=lambda kr: kr[0])]
     return {"n_sel": n_sel, "n_faces": int(len(mesh.faces)), "n_regions": len(regions),
             "worst_ratio": worst_ratio, "worst_span": worst_span,
             "worst_limit": worst_limit, "worst_note": worst_note,
-            "worst_area": worst_area, "worst_h": worst_h, "rows": rows}
+            "worst_area": worst_area, "worst_h": worst_h, "rows": rows,
+            "n_small": n_small, "n_carried": n_carried, "n_judged": n_judged,
+            "support": support}
 
 
-def _bridge_note(m: dict, limit: float, cantilever_limit: float) -> str:
-    """The dense line this gate says about one part."""
+def _floor_note(floor_mm2: float, floor_src: str) -> str:
+    """The bead floor and where it came from, said in every verdict that judges a
+    ceiling region, pass or fail.
+
+    What slipped through: the floor was said only when a region fell under it, so
+    a pass read as if every region had been judged, and PACK.md said every verdict
+    states it. A reader of a pass must see what is never judged.
+    """
+    return f"a region under {floor_mm2:.3f} mm^2 ({floor_src}) is not judged"
+
+
+def _unjudged_note(m: dict) -> str:
+    """The regions listed and not judged, counted, or ``""``. The floor itself is
+    :func:`_floor_note`'s, said once."""
+    out = ""
+    if m.get("n_small"):
+        out += f"; {m['n_small']} region(s) under one bead's footprint not judged"
+    if m.get("n_carried"):
+        kind, reason = m["support"]
+        short = reason if len(reason) <= 60 else reason[:57] + "..."
+        out += (f"; {m['n_carried']} region(s) carried by the stated {kind} support "
+                f"({short}), not judged")
+    return out
+
+
+def _bridge_note(m: dict, limit: float, cantilever_limit: float,
+                 floor_mm2: float, floor_src: str) -> str:
+    """The dense line this gate says about one part, the bead floor always in it."""
+    floor = "; " + _floor_note(floor_mm2, floor_src)
+    if m.get("n_judged", 1) == 0:
+        return (f"no ceiling region judged: {m['n_regions']} region(s) from "
+                f"{m['n_sel']} faces" + floor + _unjudged_note(m))
     limit_note = ("no span is acceptable" if m["worst_limit"] <= 0
                   else f"{m['worst_limit']:.0f} mm limit")
     return (f"worst unsupported span {m['worst_span']:.1f} mm vs {limit_note} "
             f"({m['worst_note']}) on a {m['worst_area']:.0f} mm^2 ceiling at "
             f"{m['worst_h']:.1f} mm; {m['n_regions']} ceiling region(s) from "
             f"{m['n_sel']} faces, bridges judged at {limit:.0f} mm and cantilevers "
-            f"at {cantilever_limit:.0f} mm")
+            f"at {cantilever_limit:.0f} mm" + floor + _unjudged_note(m))
 
 
 def _bridge_regions_file(ctx: GateContext, where, mesh_path, axis, limit: float,
                          cantilever_limit: float, ceiling_deg: float,
-                         m: dict) -> str:
-    """The per-region table for one part."""
+                         m: dict, floor_mm2: float = 0.0) -> str:
+    """The per-region table for one part, judged regions first, worst first."""
     report = ctx.out_path(*where)
     with open(report, "w", encoding="utf-8") as fh:
         fh.write(f"# fdm.bridge_span — {mesh_path}\n")
         fh.write(f"# build axis {axis}, ceiling >= {ceiling_deg} deg, bridge limit "
-                 f"{limit} mm, cantilever limit {cantilever_limit} mm\n")
+                 f"{limit} mm, cantilever limit {cantilever_limit} mm, regions under "
+                 f"{floor_mm2:.4f} mm^2 not judged\n")
         fh.write(f"# {m['n_regions']} ceiling region(s) from {m['n_sel']} faces\n")
         fh.write("faces\tarea_mm2\theight_mm\tspan_mm\tlimit_mm\tanchoring\n")
         fh.write("\n".join(m["rows"]) + "\n")
@@ -1069,7 +1341,9 @@ def _bridge_regions_file(ctx: GateContext, where, mesh_path, axis, limit: float,
 
 
 def _bridge_over_set(ctx: GateContext, parts, axis, limit: float,
-                     cantilever_limit: float, ceiling_deg: float) -> Verdict:
+                     cantilever_limit: float, ceiling_deg: float,
+                     floor_mm2: float = 0.0, floor_src: str = "",
+                     supported: dict | None = None) -> Verdict:
     """Every part in the set measured, one verdict, the worst part named.
 
     The locator here is a ``part`` pin and not a point, and that is the honest
@@ -1080,6 +1354,7 @@ def _bridge_over_set(ctx: GateContext, parts, axis, limit: float,
     the answer the reader needs — it was not available at all while the gate
     judged one part handed to it by the model.
     """
+    supported = supported or {}
     outcomes = []
     region_files: list[str] = []
     for part in parts:
@@ -1100,13 +1375,16 @@ def _bridge_over_set(ctx: GateContext, parts, axis, limit: float,
                                   label="not a solid — no span read off it would "
                                         "mean anything")]))
             continue
-        m = _bridge_measure(mesh, axis, limit, cantilever_limit, ceiling_deg)
-        if m["n_sel"] == 0:
+        m = _bridge_measure(mesh, axis, limit, cantilever_limit, ceiling_deg, floor_mm2,
+                            supported.get(part.name))
+        if m["n_sel"] == 0 or m["n_judged"] == 0:
+            why = (f"has no ceiling face at or past {ceiling_deg:.0f} deg off the bed — "
+                   f"nothing to bridge" if m["n_sel"] == 0 else
+                   "has no ceiling region judged" + _unjudged_note(m))
             outcomes.append(FOLD.measured_part(
                 part.name, score=0.0, measured=0.0, limit=round(limit, 2),
-                note=f"has no ceiling face at or past {ceiling_deg:.0f} deg off the "
-                     f"bed — nothing to bridge",
-                path=path, row=f"0.00\t{limit:.2f}\t0\tno ceiling region"))
+                note=why, path=path,
+                row=f"0.00\t{limit:.2f}\t{m['n_regions']}\tno ceiling region judged"))
             continue
         ratio = m["worst_ratio"]
         locators: list[Locator] = []
@@ -1118,7 +1396,7 @@ def _bridge_over_set(ctx: GateContext, parts, axis, limit: float,
                       f"{m['worst_limit']:.0f} mm ({m['worst_note'].split(',')[0]})")]
             region_files.append(_bridge_regions_file(
                 ctx, ("fdm-bridge-span", f"{part.name}.txt"), path, axis, limit,
-                cantilever_limit, ceiling_deg, m))
+                cantilever_limit, ceiling_deg, m, floor_mm2))
         limit_note = ("no span is acceptable" if m["worst_limit"] <= 0
                       else f"{m['worst_limit']:.0f} mm limit")
         outcomes.append(FOLD.measured_part(
@@ -1126,7 +1404,7 @@ def _bridge_over_set(ctx: GateContext, parts, axis, limit: float,
             limit=round(m["worst_limit"], 2),
             note=f"at {m['worst_span']:.1f} mm unsupported vs {limit_note} "
                  f"({m['worst_note']}) on a {m['worst_area']:.0f} mm^2 ceiling at "
-                 f"{m['worst_h']:.1f} mm",
+                 f"{m['worst_h']:.1f} mm" + _unjudged_note(m),
             path=path,
             row=f"{m['worst_span']:.2f}\t{m['worst_limit']:.2f}\t{m['n_regions']}\t"
                 f"{m['worst_note']}",
@@ -1137,13 +1415,16 @@ def _bridge_over_set(ctx: GateContext, parts, axis, limit: float,
         header_lines=[
             f"build axis {axis}, ceiling >= {ceiling_deg:.0f} deg, bridges judged at "
             f"{limit:.0f} mm, cantilevers at {cantilever_limit:.0f} mm, unanchored "
-            f"ceilings at 0 mm",
+            f"ceilings at 0 mm; a region under {floor_mm2:.3f} mm^2 ({floor_src}) or "
+            f"carried by a stated support is not judged",
             "score is span / the limit that applies to that region, so a bridge and "
             "a cantilever are comparable",
         ],
         columns="worst_span_mm\tits_limit_mm\tregions\tanchoring")
+    extra = (f"bridges judged at {limit:.0f} mm, cantilevers at "
+             f"{cantilever_limit:.0f} mm; " + _floor_note(floor_mm2, floor_src))
+    clause = _supported_clause(parts, supported)
     return FOLD.fold(
         "fdm.bridge_span", outcomes, source=parts.source, units="mm",
         quantity="unsupported span", evidence=[summary, *region_files[:3]],
-        extra_detail=f"bridges judged at {limit:.0f} mm, cantilevers at "
-                     f"{cantilever_limit:.0f} mm")
+        extra_detail=extra + (f"; {clause}" if clause else ""))

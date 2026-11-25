@@ -12,9 +12,17 @@ populated board as ``kicad-cli pcb export step --user-origin 0x0mm`` exports it:
 x 0 to 30, y -15 to 0 (KiCad's y negated), the board's bottom face at z 0, the
 header pins from z -1.405 to 10.135. The cavity leaves 2 mm beside the board at
 each side, 2.595 mm under the pin tails and 2.365 mm over the pin tips: the
-nearest part is a header, its pin tips 2.365 mm under the lid. The board is
-placed at the enclosure's origin. CadQuery stamps the file with the day it was
-written, so two runs differ in that line only.
+nearest part is a header, its pin tips 2.365 mm under the lid. The enclosure's
+frame has its origin on the cavity floor, under the board's (0, 0) corner, so
+the board sits at x 0, y 0, z 4 (``pcb_board_placement``). CadQuery stamps the
+file with the day it was written, so two runs differ in that line only.
+
+Why the floor and not the board's bottom face (the frame until general-packs
+P7, where the board sat at 0, 0, 0): a placement of all zeros gives the mutation
+walk nothing to move, since a zero scaled is still zero. With z at 4 mm the walk
+raises the board until its pins near the lid, a mutation of the design that the
+gate must fail. Before P7 its only landing was the clearance parameter, which
+moved the limit, not the design.
 """
 from __future__ import annotations
 
@@ -28,7 +36,9 @@ sys.dont_write_bytecode = True
 OUT = os.path.join(HERE, "enclosure.step")
 
 WALL = 2.0
-CAVITY = {"x": (-2.0, 32.0), "y": (-17.0, 2.0), "z": (-4.0, 12.5)}
+#: The cavity in the enclosure's frame. The board sits 4 mm above its floor:
+#: 2.595 mm under the pin tails (z -1.405 in the board's own frame).
+CAVITY = {"x": (-2.0, 32.0), "y": (-17.0, 2.0), "z": (0.0, 16.5)}
 
 
 def box(lo, hi):

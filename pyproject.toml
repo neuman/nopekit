@@ -39,6 +39,8 @@ Source = "https://github.com/neuman/nopekit"
 # wheel. Without this, `pip install nopekit` produced a working spine with zero
 # gates — a spine that cannot do anything. Packages are listed explicitly because
 # `packages.find` only scans `where`, so the mapped name is never discovered.
+# `tests/test_packaging.py` goes red when this list drops `nopekit.bundled` or
+# becomes a find table: no glob below ships a file from a package not built.
 [tool.setuptools]
 packages = ["nopekit", "nopekit.bundled"]
 
@@ -59,7 +61,53 @@ nopekit = [
 # how `bomlib.py` (a pack-root helper) silently failed to ship and every gate in
 # that pack died on import from the wheel. Ship everything a pack contains, by
 # extension, at any depth.
+#
+# The list still drifted: until general-packs P2 it shipped no KiCad board, SPICE
+# deck, Modelica model or OpenFOAM case, so the wheel held the pcb-kicad,
+# openmodelica, cfd-openfoam and aero-openfoam baselines without the files they
+# read. `tests/test_packaging.py` now walks `git ls-files packs/` and
+# names each tracked file no glob here ships. `**/*` was rejected: setuptools
+# globs the tree as it is on disk, so it would ship a contributor's
+# `__pycache__/` and a solver run left in a case directory, and its `*` still
+# skips a dotfile.
 "nopekit.bundled" = [
   "**/*.py", "**/*.json", "**/*.md", "**/*.txt",
   "**/*.stl", "**/*.step", "**/*.csv", "**/*.yaml", "**/*.yml",
+  # KiCad: the board, its project, schematic and custom rules, and the two
+  # library tables (no extension) that KiCad reads from the board's directory.
+  "**/*.kicad_pcb", "**/*.kicad_pro", "**/*.kicad_sch", "**/*.kicad_dru",
+  "**/fp-lib-table", "**/sym-lib-table",
+  # The library entries a baseline's tables name in the pack itself (pcb-kicad's
+  # `selftest/assets/lib/`, its controls sealed against the host's library: the
+  # holdout run of general-packs H1).
+  "**/*.kicad_mod", "**/*.kicad_sym",
+  # ngspice decks and OpenModelica models.
+  "**/*.cir", "**/*.mo",
+  # OpenFOAM: a case is extensionless dictionaries in three directories, the
+  # three that the packs' stage copies from (`CASE_DIRS`, `gates/_tool.py`).
+  # Anchored at a case root, `<pack>/selftest/assets/<case>/`, and one level
+  # deep, as the stage copies. So `constant/polyMesh/`, a time directory but 0,
+  # `processor*/` and `postProcessing/` of a run left in place stay out. A case
+  # put anywhere else reads unshipped in tests/test_packaging.py and gets its
+  # own lines here. Rejected: each dictionary by name (a field file is named by
+  # its variable, U, p, k, omega, so a case that adds a field would not ship
+  # it); and `**/0/*`, `**/constant/*`, `**/system/*`, which match a directory
+  # of that name at any depth, so they shipped `processor0/0/U` and
+  # `postProcessing/forces/0/force.dat` (review of general-packs P2).
+  "*/selftest/assets/*/0/*", "*/selftest/assets/*/constant/*",
+  "*/selftest/assets/*/system/*",
+  # ParaView: the renderer control's dataset (`views/fixture/strip.vtk`) and the
+  # environment file that `references/rendering.md` installs from.
+  "**/*.vtk", "**/*.lock",
+  # A pack's own ignore file. glob's `*` never matches a leading dot, so no
+  # glob above ships it.
+  "**/.gitignore",
+  # hand-ergonomics' scene meshes, and firmware-ci's ESP-IDF app: its C source and
+  # its defaults (its CMakeLists.txt matches `**/*.txt`). Without them the replay
+  # of its baseline builds nothing from the wheel.
+  "**/*.glb", "**/*.c", "**/sdkconfig.defaults",
+  # A baseline's licence note (firmware-ci's app, beside the ESP-IDF rows it
+  # carries). firmware-zmk's `**/bin/*`, `**/*.keymap` and `**/*.conf` left with
+  # it (general-packs F1): no other pack ships such a file.
+  "**/LICENSE",
 ]

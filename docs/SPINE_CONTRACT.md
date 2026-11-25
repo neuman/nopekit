@@ -2922,6 +2922,13 @@ def available(root=None) -> list[str]                      # every pack name dis
 def key_scope(manifest) -> str                             # "fdm-print" -> "fdm" (from its gate ids)
 def key_vocabulary(name, root=None) -> dict[str, dict]     # every projection key the pack reads
 def key_collisions(names, root=None, *, projection_keys=()) -> list[KeyCollision]
+def tag_collisions(registry, claims=()) -> list[TagCollision]   # claim tags gates of 2+ packs bind
+@dataclass(frozen=True)
+class TagCollision:                          # one claim tag two or more live packs' gates bind
+    tag: str                                 # exactly as the gates declare it (claims.covers' match)
+    gates: tuple[tuple[str, tuple[str, ...]], ...]   # ((pack, (gate id, ...)), ...), sorted
+    carried: tuple[str, ...]                 # the claims that carry it now, sorted
+    # .packs -> the packs, sorted; .binds() -> "a (a.x) and b (b.y, b.z)"
 # Architecture phase 2 (SPEC 22, 25, 38): proposers — tools that propose, never settle
 PROPOSERS_DIR = "proposers"
 PROPOSER_KEYS = ("id", "basis", "description", "run")   # one provides_proposers entry
@@ -2945,7 +2952,15 @@ elsewhere) and runs `proposer_problems`.
 discoverable: it diffs the installed packs' vocabularies (from each
 `selftest/baseline.json`'s keys, `_notes` and `_aliases`) and reports any key two
 of them declare differently. `nopekit doctor` renders it as a warning naming both
-packs. See `docs/PACK_FORMAT.md`.
+packs. See `docs/PACK_FORMAT.md`. `tag_collisions` does the same for claim tags,
+from the registered specs alone: each tag that gates of two or more of the
+registry's packs bind (a project gate, with no pack, is the project's own wiring
+and is left out), with the claims that carry it, the carried ones first. A gate
+lists every tag it bears on, so a broad word two packs share covers a claim with
+the gates of both; `doctor`'s `pack-tags` row names every such tag and `check`
+notes each one a claim carries (holdout, general packs: `connectivity`,
+`clearance`, `interference`, `packaging` and `manufacturability` each bound gates
+of two or three live packs, and `doctor` warned only on param keys).
 Pack layout (also documented in the pack-authoring skill):
 ```
 packs/<name>/pack.json  PACK.md  references/*.md  gates/*.py  generators/*.py
@@ -3063,7 +3078,7 @@ under GROUNDED BY). `add` takes rejections as dicts with `type`, `by`, `returns_
 `input`, held to `store.rejection_problem`; `render_log` adds each loser's type and
 condition as written, never a live state.
 `why` is the context-window win: an agent pulls one parameter's full history
-instead of reading a 1,672-line decision log.
+instead of reading a decision log of thousands of lines.
 
 ### `report.py`  (deps: models, util, store, claims, artifacts, verdicts, modelio)
 ```python
@@ -4772,7 +4787,8 @@ each `ok` when there is nothing to say — a clean project shows that it looked:
 | `instruments` | warn | an entry recorded under another library version (`recorded under numpy 1.26.4; here 2.1.0`, and "outcome differs across instruments"): provenance, never staleness (Q1.3) |
 | `opaque-inputs` | warn | an entry with an opaque channel (a subprocess's own reads, a file outside the project, `self-modified:`, `env:<NAME>`, `sqlite-writable:`): never served from the cache |
 | `cache-entries` | warn | every verdict or control entry the strict readers ignored, a `hand-edited entry` (digest mismatch) by name; any resolver note no other row claims lands here |
-| `two-outcomes` | FAIL while `verdicts.TWO_OUTCOMES_IS_ERROR` (True since U25), else warn | two outcomes recorded for identical inputs, read at call time; **two control outcomes** at one rho_control FAIL always (the gate is not admitted). Controls are read for every gate on disk, not only for the gates whose verdict is Fresh |
+| `two-outcomes` | FAIL while `verdicts.TWO_OUTCOMES_IS_ERROR` (True since U25), else warn | two outcomes recorded for identical inputs, read at call time; **two control outcomes** at one rho_control FAIL always (the gate is not admitted). Each only while a run at the gate's current version and inputs could land on them: a verdict pair under another spine or code digest, or whose seen reads (params, files, listings, ledger keys, the model) digest otherwise now (`cli._two_outcome_notes`), and a control pair at another static part, or on a file, listing or host param that reads otherwise now (`cli._two_control_notes`), or either of an evaluator not registered here, is named after the failures as history, never a FAIL. A pair whose reads doctor cannot re-read (the model does not load; for a control, an opaque channel or a ledger key) stays live, as does a verdict pair whose seen reads are current, opaque channel or not. Controls are read for every gate on disk, not only for the gates whose verdict is Fresh. What slipped through (holdout, general packs, round 2): a pack's fix moved its gate's code, `check` qualified it at the new version, and the row stayed red for good on two control entries at the old rho; in review of J5, a verdict pair at an old rho did the same |
+| `limits` | warn | P2.4-D13: each compared pair whose two limits part (`claims.limit_disagreements`), over current results only; never a status. Each covering evaluator it compared no limit of because its result is not current here is named, as reading inputs nopekit cannot see (`claims.unseen_gates`) or as stale, with the check run that compares it (`cli._limits_left_out`), and one not registered here (an orphan entry) apart, as nothing here runs it; each list cut at `cli._DOCTOR_SHOWN`; the row still `ok` when nothing it compared parts. What slipped through (holdout, general packs, round 2): the row read ok over an unseen evaluator it never compared, while `check` warned that its limit parted; in review of J5, it said "nopekit check compares it" of an orphan, and named every evaluator with no cap |
 | `code-digest` | warn | a gate keyed by its defining file (registered from Python, no recorded closure): a value its function closes over is not seen. The CLI never makes one |
 | `pending-controls` | warn | controls whose fixture code moved (`<k> evaluator(s) to re-qualify — control inputs moved (<files>); the next check run re-qualifies them`, the sentence `status`'s note prints) |
 | `imports` | warn | a gate that imports a third-party module (`CodeRef.third_party`) it does not declare in `requires_python` or a `python:` entry of `requires_one_of`: where it is missing, the gate errors instead of reading SKIPPED. In the gate's own file, read by reach — module-level imports plus those inside the gate function and the module-level functions and classes it names, transitively; other closure files whole. A whole-file rule named `cad.bounding`, the one tier-0 gate of a module whose other gates import trimesh lazily |
@@ -4781,7 +4797,8 @@ each `ok` when there is nothing to say — a clean project shows that it looked:
 | `dynamic-imports` | warn | the static dynamic-import detector (`modelio.dynamic_imports`): an AST scan of every registered gate's closure files and of its owner's `selftest/*.py` (the fixtures and the known-good module its control runs) for `importlib.import_module(...)` or `__import__(...)` whose module a VALUE names. Only the run that first loads such a module in a process keys its source; a later one is served it from `sys.modules` and keys nothing. A literal name is resolved into the code closure and is not named (admission review, round 2, c) |
 | `requirements` | FAIL / warn | architecture phase 1: a claim naming a requirement no file holds, or a requirement id that is also a claim's (FAIL, as a milestone requiring a missing claim is); else a requirement no claim serves (warn: it reads Gap) |
 | `mechanisms` | warn | architecture phase 1: an evaluator a claim's mechanism names that is not registered here, or does not cover that claim (`claims.mechanism_problems`). Never a FAIL: a cross-check is not an integrity fault, and it moves no status |
-| `sealed-fixtures` | FAIL | invariant 5 at runtime: every pack control run against this project's params through `packs.seal_findings`, into a temp `out_dir`; a control that reads its host is named with the paths it read |
+| `sealed-fixtures` | FAIL | invariant 5 at runtime: the pack controls up to `doctor --tier` (default `cli.DOCTOR_SEAL_TIER`, 0) run against this project's params through `packs.seal_findings`, into a temp `out_dir`; above it, and at or below it where a tool is missing here (counted apart), each control's entry at its version (`cli._recorded_seal`: the one its admission stands on, recorded on the live host by `check`) is read for its `reads.host`, not run; a control that reads its host is named with the paths it read, whatever its admission now; one neither run nor read is named with why (no entry at its version, or one on record but not current or not admitted) and the `doctor --tier` that runs it. What slipped through (holdout, general packs): every control ran at every tier, container replays included, and `doctor` took nine to twelve minutes; then (review of H6) only an admitted or pending entry was read, so an unsealed control's entry, which keys the host params it read, went unnamed after the first edit of the design |
+| `pack-tags` | warn | `packs.tag_collisions`: each claim tag that gates of two or more installed packs bind, naming each pack's gates and the claims that carry it. Never a FAIL: a gate lists every tag it bears on by design, and the fix is the claim's narrowest tag |
 
 The four static detectors measured zero hits on the 54 bundled gates before they landed
 (R-4; `tests/test_doctor.py`). No staleness row: which gates are current is `status`'s

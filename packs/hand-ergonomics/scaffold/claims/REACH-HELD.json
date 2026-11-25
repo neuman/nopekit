@@ -1,0 +1,18 @@
+{
+  "statement": "Two testers, one with reach beyond the grip at or below 44 mm and one at or above 62 mm, hold the first full print in the declared grips and press every control without a regrip",
+  "kind": "physical",
+  "acceptance": {
+    "quantity": "controls missed without regrip",
+    "comparator": "<=",
+    "limit": 0,
+    "units": "controls"
+  },
+  "rationale": "the reach count is an approximate envelope at full extension: a control near its edge, a cap edge that catches the thumb and a stretch that is too far to repeat are found only in the hand",
+  "mechanism": {
+    "by": "measurement",
+    "how": "Measure each tester's wrist-thumbtip and wrist-centre of grip lengths as TR89-044 (130) and (125) define them; tester 1 has reach beyond the grip (the difference) at or below 44 mm, tester 2 at or above 62 mm. Each holds the first full print, with a dummy cap at every control, in the declared grips and presses every judged control without moving the hand; count the controls missed. Tester 2 also checks that no cap edge catches the thumb. Record the testers' values, never their names (skills/reach-testing/SKILL.md)"
+  },
+  "resolves": [
+    "GRIP-POSTURE"
+  ]
+}

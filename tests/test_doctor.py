@@ -20,10 +20,30 @@ past a check without it:
   edit its author believes worked.
 * **two-outcomes** — one gate, identical inputs, two answers: a warning while
   `verdicts.TWO_OUTCOMES_IS_ERROR` is False, a failure once it is True; two
-  control outcomes at one rho_control fail always (the gate is not admitted).
+  control outcomes at one rho_control fail always (the gate is not admitted) —
+  each while a run at the gate's current version and inputs could land on
+  them. A pair at another version, on a file read that moved since, or of an
+  evaluator not registered here is named as history, not a failure (holdout,
+  general packs, round 2: a pack fix left two round-1 control entries at an
+  old rho, and `doctor` stayed red on them for good; review of J5: the verdict
+  entries' pairs had no such split).
+* **limits** — an evaluator's limit that parts from its claim's, over current
+  results; each covering evaluator whose result is not current here is named
+  as not compared, with why, and one not registered here apart, as nothing
+  here runs it (holdout, general packs, round 2: the row read ok over an
+  evaluator that reads inputs nopekit cannot see, and never said it had left
+  that one out; review of J5: it told the reader to run `check` for an orphan,
+  and named every evaluator with no cap).
 * **sealed-fixtures** — invariant 5 at runtime (`packs.seal_findings`): a pack
   control that reads its host's params passes in some projects and fails in
-  others. The known-bad input must come from the pack's own baseline.
+  others. The known-bad input must come from the pack's own baseline. Only the
+  tier-0 controls run by default (`--tier` raises it); above, a control on
+  record at its version is read, and one with none is named, never passed over
+  (holdout, general packs: the row ran every control at every tier, and
+  `doctor` took nine minutes).
+* **pack-tags** — a claim tag that gates of two or more installed packs bind:
+  a claim that carries it is covered by the gates of both (holdout, general
+  packs: `doctor` diffed the param keys, never the tags).
 * **imports** — a gate that imports a third-party module it does not declare is
   run where the module is missing and errors, instead of reading SKIPPED.
 * **env-reads** — an environment variable is never a cache key (spec §8): a read
@@ -62,6 +82,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import io
 import json
 import os
@@ -99,7 +120,12 @@ ROWS = ("instruments", "opaque-inputs", "cache-entries", "two-outcomes", "sealed
         # where a site and its text exist, and
         # test_site_truth.TheReadersSayTheTextIsBehind holds its ok and its
         # warning).
-        "groups", "readme")
+        "groups", "readme",
+        # Holdout, general packs: two installed packs binding one claim tag.
+        "pack-tags",
+        # P2.4-D13's row, held here since round 2 of the holdout named what it
+        # leaves out (test_goalposts.LimitsLiveInOnePlace plants its warning).
+        "limits")
 
 #: A fixture every planted project gate can borrow: the bracket's own, which
 #: sags the known-good design 30 mm — past any limit the planted gates use.
@@ -113,9 +139,9 @@ def _run(project: str, *argv: str):
     return _env.nopekit(list(argv), cwd=project)
 
 
-def _doctor(project: str) -> tuple[int, dict[str, dict]]:
+def _doctor(project: str, *argv: str) -> tuple[int, dict[str, dict]]:
     """`doctor --json` in a subprocess: ``(exit code, {row name: row})``."""
-    proc = _run(project, "doctor", "--json")
+    proc = _run(project, "doctor", "--json", *argv)
     try:
         data = json.loads(proc.stdout)
     except ValueError as exc:                      # pragma: no cover - reported
@@ -170,6 +196,68 @@ def _entry(project: str, gate_id: str) -> verdicts.Entry:
     return found[0]
 
 
+def _plant_control_pair(project: str, gate_id: str, *, code: str = "",
+                        files: dict | None = None, opaque: tuple = ()) -> tuple[str, ...]:
+    """Two control entries of ``gate_id`` at one rho_control that is not its
+    current one, with two outcomes — the entry `check` wrote, keyed as an
+    earlier run would have keyed it, and the same entry with its known-bad
+    control passed — and their names. Keyed as `verdicts.rho_control` keys
+    it: under another code digest (``code``, the static part moves), or on the
+    current static part with a file read recorded at other bytes (``files``)
+    or an opaque channel read (``opaque``)."""
+    [good] = verdicts.read_controls(project, gate_id)
+    parts, static = good.static_parts, good.static
+    if code:
+        parts = json.loads(json.dumps(good.static_parts))
+        parts["code"]["digest"] = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        static = verdicts._digest_of({"schema": verdicts.SCHEMA, **parts})
+    reads = dict(good.reads)
+    if files:
+        reads["files"] = dict(files)
+    if opaque:
+        reads["opaque"] = list(opaque)
+    good_reads = verdicts._good_reads(good) if good.good is not None else None
+    rho = verdicts.rho_control(gate_id, static, reads, good_reads)
+    first = dataclasses.replace(good, static=static, static_parts=parts, reads=reads, rho=rho)
+    # R-6 (P2.3): no walk where the known-bad control passed.
+    second = dataclasses.replace(first, bad="pass", admitted="no", mutation=None)
+    names = []
+    for entry in (first, second):
+        wrote = verdicts.write_control(project, entry)
+        if not wrote.written:                      # pragma: no cover - reported
+            raise AssertionError(f"{gate_id}: the planted control was not written: {wrote}")
+        names.append(wrote.name)
+    return tuple(names)
+
+
+def _plant_verdict_pair(project: str, entry: verdicts.Entry, *, code: str = "",
+                        files: dict | None = None, gate: str = "") -> tuple[str, ...]:
+    """Two verdict entries at one rho that is not ``entry``'s gate's current
+    one, with two outcomes — ``entry``, keyed as an earlier run would have keyed
+    it, and the same entry with its outcome flipped — and their names. Keyed as
+    `verdicts.rho` keys it: under another code digest (``code``), with a file
+    read recorded at other bytes (``files``), or filed under a gate id nothing
+    registers (``gate``)."""
+    gate_id = gate or entry.gate
+    digest = (hashlib.sha256(code.encode("utf-8")).hexdigest() if code
+              else entry.code["digest"])
+    reads = dict(entry.reads)
+    if files:
+        reads["files"] = {**(reads.get("files") or {}), **files}
+    first = dataclasses.replace(entry, gate=gate_id, code={**entry.code, "digest": digest},
+                                reads=reads, rho=verdicts.rho(gate_id, entry.spine, digest,
+                                                              reads))
+    second = dataclasses.replace(first, verdict={**first.verdict,
+                                                 "passed": not first.verdict["passed"]})
+    names = []
+    for planted in (first, second):
+        wrote = verdicts.write_entry(project, planted)
+        if not wrote.written:                      # pragma: no cover - reported
+            raise AssertionError(f"{gate_id}: the planted entry was not written: {wrote}")
+        names.append(wrote.name)
+    return tuple(names)
+
+
 def _bundled_registry() -> gates_mod.Registry:
     """Every bundled gate, in a fresh registry."""
     registry = gates_mod.Registry()
@@ -198,6 +286,28 @@ def outside(ctx):
         limit = float(fh.read())
     value = float(ctx.params["deflection"])
     return Verdict(gate="bracket.outside", passed=value <= limit, measured=value,
+                   limit=limit, units="mm")
+'''
+
+_OUTSIDE_LIMIT_GATE = '''\
+# SPDX-License-Identifier: Apache-2.0
+"""Planted by tests/test_doctor.py: C1's quantity judged at a limit read from a
+file outside the project, so no reader after a check run calls its result current."""
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
+
+LIMIT_FILE = {limit_file!r}
+
+
+@gate(id="bracket.outside_limit", title="a deflection limit kept outside the project",
+      claims=["stiffness"], tier=Tier.INSTANT, settles="tip deflection",
+      negative_control=NegativeControl(fixture={fixture!r}, note="planted"))
+def outside_limit(ctx):
+    """The tip deflection against a limit of its own, which is not C1's."""
+    with open(LIMIT_FILE, encoding="utf-8") as fh:
+        limit = float(fh.read())
+    value = round(float(ctx.params["deflection"]), 4)
+    return Verdict(gate="bracket.outside_limit", passed=value <= limit, measured=value,
                    limit=limit, units="mm")
 '''
 
@@ -408,6 +518,67 @@ def leaky_long(ctx):
 '''
 
 
+#: The same two controls one tier up: what `doctor` runs only under `--tier 1`,
+#: and otherwise reads from a control entry `check --tier 1` recorded.
+_SEAL_BUILD_GATES = _SEAL_GATES.replace("tier=Tier.INSTANT", "tier=Tier.BUILD")
+
+#: `_SEAL_FIXTURES` with the sealed control's known-bad input read, when it runs,
+#: from the pack's own `data/long.json`: a file its control entry keys, outside
+#: the gate's code and its `selftest/`, so an edit of it leaves the entry at its
+#: version and no longer current.
+_SEAL_DATA_FIXTURES = _SEAL_FIXTURES.replace(
+    '''    params = dict(BASELINE)
+    params["span_mm"] = 500.0
+    return dataclasses.replace(ctx, params=params)''',
+    '''    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(here, "data", "long.json"), encoding="utf-8") as fh:
+        params = dict(BASELINE, **json.load(fh))
+    return dataclasses.replace(ctx, params=params)''', 1)
+assert _SEAL_DATA_FIXTURES != _SEAL_FIXTURES
+
+#: The sealed control alone, at tier 0, needing a python module that only the
+#: `check` run below can import: a gate `doctor` would run, whose tool is
+#: missing where `doctor` runs, read from the entry `check` recorded.
+_SEAL_TOOL_GATES = (_SEAL_GATES.split('\n\n@gate(id="planted-seal.leaky"')[0]
+                    .replace("planted-seal.", "planted-tool.")
+                    .replace("tier=Tier.INSTANT,",
+                             'tier=Tier.INSTANT, requires_python=["nopekit_planted_tool"],'))
+assert "requires_python" in _SEAL_TOOL_GATES and "leaky" not in _SEAL_TOOL_GATES
+
+#: Two planted packs whose gates both bind the claim tag `planted-shared`, and
+#: one tag each of their own. Each control is sealed: the row under test is the
+#: tag row, never the seal row.
+_TAG_GATES = '''\
+# SPDX-License-Identifier: Apache-2.0
+"""Planted by tests/test_doctor.py: one gate binding a shared tag and its own."""
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
+
+
+@gate(id="{pack}.span", claims=["planted-shared", "{pack}-own"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:sealed_long", note="planted"))
+def span(ctx):
+    value = ctx.params.get("span_mm")
+    if value is None:
+        return Verdict(gate="{pack}.span", skipped=True, skip_reason="no span_mm")
+    return Verdict(gate="{pack}.span", passed=float(value) <= 100.0, measured=float(value),
+                   limit=100.0, units="mm")
+'''
+
+
+def _plant_pack(project: str, name: str, gates_src: str,
+                fixtures: str = _SEAL_FIXTURES) -> None:
+    """A pack under the project's `.nopekit/packs/`, installed with `packs add`:
+    `gates_src` as its one gate module, `fixtures` as its fixtures."""
+    pack = os.path.join(project, ".nopekit", "packs", name)
+    _write(pack, "pack.json", json.dumps({"name": name}) + "\n")
+    _write(pack, "gates/span.py", gates_src)
+    _write(pack, "selftest/bad.py", fixtures)
+    _write(pack, "selftest/baseline.json", json.dumps({"span_mm": 50.0}) + "\n")
+    added = _run(project, "packs", "add", name)
+    assert added.returncode == 0, added.stdout + added.stderr
+
+
 def _in_process_gate(ctx):
     """Registered from Python by this test: no recorded closure, so its code is
     keyed by this file."""
@@ -543,6 +714,204 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
                        "two control outcomes recorded for identical inputs")
         self.assertEqual(code, 1)
 
+    def test_two_control_outcomes_no_current_run_can_reach_are_history(self):
+        """Holdout, general packs, round 2 (a pack fix): `check` wrote two control
+        outcomes at one rho, the pack's gate was fixed, and `check` qualified it
+        "paired" at its new version — while `doctor` stayed red, "the gate is
+        not deterministic, and neither answer counts", on the two old entries.
+        rho_control keys the static part (the spine, the gate's code, its
+        owner's `selftest/`, the control's fields) and what both halves read, so
+        a run at another static part, or on a file read that moved, can never
+        land on that rho again. Such a pair is history, named, never a FAIL.
+        What doctor cannot see move (an opaque channel) it never calls history."""
+        cases = (
+            ("another version", dict(code="an earlier bracket.bed_fit"),
+             "ok", "at another version of the evaluator"),
+            ("a moved file read",
+             dict(files={"model/bracket.py": hashlib.sha256(b"earlier bytes").hexdigest()}),
+             "ok", "on inputs that moved since (model/bracket.py changed)"),
+            ("an opaque read", dict(opaque=("file-outside-project:<tmp>/limit.txt",)),
+             "FAIL", "the same inputs gave two answers"),
+        )
+        for name, plant, status, said in cases:
+            with self.subTest(name):
+                project = self.copy()
+                names = _plant_control_pair(project, "bracket.bed_fit", **plant)
+                code, rows = _doctor_in_process(project)
+                row = self.assertRow(rows, "two-outcomes", status, "bracket.bed_fit", said,
+                                     *names)
+                self.assertEqual(code, 1 if status == "FAIL" else 0, rows)
+                if status == "ok":
+                    self.assertIn("history, not a failure", row["detail"])
+                    self.assertNotIn("not deterministic", row["detail"])
+                # The qualification at the current version is the entry `check`
+                # wrote: the planted pair moved nothing there.
+                self.assertEqual(rows["qualification"]["status"], "ok", rows["qualification"])
+
+        # A pair a current run CAN land on beside history: the row fails on that
+        # one alone, and still names the history apart.
+        project = self.copy()
+        old = _plant_control_pair(project, "bracket.bed_fit", code="an earlier bracket.bed_fit")
+        current = verdicts.read_controls(project, "bracket.bed_fit")
+        [written] = [c for c in current if c.name not in old]
+        live = dataclasses.replace(written, bad="pass", admitted="no", mutation=None)
+        self.assertTrue(verdicts.write_control(project, live).written)
+        code, rows = _doctor_in_process(project)
+        row = self.assertRow(rows, "two-outcomes", "FAIL", written.name, live.name,
+                             "history, not a failure", *old)
+        failing = row["detail"].split("history, not a failure", 1)[0]
+        for name in old:
+            self.assertNotIn(name, failing, row)
+        self.assertEqual(code, 1)
+
+    def test_two_verdict_outcomes_no_current_run_can_reach_are_history(self):
+        """Review of J5: only the control pairs had the split. A gate that gave
+        two answers for one input, fixed by an edit that moved its code, left
+        its two verdict entries at the old rho, and `doctor` stayed red on them
+        for good beside one clean entry at the new rho: no command removes a
+        cache entry. rho keys the spine, the gate's code digest and what it
+        read, so a pair under another code digest, on a file read that moved,
+        or of an evaluator not registered here is history, named, never a FAIL.
+        A read doctor cannot re-read (the model does not load) it never calls
+        moved."""
+        cases = (
+            ("another version", dict(code="an earlier bracket.bed_fit"),
+             "at another version of the evaluator"),
+            ("a moved file read",
+             dict(files={"model/bracket.py": hashlib.sha256(b"earlier bytes").hexdigest()}),
+             "on inputs that moved since (model/bracket.py changed)"),
+            ("an evaluator not registered here", dict(gate="bracket.retired"),
+             "bracket.retired: two outcomes ("),
+        )
+        for name, plant, said in cases:
+            with self.subTest(name):
+                project = self.copy()
+                names = _plant_verdict_pair(project, _entry(project, "bracket.bed_fit"),
+                                            **plant)
+                code, rows = _doctor_in_process(project)
+                self.assertRow(rows, "two-outcomes", "ok", "history, not a failure", said,
+                               *names, absent=("not deterministic",))
+                self.assertEqual(code, 0, rows)
+
+        # The same moved file read, with a model that does not load: the pair's
+        # params cannot be re-read, so nothing here can say it moved — live.
+        project = self.copy()
+        names = _plant_verdict_pair(
+            project, _entry(project, "bracket.bed_fit"),
+            files={"model/bracket.py": hashlib.sha256(b"earlier bytes").hexdigest()})
+        with open(os.path.join(project, "model", "bracket.py"), "a", encoding="utf-8") as fh:
+            fh.write("\nraise RuntimeError('planted: the model does not load')\n")
+        code, rows = _doctor_in_process(project)
+        self.assertRow(rows, "two-outcomes", "FAIL", "the same inputs gave two answers",
+                       *names, absent=("history, not a failure",))
+        self.assertEqual(code, 1)
+
+        # A pair a current run CAN land on beside history: the row fails on that
+        # one alone, and still names the history apart.
+        project = self.copy()
+        current = _entry(project, "bracket.bed_fit")
+        old = _plant_verdict_pair(project, current, code="an earlier bracket.bed_fit")
+        live = dataclasses.replace(current, verdict={**current.verdict,
+                                                     "passed": not current.verdict["passed"]})
+        self.assertTrue(verdicts.write_entry(project, live).written)
+        code, rows = _doctor_in_process(project)
+        row = self.assertRow(rows, "two-outcomes", "FAIL", current.name, live.name,
+                             "history, not a failure", *old)
+        failing = row["detail"].split("history, not a failure", 1)[0]
+        for name in old:
+            self.assertNotIn(name, failing, row)
+        self.assertEqual(code, 1)
+
+    def test_limits_names_each_evaluator_it_did_not_compare(self):
+        """Holdout, general packs, round 2 (D06, disputed): the limits row passed
+        the resolver's stale gates to `claims.limit_disagreements`, and an
+        evaluator that reads inputs nopekit cannot see is among them after every
+        check run. So the row read "ok — every compared evaluator judges against
+        its claim's own limit" over one it never compared, whose limit `check`
+        had just warned parts from its claim's, and did not say it left it out.
+        It names each such evaluator now, with why, and the run that compares
+        it; a stale one too. Never a status: the row stays ok."""
+        project = self.copy()
+        limit_file = os.path.join(self.tmp(), "limit.txt")
+        with open(limit_file, "w", encoding="utf-8") as fh:
+            fh.write("5.0\n")
+        _write(project, "gates/outside_limit.py",
+               _OUTSIDE_LIMIT_GATE.format(limit_file=limit_file, fixture=_FIXTURE))
+        proc = _run(project, "check")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("warning: bracket.outside_limit : its limit 5 mm is not C1's acceptance "
+                      "condition (tip deflection <= 0.5 mm) — one number in two places",
+                      proc.stdout, "check compares it in its own run")
+
+        unseen = "bracket.outside_limit (it reads inputs that nopekit cannot see)"
+        _code, rows = _doctor(project)
+        self.assertRow(rows, "limits", "ok",
+                       "every compared evaluator judges against its claim's own limit",
+                       f"not compared: {unseen}",
+                       "nopekit check compares it, and warns for each limit that parts",
+                       absent=("bracket.deflection", "one number in two places"))
+
+        # A limit edit leaves bracket.deflection, which reads C1's condition,
+        # stale: named too, and never blamed for its old limit (review of P2.4).
+        _edit(project, "claims/C1.json", '"limit": 0.5', '"limit": 0.75')
+        _code, rows = _doctor(project)
+        self.assertRow(rows, "limits", "ok", unseen,
+                       "bracket.deflection (its result is stale)",
+                       "nopekit check compares them",
+                       absent=("one number in two places",))
+
+        # An evaluator not registered here (review of J5): its entry is an
+        # orphan, in the resolver's stale gates with the claims it recorded, and
+        # no check run compares it. Named apart, never as stale beside "nopekit
+        # check compares it", which the orphan-entries row would contradict.
+        entry = _entry(project, "bracket.bed_fit")
+        self.assertTrue(verdicts.write_entry(
+            project, dataclasses.replace(entry, gate="bracket.retired")).written)
+        _code, rows = _doctor(project)
+        row = self.assertRow(rows, "limits", "ok", unseen,
+                             "bracket.deflection (its result is stale)",
+                             "not compared, not registered here: bracket.retired — nothing "
+                             "here runs it",
+                             absent=("bracket.retired (its result is stale)",))
+        self.assertNotIn("bracket.retired",
+                         row["detail"].split("nopekit check compares them", 1)[0], row)
+        self.assertRow(rows, "orphan-entries", "warn", "bracket.retired",
+                       "nothing here can re-run them")
+        self.assertClean("limits")
+        self.assertEqual(self.clean["limits"]["detail"],
+                         "every compared evaluator judges against its claim's own limit",
+                         "nothing is left out on the checked bracket")
+
+    def test_limits_cuts_each_list_as_every_row_does(self):
+        """Review of J5: the clause named every evaluator it left out, with no
+        cap, where every other doctor row shows `_DOCTOR_SHOWN` and then "(+n
+        more)" — a model edit in a project of dozens of evaluators named each
+        one. Both of its lists are cut: the evaluators a check run compares, and
+        those not registered here."""
+        shown = cli_mod._DOCTOR_SHOWN
+        project = self.copy()
+        limit_file = os.path.join(self.tmp(), "limit.txt")
+        with open(limit_file, "w", encoding="utf-8") as fh:
+            fh.write("5.0\n")
+        for i in range(shown + 1):
+            _write(project, f"gates/outside_limit_{i}.py",
+                   _OUTSIDE_LIMIT_GATE.format(limit_file=limit_file, fixture=_FIXTURE)
+                   .replace("bracket.outside_limit", f"bracket.outside_limit_{i}"))
+        proc = _run(project, "check")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        entry = _entry(project, "bracket.bed_fit")
+        for i in range(shown + 1):
+            self.assertTrue(verdicts.write_entry(
+                project, dataclasses.replace(entry, gate=f"bracket.retired_{i}")).written)
+        _code, rows = _doctor(project)
+        row = self.assertRow(rows, "limits", "ok",
+                             "(+1 more) — nopekit check compares them",
+                             "(+1 more) — nothing here runs them")
+        compared, orphans = row["detail"].split("not compared, not registered here:", 1)
+        self.assertEqual(compared.count("(it reads inputs that nopekit cannot see)"), shown,
+                         row)
+        self.assertEqual(orphans.count("bracket.retired_"), shown, row)
+
     def test_sealed_fixtures(self):
         project = self.copy()
         pack = os.path.join(project, ".nopekit", "packs", "planted-seal")
@@ -558,6 +927,154 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
                        "selftest/bad.py:leaky_long", absent=("planted-seal.sealed",))
         self.assertEqual(code, 1, "an unsealed pack control breaks invariant 5")
         self.assertClean("sealed-fixtures")
+
+    def test_sealed_fixtures_above_tier_zero(self):
+        """Holdout, general packs: the row ran every pack control at every tier,
+        so `doctor` took nine minutes on a project with container replays. Now
+        it runs tier 0, reads a control above it from the entry `check`
+        recorded at its version, and names one it neither ran nor found, with
+        the command that runs it. A BUILD-tier control that reads its host is
+        caught each way it can be: named as not run, run under `--tier 1`, and
+        read back after `check --tier 1`."""
+        project = self.copy()
+        _plant_pack(project, "planted-seal", _SEAL_BUILD_GATES)
+
+        code, rows = _doctor(project)
+        self.assertRow(rows, "sealed-fixtures", "ok", "0 pack control(s) up to tier 0",
+                       "2 not run: above tier 0, and no control entry at its version",
+                       "planted-seal.leaky", "planted-seal.sealed",
+                       "`nopekit doctor --tier 1` runs them")
+        self.assertEqual(code, 0, rows)
+
+        code, rows = _doctor(project, "--tier", "1")
+        self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky",
+                       "selftest/bad.py:leaky_long", absent=("planted-seal.sealed:",))
+        self.assertEqual(code, 1, "an unsealed pack control breaks invariant 5")
+
+        checked = _run(project, "check", "--tier", "1")
+        self.assertIn("planted-seal.leaky", checked.stdout, checked.stdout + checked.stderr)
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky",
+                             "selftest/bad.py:leaky_long", "(all params)",
+                             absent=("planted-seal.sealed:", "not run: above tier 0"))
+        self.assertEqual(code, 1, row)
+
+    def test_sealed_fixtures_above_tier_zero_after_an_edit(self):
+        """Review of H6: the row read an entry back only while its admission was
+        admitted or pending. An unsealed control's entry keys the host params it
+        read, so the first edit of the design left it undemonstrated, and the row
+        said "ok ... no control entry at its version" over a fixture whose entry
+        at its version shows it reads the host. Before H6 the row ran it and
+        FAILed. The fixture code did not move, so the host read is a finding
+        whatever value it read. An entry on record that read none of the host but
+        is not current is said as such, never as no entry."""
+        project = self.copy()
+        pack = os.path.join(project, ".nopekit", "packs", "planted-seal")
+        _write(pack, "data/long.json", json.dumps({"span_mm": 500.0}) + "\n")
+        _plant_pack(project, "planted-seal", _SEAL_BUILD_GATES, _SEAL_DATA_FIXTURES)
+        checked = _run(project, "check", "--tier", "1")
+        self.assertIn("planted-seal.leaky", checked.stdout, checked.stdout + checked.stderr)
+        code, rows = _doctor(project)
+        # The sealed control is read from its entry: neither a finding nor left out.
+        self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky", "(all params)",
+                       absent=("planted-seal.sealed", "not run"))
+        self.assertEqual(code, 1, rows["sealed-fixtures"])
+
+        # The design moves, as every iteration moves it: the leaky entry keys
+        # the whole top level of the host's params, so it is no longer current.
+        _edit(project, "model/bracket.py", "bed_xy: float = 220.0", "bed_xy: float = 250.0")
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky",
+                             "selftest/bad.py:leaky_long", "(all params)",
+                             absent=("planted-seal.sealed", "not run", "no control entry"))
+        self.assertEqual(code, 1, row)
+
+        # The sealed control's own data moves: its entry is on record at its
+        # version, read none of the host, and is not current.
+        _write(pack, "data/long.json", json.dumps({"span_mm": 600.0}) + "\n")
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky",
+                             "1 not run: above tier 0, and its control entry at its "
+                             "version is on record but not current (planted-seal.sealed)",
+                             "`nopekit doctor --tier 1` runs them",
+                             absent=("no control entry",))
+        self.assertEqual(code, 1, row)
+
+        # Back to the data it was qualified on, and then a second outcome for
+        # the same inputs: on record, current, and not admitted.
+        _write(pack, "data/long.json", json.dumps({"span_mm": 500.0}) + "\n")
+        controls = verdicts.read_controls(project, "planted-seal.sealed")
+        self.assertEqual(len(controls), 1, [c.name for c in controls])
+        passed_its_bad = dataclasses.replace(controls[0], bad="pass", admitted="no",
+                                             mutation=None)
+        self.assertTrue(verdicts.write_control(project, passed_its_bad).written)
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky",
+                             "1 not run: above tier 0, and its control entry at its "
+                             "version is on record but not admitted (planted-seal.sealed)",
+                             absent=("no control entry", "not current"))
+        self.assertEqual(code, 1, row)
+
+    def test_sealed_fixtures_tools_missing_here(self):
+        """Review of H6: a gate at or below the tier whose tool is missing here
+        is read from its entry like one above the tier, and the row counted it
+        "above it". It is counted apart, as not run here."""
+        project = self.copy()
+        stub = self.tmp()
+        _write(stub, "nopekit_planted_tool.py", '"""Planted by tests/test_doctor.py."""\n')
+        here = {"PYTHONPATH": _env._pythonpath() + os.pathsep + stub}
+        pack = os.path.join(project, ".nopekit", "packs", "planted-tool")
+        _write(pack, "pack.json", json.dumps({"name": "planted-tool"}) + "\n")
+        _write(pack, "gates/span.py", _SEAL_TOOL_GATES)
+        _write(pack, "selftest/bad.py", _SEAL_FIXTURES)
+        _write(pack, "selftest/baseline.json", json.dumps({"span_mm": 50.0}) + "\n")
+        added = _env.nopekit(["packs", "add", "planted-tool"], cwd=project, env=here)
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+        checked = _env.nopekit(["check"], cwd=project, env=here)
+        self.assertIn("planted-tool.sealed", checked.stdout, checked.stdout + checked.stderr)
+        self.assertTrue(verdicts.read_controls(project, "planted-tool.sealed"), checked.stdout)
+
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "sealed-fixtures", "ok", "0 pack control(s) up to tier 0",
+                             "1 up to it not run here (tools missing), read from their "
+                             "control entries at their version", "none reads them",
+                             absent=("above it", "not run: tools missing"))
+        self.assertEqual(code, 0, row)
+
+    def test_pack_tags(self):
+        """Holdout, general packs: a claim tag two installed packs bind covers a
+        claim with the gates of both, and `doctor` warned only on param keys.
+        The row names the tag, each pack's gates and the claims that carry it;
+        `check` notes a carried one and leaves its exit code alone."""
+        project = self.copy()
+        for name in ("planted-left", "planted-right"):
+            _plant_pack(project, name, _TAG_GATES.replace("{pack}", name))
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "pack-tags", "warn",
+                             "'planted-shared' binds planted-left (planted-left.span) and "
+                             "planted-right (planted-right.span) (no claim carries it yet)",
+                             absent=("planted-left-own", "planted-right-own"))
+        self.assertEqual(code, 0, row)
+        before = _run(project, "check")
+        self.assertNotIn("planted-shared", before.stdout, before.stdout)
+
+        with open(os.path.join(project, "claims", "C1.json"), encoding="utf-8") as fh:
+            claim = json.load(fh)
+        claim["tags"] = list(claim.get("tags") or []) + ["planted-shared"]
+        _write(project, "claims/C1.json", json.dumps(claim, indent=2) + "\n")
+        _code, rows = _doctor(project)
+        self.assertRow(rows, "pack-tags", "warn", "(carried by C1)",
+                       "give it a tag only the pack you mean binds")
+        after = _run(project, "check")
+        self.assertIn("note: C1 carries the tag 'planted-shared', which gates of 2 installed "
+                      "packs bind: planted-left (planted-left.span) and planted-right "
+                      "(planted-right.span)", after.stdout, after.stdout + after.stderr)
+        data = json.loads(_run(project, "check", "--json").stdout)
+        self.assertEqual(data["tag_collisions"], [
+            {"tag": "planted-shared", "claims": ["C1"],
+             "gates": {"planted-left": ["planted-left.span"],
+                       "planted-right": ["planted-right.span"]}}])
+        self.assertClean("pack-tags")
 
     def test_imports(self):
         project = self.copy()
@@ -633,6 +1150,30 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
         registry = _bundled_registry()
         self.assertGreaterEqual(len(registry.ids()), 50, "the bundled corpus did not load")
         self.assertEqual(cli_mod._dynamic_imports(registry, _env.REPO), [])
+
+    def test_each_static_row_scans_a_file_once(self):
+        """Holdout, general packs: the static rows scanned a module once per
+        gate defined in it (eighteen times for one pack's module), and were most
+        of what `doctor` cost once its seal row ran tier 0 only. Each row now
+        scans each file once (`cli._hits_by_file`); the rows say the same."""
+        registry = _bundled_registry()
+        files = {path for _spec, fn in registry.pairs() for path in cli_mod._source_files(fn)}
+        self.assertLess(len(files), sum(len(cli_mod._source_files(fn))
+                                        for _spec, fn in registry.pairs()),
+                        "the bundled corpus shares no file between gates: nothing to show")
+        for name, scan in (("_memo_hits", cli_mod._memo_reads),
+                           ("_env_hits", cli_mod._env_reads)):
+            with self.subTest(row=name):
+                real = getattr(cli_mod, name)
+                seen: list[int] = []
+
+                def counted(tree, real=real, seen=seen):
+                    seen.append(id(tree))
+                    return real(tree)
+                with mock.patch.object(cli_mod, name, counted):
+                    scan(registry, _env.REPO)
+                self.assertEqual(len(seen), len(set(seen)), f"{name} scanned a tree twice")
+                self.assertLessEqual(len(seen), len(files))
 
     def test_code_digest_names_a_gate_keyed_by_its_defining_file(self):
         project = self.copy()

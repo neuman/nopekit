@@ -1,7 +1,7 @@
 {
   "name": "thermal-analytic",
-  "version": "0.1.0",
-  "description": "Closed-form heat transfer and solar: conduction networks, convection correlations, radiation, fins, steady-state and lumped transient temperature, flat-plate collectors, clear-sky irradiance.",
+  "version": "0.2.0",
+  "description": "Closed-form heat transfer and solar: conduction, convection, radiation, fins, steady and lumped transient temperature, a sealed handheld's average skin, flat-plate collectors, clear-sky irradiance.",
   "settles": [
     "u-value",
     "wall heat loss",
@@ -22,7 +22,10 @@
     "solar collector useful heat",
     "collector stagnation temperature",
     "plane-of-array irradiance",
-    "collector tilt and azimuth"
+    "collector tilt and azimuth",
+    "average skin temperature",
+    "shell heat budget",
+    "handheld surface temperature from dissipation"
   ],
   "claim_classes": [
     "thermal",
@@ -31,7 +34,9 @@
     "cooling",
     "insulation",
     "solar-thermal",
-    "energy"
+    "energy",
+    "handheld",
+    "portable-electronics"
   ],
   "provides_gates": [
     "thermal.conduction",
@@ -43,7 +48,8 @@
     "solar.collector_output",
     "solar.stagnation",
     "solar.irradiance",
-    "thermal.h_agreement"
+    "thermal.h_agreement",
+    "thermal.skin_temperature"
   ],
   "provides_views": [
     "collector_curve"
@@ -60,10 +66,11 @@
     "coating and surface degradation",
     "transient and startup",
     "what happens when the pump stops",
-    "sensor and control placement"
+    "sensor and control placement",
+    "a handheld's skin and its dissipation"
   ],
   "authors": [],
   "licence": "Apache-2.0",
-  "origin": "built by the extension protocol from standard heat-transfer texts (Churchill-Chu, Churchill-Bernstein, McAdams, Duffie & Beckman, ASHRAE clear-day); no solver, no network calls",
+  "origin": "built by the extension protocol from standard heat-transfer texts (Churchill-Chu, Churchill-Bernstein, McAdams, Duffie & Beckman, ASHRAE clear-day); no solver, no network calls. The handheld gate adds natural convection plus radiation over a sealed shell; no project's design came with it",
   "basis": "sourced"
 }

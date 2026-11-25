@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Four falsifiers for an exported candidate. None imports the SIMP solver."""
+"""Three measurements of an exported candidate. None imports the SIMP solver.
+
+Their limits are ceilings. Without the comparator the report could not state
+which side of a SIMP limit its measured result was on.
+"""
 import os
 from nopekit.gates import gate
 from nopekit.models import NegativeControl, Tier, Verdict
@@ -10,17 +14,6 @@ P = load_path(os.path.join(os.path.dirname(__file__), "_part.py"))
 
 def control(name, note):
     return NegativeControl(fixture=f"selftest/cases.py:{name}", note=note)
-
-
-@gate(id="simp.case_valid", title="The static part case is well specified", claims=["simp-case"],
-      tier=Tier.INSTANT, settles="static model inputs", basis="model-only",
-      negative_control=control("invalid_material", "negative Young's modulus: same part and load"))
-def case_valid(ctx):
-    try:
-        P.case(ctx)
-    except (ValueError, TypeError, KeyError) as exc:
-        return Verdict(gate="simp.case_valid", passed=False, detail=str(exc))
-    return Verdict(gate="simp.case_valid", passed=True, detail="finite isotropic material, patch loads, support and stress region")
 
 
 @gate(id="simp.volume", title="The exported part fits the material budget", claims=["simp-volume"],
@@ -34,7 +27,7 @@ def volume(ctx):
     limit = ctx.param("simp_volume_limit_mm3")
     if not P.number(limit) or limit <= 0:
         raise ValueError("simp_volume_limit_mm3 must be positive and finite")
-    return Verdict(gate="simp.volume", passed=v <= limit, measured=v, limit=limit, units="mm^3",
+    return Verdict(gate="simp.volume", passed=v <= limit, measured=v, limit=limit, units="mm^3", comparator="<=",
                    detail=f"exported connected solid: {v:.3f} mm^3 against {limit:g} mm^3")
 
 
@@ -45,7 +38,7 @@ def structural(ctx, gate_id, key, limit_key, units):
         raise ValueError(f"{limit_key} must be positive and finite")
     result, evidence = P.solve(ctx, p, gate_id)
     value = result[key]
-    return Verdict(gate=gate_id, passed=value <= limit, measured=value, limit=limit, units=units,
+    return Verdict(gate=gate_id, passed=value <= limit, measured=value, limit=limit, units=units, comparator="<=",
                    detail=f"CalculiX on exported part: {value:.6g} {units} against {limit:g}; "
                           "two meshes agree within 5%; equilibrium residual within 0.5% of load",
                    evidence=evidence)

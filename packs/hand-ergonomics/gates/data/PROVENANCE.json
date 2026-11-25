@@ -1,0 +1,110 @@
+{
+  "_what": "Where every row of ansur1988_hand.csv comes from. The table holds seven hand measurements of each of the 3,982 subjects of the 1988 Anthropometric Survey of U.S. Army Personnel (ANSUR 1988), copied from the two public per-subject files without change. derive_hand_table.py rebuilds it byte for byte from those files and refuses a file whose sha256 is not the one below. ergo.digit_reach refuses a table whose sha256 is not table.sha256.",
+  "table": {
+    "file": "ansur1988_hand.csv",
+    "sha256": "1382c92ad96b1138c4ea87050ac9c8be7c71652bf0d0abfb94b3ca92b3cdbd69",
+    "subjects": {"F": 2208, "M": 1774},
+    "units": "mm, integers, as the public files give them",
+    "order": "the women in the order of ansurWomen.csv, then the men in the order of ansurMen.csv",
+    "columns": "sex (F or M), subject (SUBJECT_NUMBER of its file), then the seven measurements under columns"
+  },
+  "index_page": "https://www.openlab.psu.edu/ansur/",
+  "sources": [
+    {"file": "ansurWomen.csv", "sex": "F",
+     "url": "https://tools.openlab.psu.edu/publicData/ansurWomen.csv",
+     "sha256": "74fb63a9efacd27000dbe3bb664f5dc261d0692a0c71b14a893deca041a12992",
+     "subjects": 2208},
+    {"file": "ansurMen.csv", "sex": "M",
+     "url": "https://tools.openlab.psu.edu/publicData/ansurMen.csv",
+     "sha256": "bd7b4bc27db15e6131a44f17836228c131c73de9692794afc123aee2d2e9004e",
+     "subjects": 1774}
+  ],
+  "report": {
+    "citation": "Gordon CC, Churchill T, Clauser CE, Bradtmiller B, McConville JT, Tebbetts I, Walker RA. 1988 Anthropometric Survey of U.S. Army Personnel: Methods and Summary Statistics. Technical Report NATICK/TR-89/044, U.S. Army Natick Research, Development and Engineering Center, September 1989.",
+    "url": "https://tools.openlab.psu.edu/publicData/ANSUR-TR89-044.pdf",
+    "sha256": "331508cd2c2f50a9e1854722a2dbb8842745358ee0b015c4d452ff52e946fbc1",
+    "distribution": "Approved for public release; distribution unlimited (the cover and the report documentation page, block 3).",
+    "ages": "Table 1, p. 4 (Age Distribution of Subjects in the Working Data Base): men 17 to 51 (one subject aged 17), women 18 to 50; mean age 27.22 men, 26.19 women.",
+    "pages": "The page numbers below are the report's printed numbers. The PDF page is the printed number plus 13."
+  },
+  "columns": {
+    "hand_length_mm": {
+      "source_column": "HAND_LNTH",
+      "definition": "(59) Hand Length, p. 190: the length of the right hand between the stylion landmark on the wrist and the tip of the middle finger, Poech sliding caliper; palm on a table, fingers together, thumb abducted.",
+      "report_mean_mm": {"F": 180.5, "M": 193.8},
+      "report_mean_page": 191
+    },
+    "hand_breadth_mm": {
+      "source_column": "HAND_BRTH_AT_METACARPALE",
+      "definition": "(57) Hand Breadth, p. 186: the breadth of the right hand between the landmarks at metacarpale II and metacarpale V, sliding caliper; palm on a table, fingers together, thumb abducted.",
+      "report_mean_mm": {"F": 79.4, "M": 90.4},
+      "report_mean_page": 187
+    },
+    "thumb_breadth_mm": {
+      "source_column": "THUMB_BRTH",
+      "definition": "(105) Thumb Breadth, p. 282: the maximum breadth of the right thumb perpendicular to its long axis, Holtain caliper; thumb straight and held away from the hand at about 45 degrees.",
+      "report_mean_mm": {"F": 20.7, "M": 24.1},
+      "report_mean_page": 283
+    },
+    "wrist_thumbtip_mm": {
+      "source_column": "WRIST_TO_THUMBTIP_LNTH",
+      "definition": "(130) Wrist-Thumbtip Length, p. 332: the horizontal distance between the stylion landmark on the right wrist and the tip of the right thumb, Poech caliper; the little-finger side of the hand on a flat surface, the thumb held straight and in line with the long axis of the forearm, resting on the first knuckle of the curved index finger.",
+      "report_mean_mm": {"F": 117.6, "M": 124.4},
+      "report_mean_page": 333
+    },
+    "wrist_index_mm": {
+      "source_column": "WRIST_TO_INDEX_FINGER_LNTH",
+      "definition": "(129) Wrist-Index Finger Length, p. 330: the distance between the stylion landmark on the right wrist and the tip of the right index finger, Poech caliper; palm on a table, fingers together, thumb abducted, middle finger parallel to the long axis of the forearm.",
+      "report_mean_mm": {"F": 169.2, "M": 180.8},
+      "report_mean_page": 331
+    },
+    "wrist_grip_mm": {
+      "source_column": "WRIST_TO_CENTER_OF_GRIP_LNTH",
+      "definition": "(125) Wrist-Center of Grip Length, p. 322: the horizontal distance between the stylion landmark on the right wrist and the center of a dowel (1-1/4 in diameter) gripped in the right hand, Poech caliper; the base of the dowel flush with the bottom of the fist, the fist in line with the long axis of the forearm.",
+      "report_mean_mm": {"F": 66.3, "M": 69.7},
+      "report_mean_page": 323
+    },
+    "wrist_circ_mm": {
+      "source_column": "WRIST_CIRC-STYLION",
+      "definition": "(126) Wrist Circumference, p. 324: the circumference of the wrist perpendicular to the long axis of the forearm, tape over the stylion landmark; right arm forward, palm up.",
+      "report_mean_mm": {"F": 151.2, "M": 174.2},
+      "report_mean_page": 325
+    }
+  },
+  "measured_on_the_table": {
+    "_what": "Read off the shipped table (type-7 percentiles, as numpy's default), so a reader can check them without the raw files.",
+    "reach_beyond_grip_mm": {
+      "_what": "wrist_thumbtip_mm minus wrist_grip_mm for each subject",
+      "F": {"P5": 42.0, "P10": 44.0, "P90": 59.0, "sd": 5.76},
+      "M": {"P5": 46.0, "P10": 47.3, "P90": 62.0, "sd": 5.58}
+    },
+    "percentile_pair_mm": {
+      "_what": "P5(wrist_thumbtip_mm) minus P5(wrist_grip_mm): what adding percentiles gives, 6 mm more than the subjects' own P5 for the women",
+      "F": 48.0, "M": 52.0
+    },
+    "pearson_r_wrist_thumbtip_wrist_grip": {"F": 0.54, "M": 0.58}
+  },
+  "cross_check": {
+    "dataset": "ANSUR II (2012), the public per-subject files",
+    "index_page": "https://www.openlab.psu.edu/ansur2/",
+    "files": [
+      {"file": "ANSUR_II_FEMALE_Public.csv", "url": "https://tools.openlab.psu.edu/publicData/ANSUR_II_FEMALE_Public.csv",
+       "sha256": "ed7e800aa97a4d42f8286b988be2fe1883a2e789588169db959864b707d1757a", "subjects": 1986},
+      {"file": "ANSUR_II_MALE_Public.csv", "url": "https://tools.openlab.psu.edu/publicData/ANSUR_II_MALE_Public.csv",
+       "sha256": "0547aea0170e5293de519389981135e75803f02e6d40c77ace740decc0caac64", "subjects": 4082}
+    ],
+    "why_not_the_main_dataset": "Its files have no wrist-thumbtip, wrist-index finger or wrist-center of grip length (forearmcenterofgriplength is elbow to grip, not wrist to grip), so the reach rule cannot be computed on its subjects.",
+    "hand_length_mm": {"1988": {"F": {"P5": 165.0, "P95": 197.0}, "M": {"P5": 179.0, "P95": 210.0}},
+                       "ANSUR II": {"F": {"P5": 165.0, "P95": 199.0}, "M": {"P5": 177.0, "P95": 210.0}},
+                       "largest_difference_mm": 2.0},
+    "wrist_circ_mm": {"1988": {"F_P5": 140.0, "M_P95": 188.3}, "ANSUR II": {"F_P5": 142.2, "M_P95": 191.0}}
+  },
+  "derivation": {
+    "script": "derive_hand_table.py",
+    "steps": [
+      "Download ansurWomen.csv and ansurMen.csv from the URLs above into one directory.",
+      "Run python3 derive_hand_table.py <that directory> --check: it refuses a file whose sha256 differs, and exits 0 when the shipped table is the derived one.",
+      "Without --check it writes the table beside itself."
+    ]
+  }
+}

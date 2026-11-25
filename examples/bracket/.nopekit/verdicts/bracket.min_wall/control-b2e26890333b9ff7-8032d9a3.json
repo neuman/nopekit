@@ -1,0 +1,157 @@
+{
+  "schema": 1,
+  "kind": "control",
+  "gate": "bracket.min_wall",
+  "rho": "b2e26890333b9ff77e99cacf5db5b3fe246a9a2ba8a7a871a8bb49f50b62dd05",
+  "static": "764e9cc3e1c1bb42f7782fc7cabaacc812f3615b60509311b3e65c7f3711076a",
+  "static_parts": {
+    "spine": "9814dfd748adb421d69563472f0fca5604e466f16217c82a7c4d9ea058c00b7a",
+    "code": {
+      "digest": "f026870eea78b411e6e8384e712ba89e3cb023f76dfc6aca31b62a135e7c0893",
+      "files": [
+        "gates/structural.py"
+      ]
+    },
+    "selftest": {
+      "digest": "c37edcc33de9c8b1839bab5ed8b6c1377619163c9bcfbb1823d9188484bc11f1",
+      "files": {
+        "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+        "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+      }
+    },
+    "nc": {
+      "fixture": "selftest/bad_configs.py:fat_nozzle",
+      "expect": "fail",
+      "note": "the same part on a 1.2 mm nozzle, where 3 perimeters no longer fit in the section — the geometry is untouched and the process is wrong",
+      "good": "",
+      "mutation": true
+    }
+  },
+  "host": "known-good",
+  "fixture": {
+    "digest": "c04607054719152157838eb2f982f420bbc7e5975e8b133b530b30dad215ba3b",
+    "files": {
+      "model/bracket.py": "ce20d2c788710944d2ed4b791a1b82023cac47f5883df30c783f1da06c5a0b9b",
+      "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+      "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+    }
+  },
+  "reads": {
+    "params": [
+      [
+        [
+          "config",
+          "nozzle_d"
+        ],
+        "e0036ec891dc393d61176adbce8c552c241fe17ef71e0b3eb7b7f59194a43387",
+        1.2
+      ],
+      [
+        [
+          "config",
+          "thickness"
+        ],
+        "55da3374d16bff02ddd713a81a8663b51507102a3f0dec673f2946d98d64be93",
+        3.0
+      ],
+      [
+        [
+          "min_wall"
+        ],
+        "4d10e184805158835092a344b9fb821b773731555027392cf22bbe94f79e3b59",
+        3.5999999999999996
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "host": [],
+    "opaque": []
+  },
+  "bad": "fail",
+  "bad_extra": [],
+  "good": {
+    "outcome": "pass",
+    "reads": {
+      "params": [
+        [
+          [
+            "config",
+            "nozzle_d"
+          ],
+          "cbffa691b0145b8938393dfedf84cb1ee0c9a35d2e6647f4668d86e6e0f52ce1",
+          0.4
+        ],
+        [
+          [
+            "config",
+            "thickness"
+          ],
+          "2fbdc71b23395e14fa7d5b76d72cd17d618f8c0dca6fb840f309652f68884277",
+          8.0
+        ],
+        [
+          [
+            "min_wall"
+          ],
+          "5d681cc2d772208eb5c11714a2fe39ebc57b5736c9359981dd9dfd5170f61b04",
+          1.2000000000000002
+        ]
+      ],
+      "files": {},
+      "dirs": {},
+      "ledger": {},
+      "host": [],
+      "opaque": []
+    },
+    "extra": [],
+    "measured": 8.0,
+    "limit": 1.2,
+    "units": "mm",
+    "detail": "thinnest section 8.0 mm vs 1.2 mm minimum (3 perimeters at a 0.4 mm nozzle)",
+    "goalpost": []
+  },
+  "mutation": {
+    "runs": 75,
+    "boundary": "",
+    "results": [
+      {
+        "key": [
+          "config",
+          "thickness"
+        ],
+        "before": 8.0,
+        "after": 1.02,
+        "outcome": "fail",
+        "measured": 1.02,
+        "limit": 1.2
+      },
+      {
+        "key": [
+          "min_wall"
+        ],
+        "before": 1.2000000000000002,
+        "after": 9.42,
+        "outcome": "fail",
+        "measured": 8.0,
+        "limit": 9.42
+      }
+    ],
+    "inconclusive": [],
+    "not_mutated": [
+      {
+        "key": [
+          "config",
+          "nozzle_d"
+        ],
+        "why": "never-lands"
+      }
+    ]
+  },
+  "admitted": "paired",
+  "detail": "correctly failed on selftest/bad_configs.py:fat_nozzle (the same part on a 1.2 mm nozzle, where 3 perimeters no longer fit in the section — the geometry is untouched and the process is wrong): thinnest section 3.0 mm vs 3.6 mm minimum (3 perimeters at a 1.2 mm nozzle)",
+  "measured": 3.0,
+  "limit": 3.6,
+  "units": "mm",
+  "digest": "7e24b168bc5b05b2066a675205cdd37c2bfea874d92476ffe34e67661e3f1968"
+}

@@ -1,0 +1,21 @@
+{
+  "statement": "At least 95% of the women and 95% of the men in ANSUR 1988 (US Army, 1988) can reach every control pressed from its grip without a regrip",
+  "kind": "measurable",
+  "acceptance": {
+    "quantity": "digit reach accommodation",
+    "comparator": ">=",
+    "limit": 95,
+    "units": "%"
+  },
+  "rationale": "a control out of reach is found in the hand, after the board and the shell have frozen its position; 95% of each sex is the usual human-factors target, and a market with smaller hands sets a higher one",
+  "tags": [
+    "digit-reach"
+  ],
+  "mechanism": {
+    "how": "For each ANSUR 1988 subject, the wrist sits behind each declared grip by the subject's wrist-centre of grip length; a control is in reach when it lies within the subject's wrist-thumbtip (thumb) or wrist-index finger (index finger) length; the share of the worse sex who reach every judged control, on a declared layout that ergo.layout_agrees holds to the exported scene",
+    "evaluators": [
+      "ergo.digit_reach",
+      "ergo.layout_agrees"
+    ]
+  }
+}

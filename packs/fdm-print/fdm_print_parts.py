@@ -74,6 +74,19 @@ VIEW_ID = "print_part"
 #: the page could show.
 MESH_PATH_KEYS = ("mesh_path", "stl_path", "part_mesh", "geometry_path")
 
+BED_TOLERANCE_MM = 0.05
+"""How close to the lowest point a face must be to count as sitting ON the bed, mm.
+
+Read by ``gates/mesh.py`` (which faces are the first layer, not overhangs) and by
+``gates/slicer.py`` (a mesh whose lowest point is further than this from z = 0 is
+not in print pose). One number in one place: the two gates must agree on where the
+bed is. It lived in ``gates/mesh.py`` until the slicer gate needed it, and a gate
+module cannot load another one (its gates would register twice).
+
+This exclusion is not cosmetic. The bottom face of any part is, geometrically, a
+90 deg overhang facing straight down; without excluding it every solid ever
+modelled fails the overhang gate and the gate becomes noise."""
+
 #: Where the part's name is, in order. Optional; the mesh filename is the fallback.
 PART_NAME_KEYS = ("part_name", "part", "name")
 
@@ -403,3 +416,107 @@ def part_set(ctx: Any) -> PartSet:
             clean = f"{clean}-{used[clean]}"
         parts.append(Part(name=clean, raw=str(path or ""), bbox=bbox))
     return PartSet(parts=tuple(parts), source=" + ".join(sources))
+
+
+@dataclass(frozen=True)
+class PerPart:
+    """``{part: number}`` from one per-part map, and the key that stated it.
+
+    The names are sanitised as :func:`part_set` sanitises them, so a map entry
+    and a set member that name one part compare equal. ``problem`` is why a
+    stated map could not be read, or ``""``.
+    """
+
+    values: dict
+    source: str = ""
+    problem: str = ""
+
+
+def per_part(ctx: Any, keys: Sequence[str], what: str) -> PerPart:
+    """The first of ``keys`` the projection states, read as ``{part: number}``.
+
+    What slipped through with a single number only: ``fdm.min_wall`` and the
+    guard judged one part, so the person picked the part by hand, and no verdict
+    named it. That is the complaint this module's part set was written to end,
+    and the single-number gates had kept it. A map states every part's number.
+
+    It is read strictly, and each problem is returned rather than dropped: a value
+    that is not a positive finite number, a name that sanitises to another
+    entry's name, a map that is not a mapping. A dropped entry would leave its
+    part judged on nothing, and the verdict would not say so. ``what`` names the
+    quantity in the problem line.
+    """
+    raw, key = _first_stated(ctx, keys)
+    if raw is None:
+        return PerPart(values={})
+    if not isinstance(raw, dict):
+        return PerPart(values={}, source=key, problem=(
+            f"{key} is {type(raw).__name__}; write {{part: {what}}}, one entry per "
+            f"part, named as the part set names it"))
+    values: dict = {}
+    for name, value in raw.items():
+        clean = sanitise(name)
+        number = None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+        if number is None or not (number > 0.0) or number == float("inf"):
+            return PerPart(values={}, source=key, problem=(
+                f"{key}[{name!r}] is {value!r}; {what} is a positive number"))
+        if clean in values:
+            return PerPart(values={}, source=key, problem=(
+                f"{key} names {clean!r} twice once the names are made safe for the "
+                f"viewer; name each part once"))
+        values[clean] = number
+    return PerPart(values=values, source=key)
+
+
+#: Where the build direction is stated, primary spelling first. Resolved
+#: pack-scoped first (``fdm.build_axis``) by ``GateContext.param``.
+BUILD_AXIS_KEYS = ("build_axis", "layer_normal", "print_axis")
+
+
+#: Axis NAMES this pack accepts wherever it wants a direction, beside the
+#: ``[x, y, z]`` vector. ``build_axis: "z"`` is what a person writes, and a reader
+#: who writes it must not be told the key is missing.
+AXIS_NAMES: dict[str, list[float]] = {
+    "x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0],
+}
+
+
+def direction(value: Any) -> list[float] | None:
+    """A direction from an ``[x, y, z]`` vector OR an axis name, else None.
+
+    Accepted: ``[0, 0, 1]``, ``"z"``, ``"+Z"``, ``"-y"``, ``"z_axis"``.
+
+    The string form is here because the vector-only version produced the worst
+    kind of message. A project set ``load_axis: "z"``, which is what a person
+    writes, and the gate reported *"the projection has no load_axis /
+    primary_load_axis"* — which reads as "you did not set it" to the one reader
+    who knows they did, and sends them looking in the model for a key that is
+    already there. A value the gate cannot read and a value that is absent are
+    different findings and must not share a sentence (``gates/printability.py``'s
+    ``_direction_problem`` says what the unreadable case says now).
+
+    One copy for every gate in the pack. What slipped through with three: the
+    mesh gates read ``"z-axis"`` and ``[0, 0, 2]`` as +Z and ``fdm.slice`` read
+    neither, so the slicer skipped ("Orca slices along +Z") on a project the
+    mesh gates measured along +Z; and only ``gates/printability.py`` read ``"z-"``.
+    """
+    if isinstance(value, str):
+        text = value.strip().lower().replace(" ", "").replace("-axis", "").replace("_axis", "")
+        sign = 1.0
+        if text[:1] in "+-":
+            sign = -1.0 if text[0] == "-" else 1.0
+            text = text[1:]
+        if text[-1:] in "+-" and len(text) == 2:      # "z-" as well as "-z"
+            sign = -1.0 if text[-1] == "-" else sign
+            text = text[:-1]
+        base = AXIS_NAMES.get(text)
+        return [sign * c for c in base] if base else None
+    if isinstance(value, (bytes, bytearray)) or not isinstance(value, Iterable):
+        return None
+    try:
+        out = [float(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+    return out if len(out) == 3 else None

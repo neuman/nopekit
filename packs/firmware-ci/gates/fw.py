@@ -1,0 +1,654 @@
+# SPDX-License-Identifier: Apache-2.0
+"""firmware-ci — the CI job that builds the firmware, replayed with act in its own
+containers, and what the image that job writes shows.
+
+    fw.ci_job      tier 0  the CI job can be replayed, and a failed build cannot read green
+    fw.build       tier 1  that job, replayed with act, builds the firmware from this tree
+    fw.image_fits  tier 1  the image lies inside the region its memory map names
+    fw.sleep_wake  tier 1  where the image can enter deep sleep, it arms a deep-sleep wake
+    fw.tx_power    tier 1  the highest BLE transmit setting the image can reach is inside
+                           the setting its radio's grant was tested at
+
+**One mechanism for every stack.** The build is the CI's own job, run by act in
+the job's own containers on a copy of what the next commit would hold: Zephyr, NCS,
+ZMK, ESP-IDF, Arduino, PlatformIO, the Pico SDK, QMK and STM32 make builds take the
+same path. ``fw.ci_job`` is the replay's validity guard: each way it fails means a
+replay's green would not describe the build. ``fw.build`` reads the guard's choice
+itself (``_job``): it never replays a job the guard refuses or fails, and it
+replays one whose build the guard could not read, where the guard skips. The three
+readers need ``fw.build``; a gate whose prerequisite did not pass reads Skipped.
+One replay per sweep: the four tier-1 gates share it through ``ctx.load_file``
+(``_replay.loader``; measured in tests/test_firmware_ci, ``OneReplayPerSweep``).
+
+**What slipped through, and which gate it is for** (references/what-slipped-through.md):
+
+- ``fw.build``: a firmware repository's CI had never built its firmware. A build
+  step named an extra module in a way the build system did not read, the board
+  under the config tree was not found, and the red job went unread for many
+  revisions. GitHub's own run judges a pushed commit, and nobody read it; the
+  replay puts the verdict on the working tree, through CI's own steps and images.
+- ``fw.ci_job``: a build piped into ``tee`` under GitHub's default shell, which has
+  no pipefail. The build failed and the job read green.
+- ``fw.image_fits``: a hand-written board definition whose flash layout disagreed
+  with the bootloader on the device. It built clean: the linker compares against
+  the build's own layout, the file that was wrong. ESP-IDF only warns when one OTA
+  slot is too small.
+- ``fw.sleep_wake``: deep sleep was turned on and no source could wake the chip.
+  The build passed.
+- ``fw.tx_power``: a firmware's Bluetooth transmit setting was raised, and nothing
+  compared it with the setting its radio module was tested at. The claim meant to
+  guard it compared the setting with the grant's measured output, another
+  quantity, so it could neither show nor rule out the fault.
+
+**Missing inputs skip; they never default.** Which workflow, which image and which
+region are the project's to say. The region is never taken from the build.
+"""
+from __future__ import annotations
+
+import json
+import os
+import posixpath
+
+from nopekit.gates import gate, GateContext
+from nopekit.modelio import load_path as _load_path
+from nopekit.models import NegativeControl, Tier, Verdict
+from nopekit.util import NopekitError
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+C = _load_path(os.path.join(_HERE, "_ci.py"))
+R = _load_path(os.path.join(_HERE, "_replay.py"))
+I = _load_path(os.path.join(_HERE, "_image.py"))
+W = _load_path(os.path.join(_HERE, "_wake.py"))
+T = _load_path(os.path.join(_HERE, "_tx.py"))
+
+_TOOLS = ["act", "docker", "git"]
+_PY = ["yaml"]
+
+_NO_WORKFLOW = ("no firmware_ci_workflow: the GitHub Actions workflow that builds the "
+                "firmware, from the project root; this pack will not guess which CI you "
+                "mean (references/ci-templates.md has one for each stack)")
+
+
+def _skip(gid: str, reason: str) -> Verdict:
+    return Verdict(gate=gid, passed=False, skipped=True, skip_reason=reason)
+
+
+def _opt(ctx: GateContext, key: str) -> str | None:
+    value = ctx.param(key)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return str(value)
+
+
+def _workflow(ctx: GateContext) -> str | None:
+    rel = _opt(ctx, "firmware_ci_workflow")
+    if rel is None:
+        return None
+    return rel if os.path.isabs(rel) else os.path.join(ctx.root, rel)
+
+
+class _GuardFails(R.ToolFault):
+    """The guard fails this CI: a green replay of it would say nothing. ``fw.build``
+    skips on it (the guard's verdict is the fail); a reader, which needs
+    ``fw.build``, never gets this far."""
+
+
+def _job(ctx: GateContext, path: str):
+    """``(job, workflow)`` as the guard chose it; :class:`R.ToolFault` when the
+    guard refuses the CI and :class:`_GuardFails` when it fails it: a build of
+    something else, or a green that hides a failed build, says nothing. A job
+    whose build the guard could not read (``job.blind``) is returned: the guard
+    skips, and the replay still judges the build's own result."""
+    try:
+        wf = ctx.load_file(path, loader=C.load)
+        found = C.choose(wf, job=_opt(ctx, "firmware_ci_job"), step=_opt(ctx, "firmware_ci_step"))
+    except C.Refused as exc:
+        raise R.ToolFault(f"the CI job is refused ({exc}); fw.ci_job says so") from exc
+    if isinstance(found, C.Fail):
+        raise _GuardFails(f"fw.ci_job fails this CI ({found.reason}): a green replay would say "
+                          f"nothing, so it is not replayed")
+    return found, wf
+
+
+def _matrix(ctx: GateContext) -> dict:
+    """``firmware_ci_matrix``: the one entry of a matrix job to replay, ``{key:
+    value}`` (act's ``--matrix key:value``, one per key); ``{}`` when unset."""
+    raw = ctx.param("firmware_ci_matrix")
+    if raw is None or raw == {}:
+        return {}
+    if not isinstance(raw, dict) or not all(
+            isinstance(k, str) and k and ":" not in k
+            and isinstance(v, (str, int, float, bool)) for k, v in raw.items()):
+        raise R.ToolFault(f"firmware_ci_matrix is {raw!r}; it names one matrix entry as "
+                          f"{{key: value}}, a value for each key of the job's matrix")
+    return dict(raw)
+
+
+def _timeout(ctx: GateContext) -> float | None:
+    """``firmware_ci_timeout_s``: the replay's wall clock in s; ``None`` for the
+    pack's own (``_replay.TIMEOUT_S``)."""
+    raw = ctx.param("firmware_ci_timeout_s")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 < raw < 1e6:
+        raise R.ToolFault(f"firmware_ci_timeout_s is {raw!r}; it is the replay's wall clock "
+                          f"in s, more than 0")
+    return float(raw)
+
+
+def _replayed(ctx: GateContext, path: str):
+    """``(job, workflow, result)``: the sweep's one replay of the build job.
+
+    Every gate that reads the replay asks for it with the same loader: the job,
+    the images that come back whole (``firmware_image`` and ``firmware_elf``,
+    read by every such gate, so one replay serves them all), the matrix entry
+    and the timeout (``_replay.loader``)."""
+    job, wf = _job(ctx, path)
+    keep = tuple(g for g in (_opt(ctx, "firmware_image"), _opt(ctx, "firmware_elf")) if g)
+    return job, wf, ctx.load_file(path, loader=R.loader(job.job, keep, _matrix(ctx),
+                                                         _timeout(ctx)))
+
+
+def _built(ctx: GateContext, path: str):
+    """``(job, result)`` of a replay whose build stands, judged again as fw.build
+    judges it; :class:`R.ToolFault` when it does not, and on a matrix job replayed
+    whole, whose entries share one workspace in bind mode, so its files are the
+    last entry's (``firmware_ci_matrix`` names the one entry to replay)."""
+    job, wf, result = _replayed(ctx, path)
+    passed, detail = R.judge(result, job, _opt(ctx, "firmware_image"), R.tolerated(wf, job))
+    if not passed:
+        raise R.ToolFault(f"the build does not stand ({detail}); fw.build says why")
+    if job.matrix and not result.get("matrix"):
+        raise R.ToolFault(f"job {job.job} has a matrix: in a replay its entries share one "
+                          f"workspace in turn, so the files left are the last entry's; "
+                          f"name one entry in firmware_ci_matrix")
+    return job, result
+
+
+def _describe(job) -> str:
+    where = f"container {job.image}" if job.image else f"runs-on {job.runs_on}"
+    shell = f", shell {job.shell}" if job.shell else ""
+    return f"job {job.job}, step {job.name!r} ({job.command}){shell}, {where}"
+
+
+# --------------------------------------------------------------------------- #
+# the guard
+# --------------------------------------------------------------------------- #
+@gate(
+    id="fw.ci_job",
+    basis="sourced",
+    title="The CI job that builds the firmware can be replayed, and a failed build "
+          "cannot read green",
+    description="The replay's validity guard: reads the workflow, chooses the job and "
+                "its build step, and fails a CI that can read green on a failed build "
+                "(GitHub's documented continue-on-error and default-shell behaviour).",
+    claims=["firmware-build", "ci-build"],
+    tier=Tier.INSTANT,
+    settles="ci build job",
+    requires_python=_PY,
+    negative_control=NegativeControl(
+        fixture="selftest/bad_variants.py:masked_pipe",
+        note="the Build step's run becomes `idf.py build 2>&1 | tee build.log` with no "
+             "shell: key: under GitHub's bash -e {0} the pipeline exits with tee's status",
+    ),
+)
+def ci_job(ctx: GateContext) -> Verdict:
+    """The workflow parses, one job builds, one step in it is the build, and no
+    form of masking lets that step read green on a failed build:
+    ``continue-on-error: true``, ``|| true``, ``set +e`` (or a shell with no
+    ``-e``) before more commands, the build before an ``&&`` and then more
+    commands, or a pipe under a shell with no pipefail. Where the step's own
+    lines hold no build command, every shell script of the repository it runs is
+    read by the same rules, a sourced one under the options in force where it is
+    sourced.
+
+    A shape the replay cannot run, and a job or step this gate cannot choose, is
+    errored: the CI may be sound, and the pack cannot say. A build this gate
+    cannot read (inside an action, a Python script, or a command it does not
+    know) is skipped, naming what it could not read: never a pass. But a line
+    that runs such a file with ``|| true``, or pipes it under no pipefail, fails
+    when no script the gate read holds the build (``_ci._blind_masked``)."""
+    gid = "fw.ci_job"
+    path = _workflow(ctx)
+    if path is None:
+        return _skip(gid, _NO_WORKFLOW)
+    try:
+        wf = ctx.load_file(path, loader=C.load)
+        found = C.choose(wf, job=_opt(ctx, "firmware_ci_job"), step=_opt(ctx, "firmware_ci_step"))
+    except C.Refused as exc:
+        return Verdict(gate=gid, passed=False, error=f"refused: {exc}")
+    if isinstance(found, C.Fail):
+        return Verdict(gate=gid, passed=False, detail=found.reason)
+    if found.blind:
+        return _skip(gid, f"{_describe(found)}: {found.blind}; so it cannot say whether a "
+                          f"failed build reads green there, and fw.build's replay still "
+                          f"judges the build's own result")
+    return Verdict(gate=gid, passed=True, detail=f"{_describe(found)}; {_read(found)}")
+
+
+def _read(job) -> str:
+    """What the guard's pass rests on: the step's own lines, the shell scripts it
+    read to find the build, and what it did not read. What slipped through "no
+    masking" (holdout review, a console's upstream workflow): the build ran in a
+    Python script that discards docker's exit status, and the pass claimed what
+    only the step's own lines showed; and then (holdout review round 2, a watch
+    and that console) a pass whose build ran inside an action or a script the
+    guard did not read at all. Such a build is a skip now (``job.blind``)."""
+    said = "no masking in the step's own lines"
+    if job.read:
+        said += f" or in {', '.join(job.read)}, which it runs"
+    if job.unread:
+        verb = "is" if len(job.unread) == 1 else "are"
+        return f"{said}; {', '.join(job.unread)} {verb} not read"
+    return said
+
+
+# --------------------------------------------------------------------------- #
+# the build
+# --------------------------------------------------------------------------- #
+@gate(
+    id="fw.build",
+    basis="established",
+    title="The CI workflow, replayed with act in its own containers, builds the firmware "
+          "from this tree",
+    claims=["firmware-build"],
+    tier=Tier.BUILD,
+    settles="firmware build",
+    requires_tools=_TOOLS,
+    requires_python=_PY,
+    # No prerequisite: fw.build reads the guard's choice itself (``_job``). It
+    #    errors on a job the guard refuses and skips on one the guard fails, as
+    #    the ``needs`` edge did, and it replays a job whose build the guard could
+    #    not read, where the guard skips. Why the edge went (holdout review round
+    #    2): the guard passed a build inside an action or a Python script, over
+    #    lines that held no build, and now skips it; the spine never runs a gate
+    #    whose prerequisite skipped, so with the edge every such build would lose
+    #    fw.build and its three readers. *Rejected:* the edge with a guard that
+    #    passes such a build (a pass over lines it never read); the edge with the
+    #    skip (the replay, which judges the build's own result, would never run).
+    negative_control=NegativeControl(
+        fixture="selftest/bad_variants.py:unresolved_symbol",
+        note="main.c declares `extern void board_power_init(void);` and calls it, and no "
+             "source defines it: the link stops at `undefined reference to`",
+    ),
+)
+def build(ctx: GateContext) -> Verdict:
+    """act's per-step result for the build step, in the job's own container: a
+    failure on a line from the closed list fails, as does a success whose output
+    holds one (a masking the guard did not see), ZMK's missing-config warning, and
+    a ``firmware_image`` the job did not write. A tool fault is errored: a step
+    before the build that fails, act or docker stopping, a timeout, a compiler
+    the machine stopped, and a failure on no line the list holds."""
+    gid = "fw.build"
+    path = _workflow(ctx)
+    if path is None:
+        return _skip(gid, _NO_WORKFLOW)
+    try:
+        job, wf, result = _replayed(ctx, path)
+    except R.WrongAct as exc:
+        return _skip(gid, str(exc))
+    except _GuardFails as exc:
+        return _skip(gid, str(exc))
+    except R.ToolFault as exc:
+        return Verdict(gate=gid, passed=False, error=str(exc))
+    # The log is kept on every outcome the replay reached: an errored replay's
+    # cause sits in the failing step's own output (``_replay.evidence``).
+    try:
+        passed, detail = R.judge(result, job, _opt(ctx, "firmware_image"),
+                                 R.tolerated(wf, job))
+    except R.ToolFault as exc:
+        return Verdict(gate=gid, passed=False, error=str(exc),
+                       evidence=R.evidence(result, job, ctx.out_path))
+    return Verdict(gate=gid, passed=passed, detail=detail,
+                   evidence=R.evidence(result, job, ctx.out_path))
+
+
+# --------------------------------------------------------------------------- #
+# what the image shows
+# --------------------------------------------------------------------------- #
+#: The tag whose claim states flash-use headroom (PACK.md's tag vocabulary:
+#: ``{"quantity": "flash use", "comparator": "<=", "limit": 85, "units": "%"}``),
+#: and the one condition ``fw.image_fits`` reads. What slipped through a fixed
+#: limit of 100 (holdout review, two projects): a claim that stated the
+#: headroom PACK.md recommends made the spine warn "one number in two places"
+#: (``claims.limit_disagreements``: the verdict said 100, the claim 85), the
+#: warning the spine keeps for a limit copied into a gate. Now the gate reports
+#: the claim's limit, and judges the bytes against the region as before.
+#: *Rejected:* reading ``memory-fit`` and ``ota-slot`` too (a claim there may
+#: hold RAM use or another quantity, and a pass is held to every condition its
+#: run read, ``gates._held_to_acceptances``); no limit on the verdict (the spine
+#: compares a value only beside a limit, and the region's own bound is the
+#: limit when no claim states one).
+FIT_TAG = "flash-fit"
+FIT_QUANTITY = "flash use"
+FIT_COMPARATORS = ("<=", "<")
+#: The spine's words for a goalpost that is absent (``verdicts.acceptance_of``):
+#: no claim carries the tag, or its claim states no limit. Either leaves the
+#: region's own bound, 100 %, as the limit. Any other problem (two conditions
+#: under the tag, a limit that is not a number) errors the gate. Should the
+#: spine's wording change, the gate errors where it fell back: loud, never a
+#: pass against a guess.
+_ABSENT = ("no claim is named or tagged", "has no limit to judge against")
+#: The spine's words for two conditions under the tag (``verdicts.acceptance_of``:
+#: ``'flash-fit' names A (...) and B (...): read one claim by its id``). The gate
+#: still errors, as the spine's contract says (one goalpost per tag), and says
+#: what the project does: the tag is the pack's, so "read one claim by its id",
+#: the spine's advice to a gate's author, is not the project's to follow. What
+#: slipped through quoting the spine alone (review of the holdout fixes): a
+#: project with a claim at the region's bound (flash use <= 100 %) and a
+#: headroom claim (<= 85 %), both tagged ``flash-fit``, read an error it could not
+#: act on, where a gate that always said 100 had passed them. *Rejected:* the
+#: strictest limit (the looser claim then reads Failing between the two limits,
+#: and the spine warns "one number in two places" on its limit); the region's
+#: bound, as before (that warning comes back on the headroom claim, the one this
+#: gate's reading of the claim removed); advising ``memory-fit`` or ``ota-slot``
+#: for the other claim (the gate covers both tags, so its verdict at the headroom
+#: is that claim's too, with the same warning). Should the spine's wording
+#: change, the spine's own words reach the project: loud, never a pass.
+_TWO = ": read one claim by its id"
+
+_NO_MAP = ("no app_memory_map: the region the bootloader or partition table gives the "
+           "app, from a cited record ({flash, app, ram?, other?}, {app: {size}} or "
+           "{esp_partition_table: <csv>}); this pack never takes it from the linker "
+           "script, the devicetree or the board's maximum size, the files the linker "
+           "already compares against")
+
+
+@gate(
+    id="fw.image_fits",
+    basis="sourced",
+    title="The built image lies inside the region its bootloader or partition table "
+          "gives it, on the part its memory map names",
+    claims=["flash-fit", "memory-fit", "ota-slot"],
+    tier=Tier.BUILD,
+    settles="flash use",
+    requires_tools=_TOOLS,
+    requires_python=_PY,
+    # Prerequisite fw.build: an image of firmware that does not build, or not from
+    #    CI's job, is not the design's. Isolated: ESP-IDF only warns when some app
+    #    partitions still fit, so the known-bad builds with exit 0.
+    needs=["fw.build"],
+    negative_control=NegativeControl(
+        fixture="selftest/bad_variants.py:short_ota_slot",
+        note="ota_1 in partitions.csv shrinks to 0x20000, below the image: IDF warns "
+             "'1/3 app partitions are too small' and exits 0; an update into ota_1 "
+             "cannot be written",
+    ),
+)
+def image_fits(ctx: GateContext) -> Verdict:
+    """Flash use in % of the region, rounded up to 0.1 %: on the address route,
+    the highest byte the image writes past the app's start; on the size routes,
+    the file against the slot (an ESP partition table's smallest app partition,
+    read by ESP-IDF's own parser). The limit is the ``flash-fit`` claim's
+    headroom (``flash use <= 85 %``) where one states it, else 100, the region's
+    own bound. Either way one byte past the region fails: the bytes decide that,
+    not the rounded figure. Fails with no limit: bytes in flash outside the app,
+    a vector table not where the bootloader jumps, a RAM segment past a stated
+    bank or in the Arm SRAM region outside every stated bank."""
+    gid = "fw.image_fits"
+    path = _workflow(ctx)
+    if path is None:
+        return _skip(gid, _NO_WORKFLOW)
+    raw = ctx.param("app_memory_map")
+    if raw is None:
+        return _skip(gid, _NO_MAP)
+    glob = _opt(ctx, "firmware_image")
+    if glob is None:
+        return _skip(gid, "no firmware_image: the file the device receives (.uf2, .hex, "
+                          ".bin or .elf), as a path in the job's workspace, e.g. "
+                          "build/*.bin")
+    try:
+        acc = _fit_limit(ctx)
+        mm = I.parse_map(raw)
+        _job_, result = _built(ctx, path)
+        name, image = R.built_file(result, glob, "firmware_image")
+        if mm.shape == "esp":
+            csv = mm.csv if os.path.isabs(mm.csv) else os.path.join(ctx.root, mm.csv)
+            try:
+                with open(csv, encoding="utf-8") as fh:
+                    text = fh.read()
+            except OSError as exc:
+                raise I.ImageFault(f"app_memory_map.esp_partition_table {mm.csv!r} cannot "
+                                   f"be read ({type(exc).__name__})") from exc
+            shown = mm.csv if not os.path.isabs(mm.csv) else os.path.basename(mm.csv)
+            fit = I.judge_esp(image, name, I.esp_slots(text, mm.offset), shown)
+        elif mm.shape == "slot":
+            fit = I.judge_slot(image, name, mm.slot)
+        else:
+            elf = None
+            elf_glob = _opt(ctx, "firmware_elf")
+            if elf_glob is not None and not I.is_elf(image):
+                elf = I.read_elf(R.built_file(result, elf_glob, "firmware_elf")[1])
+            fit = I.judge_address(image, name, mm, elf)
+    except R.WrongAct as exc:
+        return _skip(gid, str(exc))
+    except (R.ToolFault, I.ImageFault, NopekitError) as exc:
+        return Verdict(gate=gid, passed=False, error=str(exc))
+    if fit.problems:
+        return Verdict(gate=gid, passed=False, detail="; ".join(fit.problems))
+    # The region's bound is the bytes' (``fit.fits``), and the figure is rounded
+    # up, so the two agree: what slipped through a figure rounded to the nearest
+    # 0.1 % is in ``_image.percent_up``. A claim's headroom is judged on the
+    # same rounded-up figure, so it never passes a byte the claim rejects.
+    if acc is None:
+        return Verdict(gate=gid, passed=fit.fits and fit.measured <= 100.0,
+                       measured=fit.measured, limit=100.0, comparator="<=", units="%",
+                       detail=fit.said)
+    detail = f"{fit.said}; against {acc.comparator.value} {acc.limit:g} % ({FIT_TAG})"
+    if not fit.fits:
+        detail += "; past the region itself"
+    return Verdict(gate=gid, passed=fit.fits and acc.holds(fit.measured),
+                   measured=fit.measured, limit=acc.limit, comparator=acc.comparator.value,
+                   units="%", detail=detail)
+
+
+def _fit_limit(ctx: GateContext):
+    """The ``flash-fit`` claim's condition when one states a limit (``FIT_TAG``),
+    else ``None``: the region's own bound. :class:`R.ToolFault` when the claim
+    states it in a form this gate does not compute (flash use in %, held as at
+    most), and when two claims under the tag state different conditions
+    (``_TWO``)."""
+    try:
+        acc = ctx.acceptance(FIT_TAG)
+    except NopekitError as exc:
+        said = str(exc)
+        if any(words in said for words in _ABSENT):
+            return None
+        if said.endswith(_TWO):
+            # The advice first: a verdict's error is cut at 200 characters
+            # (``gates._one_line``), and claim ids can be long.
+            raise R.ToolFault(f"keep the {FIT_TAG} tag on one claim, the one that states the "
+                              f"headroom, and take it off the rest: "
+                              f"{said[:-len(_TWO)]}") from exc
+        raise
+    # The quantity as the spine's cross-check matches it (``claims._quantity``:
+    # casefolded, ``-`` and ``_`` read as spaces), so the gate reads exactly the
+    # claims the spine would compare its value with.
+    quantity = " ".join(str(acc.quantity or "").casefold().replace("-", " ")
+                        .replace("_", " ").split())
+    if (quantity != FIT_QUANTITY or str(acc.units or "").strip() != "%"
+            or acc.comparator.value not in FIT_COMPARATORS):
+        raise R.ToolFault(
+            f"the claim tagged {FIT_TAG} states {acc.quantity!r} {acc.comparator.value} "
+            f"{acc.limit:g} {acc.units!r}; this gate judges {FIT_QUANTITY!r} in '%', at most "
+            f"({' or '.join(FIT_COMPARATORS)}): state the headroom so")
+    return acc
+
+
+@gate(
+    id="fw.sleep_wake",
+    basis="sourced",
+    title="Where the image can enter deep sleep, it arms a wake source that works in "
+          "deep sleep",
+    claims=["deep-sleep", "wakeup-source"],
+    tier=Tier.BUILD,
+    settles="deep sleep wake source",
+    requires_tools=_TOOLS,
+    requires_python=_PY,
+    # Prerequisite fw.build: the same as fw.image_fits's. Isolated: the known-bad
+    #    builds with exit 0, with no wake source linked.
+    needs=["fw.build"],
+    negative_control=NegativeControl(
+        fixture="selftest/bad_variants.py:no_wake_source",
+        note="main.c's ext0 wake line and its pull-up line removed: "
+             "esp_deep_sleep_start is still linked, and no deep-sleep wake enable is",
+    ),
+)
+def sleep_wake(ctx: GateContext) -> Verdict:
+    """The rule the evidence keys: an ELF that links an ESP-IDF deep-sleep entry
+    must link a deep-sleep wake enable (light-sleep-only enables never count); a
+    ZMK build with deep sleep needs ``wakeup-source`` on each scanned kscan, and
+    each listed soft-off wake device needs it too. Every other stack skips by name.
+    No rule fails a design whose wake is the reset line."""
+    gid = "fw.sleep_wake"
+    path = _workflow(ctx)
+    if path is None:
+        return _skip(gid, _NO_WORKFLOW)
+    elf_glob = _opt(ctx, "firmware_elf")
+    if elf_glob is None:
+        return _skip(gid, "no firmware_elf: the ELF in the job's workspace, e.g. "
+                          "build/*.elf; the wake rules read its symbols, and the .config "
+                          "and zephyr.dts beside it")
+    try:
+        _job_, result = _built(ctx, path)
+        name, data = R.built_file(result, elf_glob, "firmware_elf")
+        elf = I.read_elf(data)
+        here = posixpath.dirname(name)
+        config_raw = result["files"].get(posixpath.join(here, ".config"))
+        dts_raw = result["files"].get(posixpath.join(here, "zephyr.dts"))
+        config = config_raw.decode("utf-8", "replace") if config_raw is not None else None
+        dts = dts_raw.decode("utf-8", "replace") if dts_raw is not None else None
+        wake = W.esp_rule(elf.funcs, I.lto(elf), _opt(ctx, "deep_sleep_wakes_by_reset"))
+        if wake is None and config is not None:
+            wake = W.zmk_rule(config, dts)
+        if wake is None:
+            return _skip(gid, W.by_name(elf.funcs, config))
+    except R.WrongAct as exc:
+        return _skip(gid, str(exc))
+    except (R.ToolFault, I.ImageFault, W.WakeFault) as exc:
+        return Verdict(gate=gid, passed=False, error=str(exc))
+    if wake.outcome == "skip":
+        return _skip(gid, wake.said)
+    return Verdict(gate=gid, passed=wake.outcome == "pass", detail=f"{name}: {wake.said}")
+
+
+@gate(
+    id="fw.tx_power",
+    basis="sourced",
+    title="The highest Bluetooth LE transmit setting the image can reach is inside the "
+          "setting its radio's grant was tested at",
+    description="Reads the .config or sdkconfig the replayed build resolved: Zephyr's "
+                "LL controller, NCS's SoftDevice Controller or ESP-IDF's BLE controller "
+                "(ESP32-C3/S3); a run-time path moves the judged setting to the highest "
+                "option Kconfig offered the SoC. Every other stack skips by name.",
+    claims=[T.TAG],
+    tier=Tier.BUILD,
+    settles="bluetooth le transmit power setting",
+    requires_tools=_TOOLS,
+    requires_python=_PY,
+    # Prerequisite fw.build: a setting of firmware that does not build, or not from
+    #    CI's job, is not the design's. Isolated: the known-bad builds with exit 0,
+    #    at ESP-IDF's default level.
+    needs=["fw.build"],
+    negative_control=NegativeControl(
+        fixture="selftest/bad_variants.py:tx_line_removed",
+        note="the TX level line removed from sdkconfig.defaults: ESP-IDF's default, "
+             "CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P9 (+9 dBm), against the baseline "
+             "claim's 7 dBm, the nearest step past it",
+    ),
+)
+def tx_power(ctx: GateContext) -> Verdict:
+    """The setting the stack resolved, judged against the claim tagged
+    ``ble-tx-power``: the setting the radio's grant was tested at (47 CFR
+    15.204(c)(2), "at its maximum available output power level"), never the
+    grant's listed output. A run-time path (``*_DYNAMIC_CONTROL``, LE Power
+    Control, or a setter call in the repository's C sources) moves the judged
+    value to the ceiling, the highest option Kconfig offered the SoC; a setter
+    whose level is a literal is judged at that literal. Where the ceiling cannot
+    be known, a setting that alone passes reads undetermined (skipped) and names
+    the conducted measurement. A config this pack reads no profile for skips by
+    name; a controller in another image or chip skips unless a config of this
+    build holds one this pack reads."""
+    gid = "fw.tx_power"
+    path = _workflow(ctx)
+    if path is None:
+        return _skip(gid, _NO_WORKFLOW)
+    try:
+        _job_, result = _built(ctx, path)
+        found = T.configs(result)
+        readings, others = [], []
+        for rel, text in found.items():
+            got = T.classify(rel, text)
+            if isinstance(got, T.Other):
+                others.append(got)
+            elif got is not None:
+                readings.append(got)
+        if readings:
+            repo, _rel = C.locate(path)
+            code = T.sources(repo, R.listing)
+            judged = [T.judge(r, T.scan_sources(code, r.profile)) for r in readings]
+    except R.WrongAct as exc:
+        return _skip(gid, str(exc))
+    except (R.ToolFault, T.TxFault, C.Refused, OSError) as exc:
+        return Verdict(gate=gid, passed=False, error=str(exc))
+    unread = [o for o in others if o.kind == "unread"]
+    if not readings:
+        if not found:
+            return _skip(gid, "the job wrote no .config or sdkconfig: a stack with no "
+                              "Kconfig (Arduino, PlatformIO's Arduino core, the Pico SDK, "
+                              "QMK) has no build-time setting this pack reads; a conducted "
+                              "measurement settles it (nopekit claim physical)")
+        if not others:
+            return _skip(gid, f"no Bluetooth in {', '.join(found)}: this build has no BLE "
+                              f"controller to judge")
+        shown = unread + [o for o in others if o.kind != "unread"]
+        return _skip(gid, "; ".join(f"{o.file}: {o.said}" for o in shown))
+    acc = ctx.acceptance(T.TAG)
+    comparator = acc.comparator.value
+    if str(acc.units or "").strip() != T.UNITS or comparator not in T.COMPARATORS:
+        return Verdict(gate=gid, passed=False, error=(
+            f"the claim tagged {T.TAG} states {comparator} {acc.limit:g} {acc.units!r}; this "
+            f"gate judges a transmit setting at most ({' or '.join(T.COMPARATORS)}) in "
+            f"{T.UNITS}, the setting the radio's grant was tested at: state the limit so"))
+    said = "; ".join(j.said for j in judged)
+    # Each config's outcome: a floor past the limit fails whatever the ceiling; an
+    # unknown ceiling above a floor that passes is undetermined, never a pass.
+    failed, undetermined, passed = [], [], []
+    for j in judged:
+        if not acc.holds(j.floor):
+            failed.append(j.floor)
+        elif j.value is None:
+            undetermined.append(j)
+        elif not acc.holds(j.value):
+            failed.append(j.value)
+        else:
+            passed.append(j.value)
+    if failed:
+        return Verdict(gate=gid, passed=False, measured=max(failed), limit=acc.limit,
+                       comparator=comparator, units=T.UNITS, detail=said,
+                       evidence=_tx_evidence(ctx, judged, acc))
+    if unread:
+        return _skip(gid, f"{said}; and " + "; ".join(f"{o.file}: {o.said}" for o in unread))
+    if undetermined:
+        return _skip(gid, f"undetermined: {said}; settle it with a conducted measurement at "
+                          f"the highest setting the firmware can reach (nopekit claim "
+                          f"physical)")
+    return Verdict(gate=gid, passed=True, measured=max(passed), limit=acc.limit,
+                   comparator=comparator, units=T.UNITS, detail=said,
+                   evidence=_tx_evidence(ctx, judged, acc))
+
+
+def _tx_evidence(ctx: GateContext, judged: list, acc) -> list[str]:
+    """``tx_power.json``: each config read, its setting, its ceiling and what can
+    raise it, and the value judged, under the gate's out directory."""
+    rows = [{"file": j.reading.file, "profile": j.reading.profile.key,
+             "target": j.reading.target, "setting": j.reading.setting_said,
+             "setting_dbm": j.reading.setting, "ceiling_dbm": j.reading.ceiling,
+             "raisers": list(j.reading.raisers), "front_end_module": j.reading.fem,
+             "floor_dbm": j.floor, "judged_dbm": j.value, "said": j.said} for j in judged]
+    out = ctx.out_path("firmware-ci", "tx_power", "tx_power.json")
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump({"limit": acc.limit, "comparator": acc.comparator.value,
+                   "units": T.UNITS, "configs": rows}, fh, indent=1, sort_keys=True)
+        fh.write("\n")
+    return [out]
