@@ -421,6 +421,29 @@ def leaky_long(ctx):
 #: and otherwise reads from a control entry `check --tier 1` recorded.
 _SEAL_BUILD_GATES = _SEAL_GATES.replace("tier=Tier.INSTANT", "tier=Tier.BUILD")
 
+#: `_SEAL_FIXTURES` with the sealed control's known-bad input read, when it runs,
+#: from the pack's own `data/long.json`: a file its control entry keys, outside
+#: the gate's code and its `selftest/`, so an edit of it leaves the entry at its
+#: version and no longer current.
+_SEAL_DATA_FIXTURES = _SEAL_FIXTURES.replace(
+    '''    params = dict(BASELINE)
+    params["span_mm"] = 500.0
+    return dataclasses.replace(ctx, params=params)''',
+    '''    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(here, "data", "long.json"), encoding="utf-8") as fh:
+        params = dict(BASELINE, **json.load(fh))
+    return dataclasses.replace(ctx, params=params)''', 1)
+assert _SEAL_DATA_FIXTURES != _SEAL_FIXTURES
+
+#: The sealed control alone, at tier 0, needing a python module that only the
+#: `check` run below can import: a gate `doctor` would run, whose tool is
+#: missing where `doctor` runs, read from the entry `check` recorded.
+_SEAL_TOOL_GATES = (_SEAL_GATES.split('\n\n@gate(id="planted-seal.leaky"')[0]
+                    .replace("planted-seal.", "planted-tool.")
+                    .replace("tier=Tier.INSTANT,",
+                             'tier=Tier.INSTANT, requires_python=["nopekit_planted_tool"],'))
+assert "requires_python" in _SEAL_TOOL_GATES and "leaky" not in _SEAL_TOOL_GATES
+
 #: Two planted packs whose gates both bind the claim tag `planted-shared`, and
 #: one tag each of their own. Each control is sealed: the row under test is the
 #: tag row, never the seal row.
@@ -442,13 +465,14 @@ def span(ctx):
 '''
 
 
-def _plant_pack(project: str, name: str, gates_src: str) -> None:
+def _plant_pack(project: str, name: str, gates_src: str,
+                fixtures: str = _SEAL_FIXTURES) -> None:
     """A pack under the project's `.nopekit/packs/`, installed with `packs add`:
-    `gates_src` as its one gate module, `_SEAL_FIXTURES` as its fixtures."""
+    `gates_src` as its one gate module, `fixtures` as its fixtures."""
     pack = os.path.join(project, ".nopekit", "packs", name)
     _write(pack, "pack.json", json.dumps({"name": name}) + "\n")
     _write(pack, "gates/span.py", gates_src)
-    _write(pack, "selftest/bad.py", _SEAL_FIXTURES)
+    _write(pack, "selftest/bad.py", fixtures)
     _write(pack, "selftest/baseline.json", json.dumps({"span_mm": 50.0}) + "\n")
     added = _run(project, "packs", "add", name)
     assert added.returncode == 0, added.stdout + added.stderr
@@ -635,6 +659,88 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
                              "selftest/bad.py:leaky_long", "(all params)",
                              absent=("planted-seal.sealed:", "not run: above tier 0"))
         self.assertEqual(code, 1, row)
+
+    def test_sealed_fixtures_above_tier_zero_after_an_edit(self):
+        """Review of H6: the row read an entry back only while its admission was
+        admitted or pending. An unsealed control's entry keys the host params it
+        read, so the first edit of the design left it undemonstrated, and the row
+        said "ok ... no control entry at its version" over a fixture whose entry
+        at its version shows it reads the host. Before H6 the row ran it and
+        FAILed. The fixture code did not move, so the host read is a finding
+        whatever value it read. An entry on record that read none of the host but
+        is not current is said as such, never as no entry."""
+        project = self.copy()
+        pack = os.path.join(project, ".nopekit", "packs", "planted-seal")
+        _write(pack, "data/long.json", json.dumps({"span_mm": 500.0}) + "\n")
+        _plant_pack(project, "planted-seal", _SEAL_BUILD_GATES, _SEAL_DATA_FIXTURES)
+        checked = _run(project, "check", "--tier", "1")
+        self.assertIn("planted-seal.leaky", checked.stdout, checked.stdout + checked.stderr)
+        code, rows = _doctor(project)
+        # The sealed control is read from its entry: neither a finding nor left out.
+        self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky", "(all params)",
+                       absent=("planted-seal.sealed", "not run"))
+        self.assertEqual(code, 1, rows["sealed-fixtures"])
+
+        # The design moves, as every iteration moves it: the leaky entry keys
+        # the whole top level of the host's params, so it is no longer current.
+        _edit(project, "model/bracket.py", "bed_xy: float = 220.0", "bed_xy: float = 250.0")
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky",
+                             "selftest/bad.py:leaky_long", "(all params)",
+                             absent=("planted-seal.sealed", "not run", "no control entry"))
+        self.assertEqual(code, 1, row)
+
+        # The sealed control's own data moves: its entry is on record at its
+        # version, read none of the host, and is not current.
+        _write(pack, "data/long.json", json.dumps({"span_mm": 600.0}) + "\n")
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky",
+                             "1 not run: above tier 0, and its control entry at its "
+                             "version is on record but not current (planted-seal.sealed)",
+                             "`nopekit doctor --tier 1` runs them",
+                             absent=("no control entry",))
+        self.assertEqual(code, 1, row)
+
+        # Back to the data it was qualified on, and then a second outcome for
+        # the same inputs: on record, current, and not admitted.
+        _write(pack, "data/long.json", json.dumps({"span_mm": 500.0}) + "\n")
+        controls = verdicts.read_controls(project, "planted-seal.sealed")
+        self.assertEqual(len(controls), 1, [c.name for c in controls])
+        passed_its_bad = dataclasses.replace(controls[0], bad="pass", admitted="no",
+                                             mutation=None)
+        self.assertTrue(verdicts.write_control(project, passed_its_bad).written)
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky",
+                             "1 not run: above tier 0, and its control entry at its "
+                             "version is on record but not admitted (planted-seal.sealed)",
+                             absent=("no control entry", "not current"))
+        self.assertEqual(code, 1, row)
+
+    def test_sealed_fixtures_tools_missing_here(self):
+        """Review of H6: a gate at or below the tier whose tool is missing here
+        is read from its entry like one above the tier, and the row counted it
+        "above it". It is counted apart, as not run here."""
+        project = self.copy()
+        stub = self.tmp()
+        _write(stub, "nopekit_planted_tool.py", '"""Planted by tests/test_doctor.py."""\n')
+        here = {"PYTHONPATH": _env._pythonpath() + os.pathsep + stub}
+        pack = os.path.join(project, ".nopekit", "packs", "planted-tool")
+        _write(pack, "pack.json", json.dumps({"name": "planted-tool"}) + "\n")
+        _write(pack, "gates/span.py", _SEAL_TOOL_GATES)
+        _write(pack, "selftest/bad.py", _SEAL_FIXTURES)
+        _write(pack, "selftest/baseline.json", json.dumps({"span_mm": 50.0}) + "\n")
+        added = _env.nopekit(["packs", "add", "planted-tool"], cwd=project, env=here)
+        self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+        checked = _env.nopekit(["check"], cwd=project, env=here)
+        self.assertIn("planted-tool.sealed", checked.stdout, checked.stdout + checked.stderr)
+        self.assertTrue(verdicts.read_controls(project, "planted-tool.sealed"), checked.stdout)
+
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "sealed-fixtures", "ok", "0 pack control(s) up to tier 0",
+                             "1 up to it not run here (tools missing), read from their "
+                             "control entries at their version", "none reads them",
+                             absent=("above it", "not run: tools missing"))
+        self.assertEqual(code, 0, row)
 
     def test_pack_tags(self):
         """Holdout, general packs: a claim tag two installed packs bind covers a

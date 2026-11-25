@@ -9062,36 +9062,90 @@ DOCTOR_SEAL_TIER = int(Tier.INSTANT)
 def _recorded_seal(root: str, registry: gates.Registry, spec: Any,
                    resolution: verdicts.Resolution, projection: Any,
                    ledger: Any) -> tuple[str, Any]:
-    """What a pack control's entry at its current version says it read of this
-    project's params, without running it: ``("finding", SealFinding)`` when it
-    read any, ``("sealed", None)`` when it read none, ``("none", None)`` when no
-    entry at its version was recorded against this project (``host`` "live").
+    """What a pack control's entries at its current version say it read of this
+    project's params, without running it (``host`` "live": recorded against this
+    project). One of:
 
-    The admission the qualification row reads (`resolution`, else
-    `verdicts.admission_state`, which runs nothing): admitted or pending means
-    its static part and the host params it read are current, so its
-    ``reads.host`` is what the control reads of this project now."""
+    ``("finding", SealFinding)`` — the entry at the gate's current static part
+    that its admission stands on (else, with none, any on record at it) read the
+    host's params, whatever that admission is now;
+    ``("sealed", None)`` — admitted or pending, and none read any;
+    ``("stale", None)`` — an entry at its version is on record and read none,
+    but its inputs moved since (undemonstrated, or never qualified at them);
+    ``("refused", None)`` — the same, but not admitted at inputs that are
+    current, or a crash remembered at its version (the qualification row says
+    why);
+    ``("none", None)`` — no entry at its version.
+
+    The admission is the one the qualification row reads (`resolution`, else
+    `verdicts.admission_state`, which runs nothing). Admitted or pending means
+    its static part and the host params it read are current, so a ``reads.host``
+    with nothing in it is what the control reads of this project now. A host
+    read needs no such currency: the static part holds the gate's code, its
+    owner's ``selftest/`` (where a pack's fixtures live) and the control's
+    declaration, so a fixture that read the host at it reads the host whatever
+    value it found. What slipped through (review of H6): only an
+    admitted or pending entry was read, and an unsealed control's entry keys
+    the host params it read, so the first edit of the design left it
+    undemonstrated and the row said "ok ... no control entry at its version"
+    over an entry that named the host read. A control the host defuses (its
+    known-bad input inside the limit, not admitted) was passed over the same
+    way. *Rejected:* every entry at the version, unioned (entries are never
+    rewritten, so a fixture fixed in a helper outside the static part would
+    read unsealed after `check` re-ran it, for good)."""
     row = resolution.rows.get(spec.id)
     admission = row.admission if row is not None else None
+    found = registry.get(spec.id)
     if admission is None:
-        found = registry.get(spec.id)
         if found is None:                           # pragma: no cover - defensive
             return "none", None
         admission = verdicts.admission_state(root, found[0], found[1], projection=projection,
                                              ledger=ledger, anchors=resolution.anchors)
     entry = admission.entry
-    if admission.state not in ("admitted", "pending") or entry is None \
-            or getattr(entry, "host", "") != "live":
+    if entry is not None:
+        # `_admission` chooses an entry only at the current static part: the
+        # latest there, current or not, as the qualification row reads it.
+        at_version = [entry] if getattr(entry, "host", "") == "live" else []
+    else:
+        # None chosen: no entry at the version, or a control failure remembered
+        # at it (a crash), which may sit beside entries written before it.
+        live = [c for c in verdicts.read_controls(root, spec.id)
+                if getattr(c, "host", "") == "live"]
+        if not live or found is None:
+            return "none", None
+        static = verdicts.control_static(found[0], found[1], root,
+                                         anchors=resolution.anchors)[0]
+        at_version = [c for c in live if c.static == static]
+    if not at_version:
         return "none", None
-    host_rows = (getattr(entry, "reads", None) or {}).get("host") or ()
-    paths = tuple(sorted({packs._host_path(tuple(r[0])) for r in host_rows
+    paths = tuple(sorted({packs._host_path(tuple(r[0]))
+                          for c in at_version
+                          for r in ((getattr(c, "reads", None) or {}).get("host") or ())
                           if isinstance(r, (list, tuple)) and r
                           and isinstance(r[0], (list, tuple))}))
-    if not paths:
+    if paths:
+        nc = spec.negative_control
+        return "finding", packs.SealFinding(gate=spec.id,
+                                            fixture=(nc.fixture if nc else "") or "",
+                                            host_paths=paths)
+    if admission.state in ("admitted", "pending"):
         return "sealed", None
-    nc = spec.negative_control
-    return "finding", packs.SealFinding(gate=spec.id, fixture=(nc.fixture if nc else "") or "",
-                                        host_paths=paths)
+    if admission.state == "not-admitted" \
+            and verdicts.parse_token(admission.reason)[0] != verdicts.NOT_YET:
+        return "refused", None
+    return "stale", None
+
+
+#: How `_doctor_seal_row` says a control above the tier that it neither ran nor
+#: read: the kind `_recorded_seal` returned, and the clause after "not run:
+#: above tier N, and". What slipped through (review of H6): every kind but
+#: "sealed" read "no control entry at its version", false over an entry on
+#: record at it.
+_SEAL_LEFT_OUT = (
+    ("none", "no control entry at its version"),
+    ("stale", "its control entry at its version is on record but not current"),
+    ("refused", "its control entry at its version is on record but not admitted"),
+)
 
 
 def _tag_carriers(collision: Any) -> str:
@@ -9157,8 +9211,10 @@ def _doctor_seal_row(results: list[dict], registry: gates.Registry,
     before a pack ships; this is where a project finds out that one it
     installed — from before the detector, or from someone else — reads its host,
     so that its control fires here and may not fire in the next project. A
-    temp `out_dir`, nothing written to the project. A control neither run nor on
-    record is named, with the command that runs it (`DOCTOR_SEAL_TIER`)."""
+    temp `out_dir`, nothing written to the project. A control neither run nor
+    read is named, with why (`_SEAL_LEFT_OUT`) and the command that runs it
+    (`DOCTOR_SEAL_TIER`); one at or below the tier whose tool is missing here is
+    read the same way, and counted apart from the ones above it."""
     pack_gates = [spec for spec in registry.specs() if (spec.pack or "").strip()]
     if not pack_gates:
         _check(results, "sealed-fixtures", "ok", "no pack gates installed")
@@ -9168,30 +9224,43 @@ def _doctor_seal_row(results: list[dict], registry: gates.Registry,
     except NopekitError as exc:
         _check(results, "sealed-fixtures", "FAIL", f"the seal probe did not run: {exc}")
         return
-    ran = missing = read = 0
-    left_out: dict[str, int] = {}
+    ran = missing = read_above = read_here = 0
+    left_out: dict[str, dict[str, int]] = {}
     for spec in pack_gates:
         available = gates.availability(spec)[0]
-        if int(spec.tier) <= tier and available:
+        above = int(spec.tier) > tier
+        if not above and available:
             ran += 1
             continue
         kind, finding = _recorded_seal(root, registry, spec, resolution, projection, ledger)
         if kind == "finding":
             findings.append(finding)
+        elif kind == "sealed" and above:
+            read_above += 1
         elif kind == "sealed":
-            read += 1
+            # At or below the tier, its tool missing here: read, and never
+            # counted "above it" (review of H6: a tier-0 gate whose python
+            # module is missing read as one above the tier).
+            read_here += 1
         elif not available:
             missing += 1
         else:
-            left_out[spec.id] = int(spec.tier)
+            left_out.setdefault(kind, {})[spec.id] = int(spec.tier)
     said = [f"{ran} pack control(s) up to tier {tier} run against this project's params"]
-    if read:
-        said.append(f"{read} above it read from their control entries at their version")
+    if read_above:
+        said.append(f"{read_above} above it read from their control entries at their version")
+    if read_here:
+        said.append(f"{read_here} up to it not run here (tools missing), read from their "
+                    f"control entries at their version")
     tail = ""
+    for kind, clause in _SEAL_LEFT_OUT:
+        ids = left_out.get(kind)
+        if ids:
+            tail += (f"; {len(ids)} not run: above tier {tier}, and {clause} "
+                     f"({_listed(sorted(ids), ', ')})")
     if left_out:
-        tail += (f"; {len(left_out)} not run: above tier {tier}, and no control entry at "
-                 f"its version ({_listed(sorted(left_out), ', ')}) — "
-                 f"`nopekit doctor --tier {max(left_out.values())}` runs them")
+        top = max(t for ids in left_out.values() for t in ids.values())
+        tail += f" — `nopekit doctor --tier {top}` runs them"
     if missing:
         tail += f"; {missing} not run: tools missing here"
     if findings:
