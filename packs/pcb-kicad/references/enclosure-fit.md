@@ -62,28 +62,62 @@ A part whose 3D model it cannot find is left out of the STEP, silently, with exi
 the machine this pack was built on), so a fit read from that export reads clear
 with nothing on the board. The gate therefore:
 
-1. lists every placed part (footprint attribute `smd` or `through_hole`, not
-   `dnp`, not `board_only`) and skips, naming them, if any names no 3D model and
-   has no declared height;
+1. lists every placed part and skips, naming them, if any names no 3D model and
+   has no declared height. A placed part is any footprint not `dnp` that shows a
+   3D model, whatever its type, and any `smd` or `through_hole` footprint not
+   `board_only`. A display, a cell, a speaker or a buzzer fitted by hand is
+   often drawn with no type and kept out of the BOM and the position file, and
+   kicad-cli exports its model all the same. (What slipped through, a holdout
+   run: such a display was read as no part, its model was not staged, and the
+   pass said nothing collides with the window ledge cutting 22.75 mm^3 into it.)
+   A footprint with no type and no model (a mounting hole, a fiducial, a logo) is
+   not asked for, and the verdict names it ("not fitted"). The same skip names the
+   parts whose named model is found nowhere on this host, so one run says all
+   there is to state;
 2. reads the export with OpenCascade's XCAF reader, which keeps each component's
    name (KiCad names each part's model by its reference), and skips, naming them,
-   if any placed part did not arrive. Such a part names a model, so the skip
-   says to install the library, keep the model beside the board, or hide the
-   model and state a height: a part that names a model and a height is refused.
+   if any placed part did not arrive. Such a part names a model. Where this
+   host has no file it names, the skip says to install the library, keep the
+   model beside the board, or state a height. Where the file is here and
+   kicad-cli left the part out all the same, a height would be named unused,
+   so the skip says to hide the model (and state its height if it has none).
 
 `pcb_enclosure_bodiless` lists, by reference, parts that truly have no body to fit
-(an antenna drawn in copper). A model referenced as `${KIPRJMOD}/...` is copied
-into the stage with the board; the baseline keeps KiCad's own models for its two
-footprints in `selftest/assets/3d/` for that reason. kicad-cli resolves
-`${KIPRJMOD}` only where a `.kicad_pro` sits beside the board.
+(an antenna drawn in copper). A model kept with the project (`${KIPRJMOD}/...`,
+KiCad 5's `$(KIPRJMOD)/...`, or a relative path) is copied into the stage with the
+board, a VRML model's STEP twin with it; the baseline keeps KiCad's own models
+for its two footprints in `selftest/assets/3d/` for that reason. kicad-cli
+resolves `${KIPRJMOD}` only where a `.kicad_pro` sits beside the board.
 
 ## A part with no model: a declared height
 
-`pcb_part_heights_mm` = `{ref: {h, source}}` gives a placed part with no 3D model
-a body: the box around its courtyard, on its own side, raised `h` mm (the
-datasheet's seated height; `source` says which). The box is written as a STEP in
-the footprint's own model frame and named as the part's model in the staged copy
-of the board, so kicad-cli seats, turns and flips it as it does any model. That
+`pcb_part_heights_mm` = `{ref: {h, source, box_mm?}}` gives a placed part whose
+3D model is not on this host a body: the box around its courtyard, on its own
+side, or the outline `box_mm` states (`[[x0, y0], [x1, y1]]`, mm, in the
+footprint's own frame, x right and y down as KiCad's footprint editor shows it:
+for a part with no courtyard), raised `h` mm (the datasheet's seated height;
+`source` says which).
+
+A part whose model is not on this host is one that names none, or one whose
+every model is found nowhere here: `${KIPRJMOD}` is the board's folder, KiCad's
+own `KICAD<n>_3DMODEL_DIR` is looked for where KiCad's installers put the
+library, and any other variable is found nowhere. The gate reads no variable's
+value from the environment (a verdict keyed on none would be opaque, and
+`doctor` names such a read), so on a host that sets `KICAD<n>_3DMODEL_DIR` to a
+folder of its own, kicad-cli may find a model the gate does not, and a declared
+height stands in for it there: still one body. A model is found only by
+the file its path names, a VRML file too: kicad-cli 9.0.9 looks for that file,
+and with a STEP twin beside a VRML name that is not there it says "File not
+found" and leaves the part out. There the box stands in, the model left out of
+the staged copy, and the pass names it ("at its declared height, its model not
+found here"). On a host that has the model, the model is fitted and the pass names the height
+unused. One body each, never both: a union of the two would fail a sound board
+on one host and not another. (What slipped through, a holdout run: a part that
+named a model was refused a height outright, so a board copied from a machine
+with other libraries could be fitted only by editing the board.)
+
+The box is written as a STEP in the footprint's own model frame and named as the
+part's model in the staged copy of the board, so kicad-cli seats, turns and flips it as it does any model. That
 matters: KiCad 9.0.9 seats a model at z 1.595 on a 1.6 mm board (and at -0.085
 under it), not on the board body's top face at 1.51, so a box placed by the gate's
 own arithmetic would sit 0.085 mm low. Measured with a 45 degree part on top and
@@ -93,8 +127,8 @@ places it.
 The box is the courtyard's, in the footprint's frame: a part turned 45 degrees gets
 a box turned 45 degrees, not the larger box around it. A courtyard is a keep-out,
 usually a little wider than the body, so the box is a little wider than the part.
-A part that names a model and a height, one listed as bodiless with a height, and
-one with no courtyard on its own side are refused.
+One listed as bodiless with a height, and one with neither a courtyard on its own
+side nor a `box_mm`, are refused.
 
 ## Contacts by design
 
@@ -110,9 +144,10 @@ cutout, a light pipe, a cell on foam. A feature is:
 
 The part keeps the limit against every other feature, and any shared volume still
 fails it: a contact excuses closeness, never a collision. A ref with no feature
-and a feature with no reason are refused. An allow-list entry for one part
-against anything once hid a real interference, so a region is held to what its
-part can reach:
+and a feature with no reason are refused. A footprint with no type and no model
+that takes a declared height is a part, and may seat by design too. An
+allow-list entry for one part against anything once hid a real interference, so
+a region is held to what its part can reach:
 
 - the enclosure material it takes out must lie within twice the claim's limit of
   the part's own box (its bounding box as placed, in the enclosure's frame).
@@ -123,6 +158,19 @@ part can reach:
 - a region that holds the enclosure's whole box is refused, and so are regions
   that together take out all of the enclosure (the part would be judged against
   nothing).
+
+Each part's box as placed is not known before KiCad exports the board, so the
+regions are held to it in a pass of their own, after the export and before the
+full fit: the regions' pass reads only the parts that have regions, their boxes
+and the material each region takes out, with no distance and no shared volume.
+Every refusal is listed in one run: the error is the first refusal's words, the
+detail names each part and region refused, and `regions_refused.json` holds each
+one's error, with the box to draw, and its boxes. (What slipped through, a
+holdout run: the regions were held only after the full fit, and the first refusal
+returned, so each region drawn too wide cost a two to four minute run to learn of
+the next. To read each part's box before drawing a region, run once with no
+contacts: a pass or a fail lists the nearest part, and `fit.json` holds every
+part's distance.)
 
 What this holds, and no more: a region excuses its part only against material
 near that part. Inside the reach the region is the person's statement of the
@@ -171,6 +219,10 @@ with different bytes), or check them in two projects.
 
 About 1 s for the export and 3 s for the geometry on the baseline, most of it
 importing CadQuery. A declared height adds one more child (about 1.5 s) to write
-the boxes. A board with many detailed models takes longer, and each pair of boards
-in one enclosure adds one distance and one boolean for each shape;
-`pcb_fit_timeout_s` (120 s each) turns a hang into a skip.
+the boxes, and contact regions one more (the regions' pass). A board with many
+detailed models takes longer: a populated handheld board of 74 modelled parts took
+2 to 4 minutes (a holdout run). Each pair of boards in one enclosure adds one
+distance and one boolean for each shape. Each child (the export, the regions'
+pass, the geometry) gets `pcb_fit_timeout_s`, or, unstated, 120 s and 5 s for each
+part it handles (490 s for 74 parts), and a run past it is a skip that says how
+long it ran, over how many parts, and how the time was chosen.

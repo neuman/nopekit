@@ -742,6 +742,407 @@ def land_pattern(ctx: GateContext) -> Verdict:
 # --------------------------------------------------------------------------- #
 # trace heating
 # --------------------------------------------------------------------------- #
+#: The keys of a net's current stated per path in ``pcb_net_currents_a``:
+#: ``{"amps": A, "from": "J1.1", "to": "U5.38", "rest_a": R}``. ``amps`` is judged
+#: on every track that lies on a route of the net's copper between the two pads
+#: (``REF.PAD``), and ``rest_a`` (default ``amps``) on every other track of the
+#: net. What slipped through (a holdout run): one current judged every track of
+#: a net, so a return net named at a cell's 1 A failed on the 0.2 mm stubs that
+#: fan a QFN's ground pins out to their vias (19.5 C), which carry the
+#: amplifier's 0.29 A and never the cell's. *Rejected:* a current per track
+#: width or per layer (a person's word that nothing holds to the copper: a
+#: thin track on the path would be judged at the thin class's current); the
+#: shortest route alone (current shares every parallel route, so a second
+#: route would be judged at the rest); judging only what the path covers and
+#: saying nothing of the rest (the rest of the net carries current too).
+NET_PATH_KEYS = ("amps", "from", "to", "rest_a")
+
+
+def _net_current(net: str, raw) -> dict:
+    """One ``pcb_net_currents_a`` entry: ``{amps, rest, path}``; raises
+    ``P.RecordError`` for an entry this gate cannot read."""
+    label = f"pcb_net_currents_a[{net!r}]"
+    if not isinstance(raw, dict):
+        amps = P.num(raw, label, gt=0.0)
+        return {"amps": amps, "rest": amps, "path": None}
+    P.keys(raw, label, ("amps", "from", "to"), ("rest_a",))
+    amps = P.num(raw["amps"], f"{label}.amps", gt=0.0)
+    rest = P.num(raw.get("rest_a", amps), f"{label}.rest_a", ge=0.0)
+    if rest > amps:
+        # A route is held to the net's copper by over-reading it (a pad's
+        # circle, a pour's outline): a track wrongly read onto the route is
+        # judged at the higher current, never the lower, only while the rest is
+        # no more than the route's.
+        raise P.RecordError(f"{label}.rest_a {rest:g} A is above its amps {amps:g} A: the "
+                            f"route from {raw['from']} to {raw['to']} carries the net's "
+                            f"most current")
+    ends = []
+    for key in ("from", "to"):
+        text = P.text(raw[key], f"{label}.{key}")
+        ref, dot, pad = text.partition(".")
+        if not dot or not ref or not pad:
+            raise P.RecordError(f"{label}.{key} is {text!r}: name a pad as REF.PAD (J1.1)")
+        ends.append((ref, pad))
+    if ends[0] == ends[1]:
+        raise P.RecordError(f"{label}: from and to are one pad")
+    return {"amps": amps, "rest": rest, "path": tuple(ends)}
+
+
+def _seg_point(p, a, b) -> float:
+    """The distance from point ``p`` to the segment ``a``-``b``."""
+    (px, py), (ax, ay), (bx, by) = p, a, b
+    dx, dy = bx - ax, by - ay
+    span = dx * dx + dy * dy
+    t = 0.0 if span == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / span))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _seg_seg(a, b, c, d) -> float:
+    """The distance between the segments ``a``-``b`` and ``c``-``d``."""
+    def side(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    if (side(a, b, c) * side(a, b, d) < 0) and (side(c, d, a) * side(c, d, b) < 0):
+        return 0.0
+    return min(_seg_point(a, c, d), _seg_point(b, c, d), _seg_point(c, a, b),
+               _seg_point(d, a, b))
+
+
+def _inside(p, poly) -> bool:
+    """Whether point ``p`` lies inside the polygon ``poly`` (even-odd)."""
+    x, y = p
+    hit = False
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:] + poly[:1]):
+        if (y0 > y) != (y1 > y) and x < x0 + (y - y0) * (x1 - x0) / (y1 - y0):
+            hit = not hit
+    return hit
+
+
+def _layers_of(names, copper: list[str]) -> set[str]:
+    out: set[str] = set()
+    for name in (str(n) for n in names):
+        if name == "*.Cu":
+            out |= set(copper)
+        elif name == "F&B.Cu":
+            out |= {"F.Cu", "B.Cu"}
+        elif name in copper:
+            out.add(name)
+    return out
+
+
+def _project(p, a, b) -> float:
+    """The parameter, 0 to 1, of the point of segment ``a``-``b`` nearest ``p``."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    span = dx * dx + dy * dy
+    return 0.0 if span == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx
+                                                     + (p[1] - a[1]) * dy) / span))
+
+
+def _net_copper(tree: list, board, net: str) -> tuple[dict, dict, dict]:
+    """The copper of ``net`` as a graph: ``(adjacency {node: [(node, edge)]},
+    {edge: the board's track index}, {(ref, pad number): [pad nodes]})``.
+
+    A track (an arc as its two chords, each widened by its sagitta) is a run of
+    edges, one per stretch between the places something touches it, each edge
+    labelled with the track. A via, a pad and a pour are each a node, and every
+    contact is an edge of its own, with no label: two tracks whose copper
+    overlaps, a track end on another's body (a T, which splits the through
+    track there), a track on a via, a pad or a pour, a via or a pad in a pour.
+    Nothing is merged: a track lying over a pour stays an edge beside the pour,
+    on a loop with it, never a loop of one.
+
+    Read generously on purpose: a pad is the circle round its corners (and its
+    custom shape's), a pour its outline, not its fill. An edge the copper does
+    not make can only add routes, never take one away (a route through the
+    copper is still a route in a graph with more edges), so a track read onto a
+    route wrongly is judged at the route's current, the higher, never the lower.
+    A contact the copper makes and this misses could take a track off; the
+    circle holds every pad shape KiCad draws from its size."""
+    copper = _copper_layers(tree) or ["F.Cu", "B.Cu"]
+    order = {name: i for i, name in enumerate(copper)}
+    nodes: list[dict] = []
+    adj: dict[int, list] = {}
+    label: dict[int, int] = {}
+    count = [0]
+
+    def node() -> int:
+        adj[len(adj)] = []
+        return len(adj) - 1
+
+    def edge(a: int, b: int, track: int | None = None) -> None:
+        e = count[0]
+        count[0] += 1
+        adj[a].append((b, e))
+        adj[b].append((a, e))
+        if track is not None:
+            label[e] = track
+
+    # Track pieces: their ends are nodes, and each keeps the stations the
+    # contacts make along it.
+    pieces: list[dict] = []
+    items = list(K.children(tree, "segment")) + list(K.children(tree, "arc"))
+    for i, (item, t) in enumerate(zip(items, board.tracks)):
+        if t.net != net:
+            continue
+        start = (float(K.child(item, "start")[1]), float(K.child(item, "start")[2]))
+        end = (float(K.child(item, "end")[1]), float(K.child(item, "end")[2]))
+        half = t.width_mm / 2.0
+        points = [start, end]
+        mid = K.child(item, "mid")
+        if K.head(item) == "arc" and mid is not None:
+            m = (float(mid[1]), float(mid[2]))
+            points = [start, m, end]
+            a, b, c = math.dist(start, m), math.dist(m, end), math.dist(start, end)
+            area2 = abs((m[0] - start[0]) * (end[1] - start[1])
+                        - (end[0] - start[0]) * (m[1] - start[1]))
+            if area2 > 1e-12:
+                r = a * b * c / (2.0 * area2)
+                half += max(r - math.sqrt(max(r * r - (x / 2.0) ** 2, 0.0)) for x in (a, b))
+        ends = [node() for _ in points]
+        for (pa, pb), (na, nb) in zip(zip(points, points[1:]), zip(ends, ends[1:])):
+            pieces.append({"track": i, "layer": t.layer, "a": pa, "b": pb, "half": half,
+                           "stations": [(0.0, na), (1.0, nb)]})
+    for via in K.children(tree, "via"):
+        if K._net_name(K.child(via, "net"), board.nets) != net:
+            continue
+        at = K.child(via, "at")
+        span = [str(x) for x in (K.child(via, "layers") or [])[1:]]
+        idx = sorted(order[n] for n in span if n in order) or [0, len(copper) - 1]
+        nodes.append({"kind": "via", "id": node(), "layers": set(copper[idx[0]:idx[-1] + 1]),
+                      "at": (float(at[1]), float(at[2])),
+                      "r": float(K.value(via, "size", default=0.0)) / 2.0})
+    pads: dict[tuple, list[int]] = {}
+    for fp in K.children(tree, "footprint"):
+        ref = K.footprint_ref(fp)[0]
+        place = _footprint_to_board_raw(fp)
+        for pad in K.children(fp, "pad"):
+            if K._net_name(K.child(pad, "net"), board.nets) != net:
+                continue
+            at, size = K.child(pad, "at"), K.child(pad, "size")
+            w, h = (float(size[1]), float(size[2])) if size is not None else (0.0, 0.0)
+            r = math.hypot(w, h) / 2.0
+            for prim in K.children(K.child(pad, "primitives") or [], "gr_poly"):
+                for pt in K.children(K.child(prim, "pts") or [], "xy"):
+                    r = max(r, math.hypot(float(pt[1]), float(pt[2])))
+            n = node()
+            pads.setdefault((ref, str(pad[1])), []).append(n)
+            nodes.append({"kind": "pad", "id": n,
+                          "layers": _layers_of((K.child(pad, "layers") or [])[1:], copper),
+                          "at": place((float(at[1]), float(at[2]))), "r": r})
+    for zone in K.children(tree, "zone"):
+        if K.child(zone, "keepout") is not None:
+            continue
+        name = K._net_name(K.child(zone, "net"), board.nets) or str(
+            K.value(zone, "net_name", default=""))
+        outline = [tuple(p) for p in _polygon_points(zone)]
+        if name == net and len(outline) >= 3:
+            nodes.append({"kind": "pour", "id": node(), "layers": _zone_layers(zone, copper),
+                          "poly": outline,
+                          "edges": list(zip(outline, outline[1:] + outline[:1]))})
+
+    def station(pc: dict, t: float) -> int:
+        """The node at parameter ``t`` along a piece: its end at 0 or 1, else a
+        new node, so the piece is split there."""
+        if t <= 0.0:
+            return pc["stations"][0][1]
+        if t >= 1.0:
+            return pc["stations"][1][1]
+        n = node()
+        pc["stations"].append((t, n))
+        return n
+
+    def box(pts, grow) -> tuple:
+        return (min(p[0] for p in pts) - grow, min(p[1] for p in pts) - grow,
+                max(p[0] for p in pts) + grow, max(p[1] for p in pts) + grow)
+
+    def apart(p, q) -> bool:
+        return p[0] > q[2] or q[0] > p[2] or p[1] > q[3] or q[1] > p[3]
+
+    for pc in pieces:
+        pc["box"] = box([pc["a"], pc["b"]], pc["half"])
+    for n in nodes:
+        n["box"] = box(n["poly"], 0.0) if n["kind"] == "pour" else box([n["at"]], n["r"])
+    # Track against track.
+    for i, p in enumerate(pieces):
+        for q in pieces[i + 1:]:
+            if p["layer"] != q["layer"] or apart(p["box"], q["box"]):
+                continue
+            reach = p["half"] + q["half"]
+            if _seg_seg(p["a"], p["b"], q["a"], q["b"]) > reach:
+                continue
+            touched = False
+            for one, other in ((p, q), (q, p)):
+                for k, end in ((0, one["a"]), (1, one["b"])):
+                    if _seg_point(end, other["a"], other["b"]) <= reach:
+                        edge(one["stations"][k][1],
+                             station(other, _project(end, other["a"], other["b"])))
+                        touched = True
+            if not touched:             # they cross mid-length
+                (ax, ay), (bx, by), (cx, cy), (dx, dy) = p["a"], p["b"], q["a"], q["b"]
+                den = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx)
+                if den:
+                    tp = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / den
+                    tq = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / den
+                    edge(station(p, min(max(tp, 0.0), 1.0)), station(q, min(max(tq, 0.0), 1.0)))
+    # Track against a via, a pad or a pour.
+    for pc in pieces:
+        for n in nodes:
+            if pc["layer"] not in n["layers"] or apart(pc["box"], n["box"]):
+                continue
+            if n["kind"] != "pour":
+                if _seg_point(n["at"], pc["a"], pc["b"]) <= pc["half"] + n["r"]:
+                    edge(n["id"], station(pc, _project(n["at"], pc["a"], pc["b"])))
+                continue
+            inside = [k for k, end in ((0, pc["a"]), (1, pc["b"])) if _inside(end, n["poly"])]
+            for k in inside:
+                edge(n["id"], pc["stations"][k][1])
+            if not inside and any(_seg_seg(pc["a"], pc["b"], *e) <= pc["half"]
+                                  for e in n["edges"]):
+                edge(n["id"], station(pc, 0.5))
+    # Via, pad and pour against each other.
+    for i, a in enumerate(nodes):
+        for b in nodes[i + 1:]:
+            if not a["layers"] & b["layers"] or apart(a["box"], b["box"]):
+                continue
+            if a["kind"] == "pour" and b["kind"] == "pour":
+                hit = (any(_inside(p, a["poly"]) for p in b["poly"])
+                       or any(_inside(p, b["poly"]) for p in a["poly"]))
+            elif "pour" in (a["kind"], b["kind"]):
+                z, o = (a, b) if a["kind"] == "pour" else (b, a)
+                hit = _inside(o["at"], z["poly"]) or any(
+                    _seg_point(o["at"], *e) <= o["r"] for e in z["edges"])
+            else:
+                hit = math.dist(a["at"], b["at"]) <= a["r"] + b["r"]
+            if hit:
+                edge(a["id"], b["id"])
+    # Each piece, cut at its stations, is a run of edges labelled with its track.
+    for pc in pieces:
+        run = sorted(pc["stations"])
+        for (_t0, n0), (_t1, n1) in zip(run, run[1:]):
+            edge(n0, n1, pc["track"])
+    return adj, label, pads
+
+
+def _on_routes(adj: dict, s: int, t: int) -> set[int] | None:
+    """The edges on some simple route from ``s`` to ``t``, or None when no
+    route joins them: the edges of the biconnected blocks on the block-cut
+    tree's path between the two (Hopcroft and Tarjan's blocks, found without
+    recursion, edges told apart by id so two contacts between one pair of nodes
+    are a loop). A stub off a route, or a loop that meets it at one node, is a
+    block of its own off that path, and carries none of the route's current."""
+    index: dict[int, int] = {}
+    low: dict[int, int] = {}
+    blocks: list[set[int]] = []
+    ends: dict[int, tuple[int, int]] = {}
+    stack_e: list[int] = []
+    counter = 0
+    for root in sorted(adj):
+        if root in index:
+            continue
+        index[root] = low[root] = counter
+        counter += 1
+        stack = [(root, -1, iter(adj[root]))]
+        while stack:
+            v, via, it = stack[-1]
+            advanced = False
+            for w, e in it:
+                if e == via:
+                    continue
+                if w not in index:
+                    ends[e] = (v, w)
+                    stack_e.append(e)
+                    index[w] = low[w] = counter
+                    counter += 1
+                    stack.append((w, e, iter(adj[w])))
+                    advanced = True
+                    break
+                if index[w] < index[v] and e not in ends:
+                    ends[e] = (v, w)
+                    stack_e.append(e)
+                    low[v] = min(low[v], index[w])
+            if advanced:
+                continue
+            stack.pop()
+            if stack:
+                parent = stack[-1][0]
+                low[parent] = min(low[parent], low[v])
+                if low[v] >= index[parent]:
+                    block: set[int] = set()
+                    while stack_e:
+                        e = stack_e.pop()
+                        block.add(e)
+                        if e == via:
+                            break
+                    blocks.append(block)
+    holding: dict[int, list[int]] = {}
+    for k, block in enumerate(blocks):
+        for v in {x for e in block for x in ends[e]}:
+            holding.setdefault(v, []).append(k)
+    if s not in holding or t not in holding:
+        return None
+    came: dict[int, int | None] = {k: None for k in holding[s]}
+    queue = list(holding[s])
+    goal = set(holding[t])
+    found = None
+    while queue:
+        k = queue.pop(0)
+        if k in goal:
+            found = k
+            break
+        for v in {x for e in blocks[k] for x in ends[e]}:
+            for nk in holding[v]:
+                if nk not in came:
+                    came[nk] = k
+                    queue.append(nk)
+    if found is None:
+        return None
+    out: set[int] = set()
+    while found is not None:
+        out |= blocks[found]
+        found = came[found]
+    return out
+
+
+def _footprint_to_board_raw(fp: list):
+    """A function from a footprint's item coordinates as the file stores them
+    (a flipped footprint's y already negated) to the board's frame."""
+    at = K.child(fp, "at")
+    x0, y0 = float(at[1]), float(at[2])
+    turn = math.radians(float(at[3])) if len(at) > 3 else 0.0
+    c, s = math.cos(turn), math.sin(turn)
+    return lambda p: (x0 + p[0] * c + p[1] * s, y0 - p[0] * s + p[1] * c)
+
+
+def _route_tracks(tree: list, board, net: str, path: tuple) -> set[int]:
+    """The board's indexes of ``net``'s tracks on a route between the two pads
+    ``path`` names; raises ``P.RecordError`` when a pad is not on the net or no
+    copper joins them."""
+    adj, tracks, pads = _net_copper(tree, board, net)
+    label = f"pcb_net_currents_a[{net!r}]"
+    ends = []
+    for ref, pad in path:
+        got = pads.get((ref, pad))
+        if not got:
+            fp = next((f for f in board.footprints if f.ref == ref), None)
+            why = ("the board has no such part" if fp is None else
+                   f"it has no pad {pad}" if all(p.number != pad for p in fp.pads) else
+                   f"its pad {pad} is on {next(p.net for p in fp.pads if p.number == pad) or 'no net'}")
+            raise P.RecordError(f"{label} names {ref}.{pad}, not on {net}: {why}")
+        # Pads of one number (a part's two pads 1) are one end.
+        end = len(adj)
+        adj[end] = []
+        for n, g in enumerate(got):
+            e = -1 - len(ends) * 1000 - n        # ids no contact or track uses
+            adj[end].append((g, e))
+            adj[g].append((end, e))
+        ends.append(end)
+    on = _on_routes(adj, *ends)
+    if on is None:
+        raise P.RecordError(f"{label}: no copper of {net} joins {path[0][0]}.{path[0][1]} to "
+                            f"{path[1][0]}.{path[1][1]} (its tracks, vias, pads and pours "
+                            f"read): name two pads the net's copper joins")
+    return {tracks[e] for e in on if e in tracks}
+
+
 def _length_once(rows: list) -> float:
     """The length of a stretch's rows, each piece of copper (its layer and its
     ``Track.shape``) counted once."""
@@ -780,10 +1181,15 @@ def net_width(ctx: GateContext) -> Verdict:
     currents, ``pcb_temp_rise_limit_c`` the rise a track may reach. The verdict is
     the worst track of any named net.
 
-    Every track of the net is judged, not only the one the current takes: the
-    board does not say which path is which. A net carried by a pour as well as by
-    tracks is judged on its tracks, which is conservative. Vias, pads and pours are
-    not judged at all (PACK.md, "cannot settle").
+    A net named with one current has every track judged at it: the board does
+    not say which path is which. A net named with a route (:data:`NET_PATH_KEYS`)
+    has its route's tracks judged at ``amps`` and every other track at
+    ``rest_a``: the route is every track on some simple route of the net's copper
+    (tracks, vias, pads, pours) between the two pads (:func:`_on_routes`), so a
+    stub that fans a fine-pitch part out to its vias, or a loop that meets the
+    route at one point, is judged at the rest. A net carried by a pour as well as
+    by tracks is judged on its tracks, which is conservative. Vias, pads and
+    pours are not judged at all (PACK.md, "cannot settle").
     """
     gid = "pcb.net_width"
     path = _board_path(ctx)
@@ -804,14 +1210,27 @@ def net_width(ctx: GateContext) -> Verdict:
     oz_out = DEFAULT_OZ_OUTER if oz_out is None else float(oz_out)
     oz_in = DEFAULT_OZ_INNER if oz_in is None else float(oz_in)
     board = ctx.load_file(path, loader=K.load_board)
+    try:
+        stated = {net: _net_current(net, raw) for net, raw in sorted(currents.items())}
+        tree = (ctx.load_file(path, loader=K.load_tree)
+                if any(c["path"] for c in stated.values()) else None)
+        routes = {net: _route_tracks(tree, board, net, c["path"])
+                  for net, c in stated.items() if c["path"] and
+                  any(t.net == net for t in board.tracks)}
+    except P.RecordError as exc:
+        return Verdict(gate=gid, passed=False, error=str(exc))
 
-    rows, unrouted = [], []
-    for net, amps in sorted(currents.items()):
-        tracks = [t for t in board.tracks if t.net == net]
+    rows, unrouted, split = [], [], {}
+    for net, c in stated.items():
+        tracks = [(i, t) for i, t in enumerate(board.tracks) if t.net == net]
         if not tracks:
             unrouted.append(net)
             continue
-        for t in tracks:
+        on = routes.get(net)
+        for i, t in tracks:
+            amps = c["amps"] if on is None or i in on else c["rest"]
+            if on is not None:
+                split.setdefault(net, [0, 0])[0 if i in on else 1] += 1
             outer = t.layer in K.OUTER_LAYERS
             rise = K.temp_rise_c(float(amps), t.width_mm, oz_out if outer else oz_in, outer)
             rows.append((rise, net, float(amps), t.width_mm, t.layer, outer, t.length_mm,
@@ -857,6 +1276,10 @@ def net_width(ctx: GateContext) -> Verdict:
         "source": "IPC-2221 (2012) section 6.2; references/ipc-2221.md",
         "copper_oz": {"outer": oz_out, "inner": oz_in, "defaulted": defaulted},
         "limit_c": limit, "unrouted_nets": unrouted,
+        "routes": {n: {"from": ".".join(stated[n]["path"][0]),
+                       "to": ".".join(stated[n]["path"][1]), "amps": stated[n]["amps"],
+                       "rest_a": stated[n]["rest"], "tracks_on_route": k[0],
+                       "tracks_off_route": k[1]} for n, k in sorted(split.items())},
         "worst_per_net": {n: max((r for r in rows if r[1] == n), default=None)
                           for n in sorted({r[1] for r in rows})},
         "as_hot": [{"net": k[0], "width_mm": k[1], "side": "outer" if k[2] else "inner",
@@ -882,6 +1305,10 @@ def net_width(ctx: GateContext) -> Verdict:
     if len(ties) > TIES_NAMED:
         detail += (f"; and {len(ties) - TIES_NAMED} more stretch(es) as hot "
                    f"(evidence: as_hot)")
+    for n, (on_route, off_route) in sorted(split.items()):
+        (a, z), c = stated[n]["path"], stated[n]
+        detail += (f"; {n}: {on_route} track(s) on its route {'.'.join(a)} to {'.'.join(z)} "
+                   f"at {c['amps']:g} A, {off_route} off it at {c['rest']:g} A")
     if unrouted:
         detail += f"; no tracks on {', '.join(unrouted)} (not judged)"
     if outside:
@@ -1413,12 +1840,14 @@ def _waived_note(waived: list) -> str:
     id="pcb.drc",
     basis="established",
     title="KiCad's design rule check finds nothing, at every severity",
-    # `pcb-manufacturability` and `copper-clearance` are this pack's own words for
-    # what were `manufacturability` and `clearance`. What slipped through, in the
-    # holdout run on outside designs: cad-solid's and fdm-print's gates list the
-    # broad two as well, so a claim about a printed part tagged
-    # `manufacturability` was covered by this gate too, and a board's DRC finding
-    # read on it (PACK.md, "Tags this pack no longer lists").
+    # Tags only this pack's gates bind (general-packs H1 and H2). `clearance`,
+    # `manufacturability`, `connectivity`, `packaging` and `interference` are
+    # cad-solid's and fdm-print's words too: a claim tagged `manufacturability`
+    # was bound to pcb.drc, pcb.fab_rules, four cad mesh gates and every fdm
+    # gate at once (holdout D04), and a board's DRC finding read on a claim about
+    # a printed part. `design-rules` (H2) and `copper-clearance` (H1) are both
+    # this pack's own words for what was `clearance`, and `pcb-manufacturability`
+    # for what was `manufacturability` (PACK.md, "Tags this pack no longer lists").
     claims=["pcb", "design-rules", "pcb-manufacturability", "copper-clearance"],
     tier=Tier.BUILD,
     settles="design rule violations",
@@ -1606,7 +2035,9 @@ def _probe_rules(ctx: GateContext, gid: str, path: str):
     # `connectivity` itself is no longer listed: cad-solid's assembly check lists
     # it too, so a claim about a joined assembly read this gate's open net (holdout
     # run on outside designs; PACK.md, "Tags this pack no longer lists").
-    claims=["pcb", "netlist", "copper-connectivity"],
+    # `net-connectivity` is this pack's word for it (general-packs H2), and binds
+    # pcb.parity beside this gate, as `connectivity` did.
+    claims=["pcb", "net-connectivity", "netlist", "copper-connectivity"],
     tier=Tier.BUILD,
     settles="unconnected items",
     requires_tools=["kicad-cli"],
@@ -1777,9 +2208,10 @@ PARITY_FOOTPRINT_KINDS = ("extra_footprint", "duplicate_footprints")
     basis="established",
     title="The board and its schematic agree: every part, value, footprint and net",
     # `connectivity` is no longer listed: cad-solid's assembly check lists it too
-    # (holdout run on outside designs; PACK.md, "Tags this pack no longer lists").
+    # (holdout run on outside designs; PACK.md, "Tags this pack no longer lists");
+    # `net-connectivity` (general-packs H2) is this pack's word for it.
     # `schematic-parity` is this gate's alone.
-    claims=["pcb", "schematic-parity", "netlist"],
+    claims=["pcb", "schematic-parity", "netlist", "net-connectivity"],
     tier=Tier.BUILD,
     settles="schematic to board parity",
     requires_tools=["kicad-cli"],
@@ -2485,9 +2917,22 @@ FIT_HELPER = os.path.join(_HERE, "_fit.py")
 #: headers share 0.93 mm^3 with the lid, three orders above it.
 INTERFERENCE_TOL_MM3 = 1e-3
 
-#: Two minutes for the export and the geometry together, each: the baseline takes
-#: about 1 s to export and 3 s to measure.
+#: The wall clock each helper call (the export, the regions' pass, the geometry)
+#: gets when ``pcb_fit_timeout_s`` is not stated: this base, and
+#: :data:`FIT_TIMEOUT_PER_PART_S` for each part the call handles. The baseline
+#: takes about 1 s to export and 3 s to measure, with two parts.
 DEFAULT_FIT_TIMEOUT_S = 120.0
+
+#: The default's share for each part placed. Measured on a holdout run: a
+#: populated handheld board of 74 modelled parts took 2 to 4 minutes to export
+#: and fit (about 3.2 s a part at worst, both calls together), so 120 s flat
+#: skipped a sound board of ordinary size, and each skip cost a full re-run.
+#: 5 s a part is one and a half times that worst rate, for each call alone.
+#: *Rejected:* 120 s flat (fitted to the baseline's two parts: what slipped
+#: through); several minutes flat (a hung run on a two-part board waits as long
+#: as a hundred-part board needs); no limit (a hang never ends, and a check run
+#: never returns); a rate measured on this machine alone (another is slower).
+FIT_TIMEOUT_PER_PART_S = 5.0
 
 #: The claim tag ``pcb.enclosure_fit`` reads its limit from (``ctx.acceptance``):
 #: the least gap a part keeps from the enclosure, in mm, ``>=``. A limit lives in
@@ -2536,8 +2981,53 @@ BODY = "board"
 
 #: A footprint attribute that makes it a placed part with a body: what KiCad's
 #: pick-and-place file lists. Mounting holes, fiducials and test pads carry
-#: neither, and the fit does not ask for their bodies.
+#: neither, and the fit does not ask for their bodies unless they show a model.
+#:
+#: A footprint that shows a 3D model is a part whatever its attributes say: a
+#: display, a cell, a speaker or a buzzer fitted by hand is often drawn with no
+#: type and kept out of the BOM and the position file, and kicad-cli exports its
+#: model all the same (``--no-unspecified`` is not given). What slipped through
+#: (a holdout run): an e-paper display's footprint, with ``exclude_from_bom``,
+#: ``exclude_from_pos_files`` and no type, named its model. The fit asked for
+#: SMD and through-hole parts only, so the display's model was not copied to the
+#: stage, kicad-cli could not find it, and the pass said "nothing collides" of a
+#: board whose window ledge cut 22.75 mm^3 into the display. *Rejected:* every
+#: footprint with a courtyard (stock mounting holes, fiducials and test points
+#: carry one and no model, and each would skip the fit); ``exclude_from_bom`` as
+#: not fitted, as the power rules read it (a hand-fitted part is in no BOM and
+#: is in the case). A footprint with no type and no model is not asked for, and
+#: the verdict names it.
 _PART_ATTRS = ("smd", "through_hole")
+
+#: The variables a model path may name for KiCad's own 3D library, and where its
+#: installers put that library, searched in that order whatever the variable is
+#: set to (a gate reads no environment variable, ``_model_file``): the Linux
+#: packages' path, the macOS bundle's, and the Windows
+#: installer's for KiCad 10 and 9. ``_model_file`` reads them to say whether a
+#: model is found on this host before the export: a declared height stands in
+#: for a model found nowhere here. *Rejected:* asking kicad-cli first (an export
+#: per question, a full run each); a search of the disk (slow, and it finds old
+#: releases' libraries).
+MODEL_DIR_VARS = re.compile(r"^KICAD\d*_3DMODEL_DIR$")
+STOCK_MODEL_DIRS = (
+    "/usr/share/kicad/3dmodels",
+    "/Applications/KiCad/KiCad.app/Contents/SharedSupport/3dmodels",
+    r"C:\Program Files\KiCad\10.0\share\kicad\3dmodels",
+    r"C:\Program Files\KiCad\9.0\share\kicad\3dmodels",
+)
+_MODEL_VAR = re.compile(r"\$\{([^}]+)\}|\$\(([^)]+)\)")
+
+#: The model files ``--subst-models`` puts in place of a VRML model that is
+#: there: a STEP of the same name beside it. The stage copies the twin with the
+#: VRML file; it never makes a model found. Measured with KiCad 9.0.9 on the
+#: baseline's U1 named as ``3d/SOT-23-6.wrl``: with the VRML file and its STEP
+#: twin, the twin is fitted; with the VRML file alone, kicad-cli puts its mesh in
+#: the export ("Adding component U1"); with the STEP twin alone, "Could not add
+#: 3D model for U1. File not found: ${KIPRJMOD}/3d/SOT-23-6.wrl", and U1 is not
+#: in the export. (What slipped through in the review of H2: a VRML name counted
+#: as found by its twin alone, so a declared height for that part was named
+#: unused, and the run skipped on the part kicad-cli left out.)
+_SUBST_EXTS = (".step", ".stp", ".STEP", ".STP")
 
 #: The courtyard layer of a footprint on each side. A declared height is the
 #: courtyard's box on the footprint's own side.
@@ -2582,25 +3072,85 @@ class _FitError(ValueError):
     """A fit record the gate cannot read: the gate errors, naming it."""
 
 
-def _parts_and_models(tree: list) -> tuple[list[str], dict[str, list[str]]]:
-    """``(refs of placed parts, {ref: [visible 3D model paths]})``: the parts
-    the fit must see, and what the board says each one's body is. A part marked
-    do-not-populate or board-only is not placed, and not asked for."""
-    parts, models = [], {}
+def _shown_models(fp: list) -> list[str]:
+    """The paths of the 3D models footprint ``fp`` shows (not hidden)."""
+    shown = []
+    for model in K.children(fp, "model"):
+        hide = K.child(model, "hide")
+        if (hide is not None and (len(hide) == 1 or str(hide[1]) == "yes")) or "hide" in model:
+            continue
+        shown.append(str(model[1]))
+    return shown
+
+
+def _parts_and_models(tree: list) -> tuple[list[str], dict[str, list[str]], list[str]]:
+    """``(refs of placed parts, {ref: [visible 3D model paths]}, refs not asked
+    for)``: the parts the fit must see, what the board says each one's body is,
+    and the footprints it does not ask for (no type and no model). A part marked
+    do-not-populate is not placed, and not asked for. A footprint that shows a
+    model is a part whatever its type (:data:`_PART_ATTRS`); an SMD or
+    through-hole footprint that shows none is one too, unless it is board-only.
+    Two footprints of one ref (KiCad's unannotated ``REF**``) are one part,
+    their models together: kicad-cli names both bodies by that ref."""
+    parts: list[str] = []
+    models: dict[str, list[str]] = {}
+    unasked: list[str] = []
     for fp in K.children(tree, "footprint"):
         ref = K.footprint_ref(fp)[0]
         attr = [str(a) for a in (K.child(fp, "attr") or [])[1:]]
-        if not any(a in _PART_ATTRS for a in attr) or "dnp" in attr or "board_only" in attr:
+        if "dnp" in attr:
             continue
-        parts.append(ref)
-        shown = []
-        for model in K.children(fp, "model"):
-            hide = K.child(model, "hide")
-            if (hide is not None and (len(hide) == 1 or str(hide[1]) == "yes")) or "hide" in model:
-                continue
-            shown.append(str(model[1]))
-        models[ref] = shown
-    return parts, models
+        shown = _shown_models(fp)
+        typed = any(a in _PART_ATTRS for a in attr) and "board_only" not in attr
+        if not shown and not typed:
+            if ref not in unasked:
+                unasked.append(ref)
+            continue
+        if ref not in models:
+            parts.append(ref)
+            models[ref] = []
+        models[ref] += [m for m in shown if m not in models[ref]]
+    return parts, models, [r for r in unasked if r not in models]
+
+
+def _model_file(model: str, board_dir: str) -> str | None:
+    """The file a footprint's model path names on this host, or None when it is
+    found nowhere here: ``${KIPRJMOD}`` is the board's folder, KiCad's own 3D
+    library variable is searched where its installers put it
+    (:data:`STOCK_MODEL_DIRS`), and any other variable is found nowhere. A
+    relative path is read from the board's folder. The file the path names is
+    the one kicad-cli looks for, a VRML file too: a STEP beside a VRML name
+    that is not there is never read (:data:`_SUBST_EXTS`).
+
+    No variable's value is read from the environment: rho keys none, so a read
+    makes the verdict opaque (``env:<NAME>``, never Fresh), and ``doctor``'s
+    ``env-reads`` row holds the bundled packs to none (spec §3.17). What slipped
+    through, in the merge of general-packs H2 after H3: H2 read ``os.environ``
+    here for every variable but ``${KIPRJMOD}``, and test_doctor's zero-hits
+    check, red on H2's base for firmware-ci's reads, went red again for this
+    one. The cost: on a host that sets ``KICAD<n>_3DMODEL_DIR`` to a folder of
+    its own, kicad-cli finds a model this search does not, and a declared height
+    stands in for it there (still one body). *Rejected:* ``os.path.expandvars``
+    (the same read, out of the scan's sight)."""
+    other: list[str] = []
+
+    def var(m) -> str:
+        name = m.group(1) or m.group(2)
+        if name == "KIPRJMOD":
+            return board_dir
+        other.append(name)
+        return "\0"
+
+    expanded = _MODEL_VAR.sub(var, model)
+    if other:
+        if len(other) != 1 or not MODEL_DIR_VARS.match(other[0]):
+            return None
+        bases = [d for d in STOCK_MODEL_DIRS if os.path.isdir(d)]
+        options = [expanded.replace("\0", base) for base in bases]
+    else:
+        options = [expanded]
+    found = [p if os.path.isabs(p) else os.path.join(board_dir, p) for p in options]
+    return next((p for p in found if os.path.isfile(p)), None)
 
 
 def _arc_points(start, mid, end) -> list[tuple[float, float]]:
@@ -2804,8 +3354,14 @@ def _contacts(raw, label: str) -> dict:
 
 
 def _heights(raw, label: str) -> dict:
-    """``{ref: {h, source}}``: the height above the board of a part with no 3D
-    model, and where the number comes from (a datasheet's seated height)."""
+    """``{ref: {h, source, box_mm?}}``: the height above the board of a part
+    whose 3D model is not on this host (none named, or none found), where the
+    number comes from (a datasheet's seated height), and, for a part with no
+    courtyard, its outline: ``box_mm`` ``[[x0, y0], [x1, y1]]`` in mm in the
+    footprint's own frame (as KiCad's footprint editor shows it: x right, y
+    down). (What slipped through, a holdout run: a part with no courtyard could
+    take no height at all, so a board borrowed from another machine had to be
+    edited to be fitted.)"""
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -2813,13 +3369,24 @@ def _heights(raw, label: str) -> dict:
     out = {}
     for ref, rec in raw.items():
         at = f"{label}[{ref!r}]"
-        _record(rec, at, ("h", "source"))
+        _record(rec, at, ("h", "source"), ("box_mm",))
         h = _number(rec["h"], f"{at}.h")
         if not h > 0.0:
             raise _FitError(f"{at}.h is {h:g}: a height is above 0 mm")
         if not isinstance(rec["source"], str) or not rec["source"].strip():
             raise _FitError(f"{at}.source is empty: say where the height comes from")
         out[ref] = {"h": h, "source": rec["source"].strip()}
+        if "box_mm" in rec:
+            box = rec["box_mm"]
+            if (not isinstance(box, list) or len(box) != 2
+                    or not all(isinstance(c, list) and len(c) == 2 for c in box)):
+                raise _FitError(f"{at}.box_mm is {box!r}: give [[x0, y0], [x1, y1]] in mm, "
+                                f"in the footprint's own frame (x right, y down)")
+            (x0, y0), (x1, y1) = ([_number(v, f"{at}.box_mm") for v in c] for c in box)
+            if not (x0 < x1 and y0 < y1):
+                raise _FitError(f"{at}.box_mm is {box!r}: each low corner must be below its "
+                                f"high one")
+            out[ref]["outline"] = (x0, y0, x1, y1)
     return out
 
 
@@ -2838,6 +3405,13 @@ class _Fit:
     models: dict = dataclasses.field(default_factory=dict)
     tree: list | None = None
     enclosure_id: str = ""      # the sha256 of the enclosure file's bytes
+    #: Footprints with no type and no model: not asked for, and named.
+    unasked: list = dataclasses.field(default_factory=list)
+    #: ``{ref: model path}`` for a part fitted at its declared height in place
+    #: of a model found nowhere on this host.
+    stand_in: dict = dataclasses.field(default_factory=dict)
+    #: ``{ref: file}`` for a declared height not used: the model is found.
+    unused: dict = dataclasses.field(default_factory=dict)
 
     def name(self, ref: str) -> str:
         return f"{self.id}:{ref}" if self.id else ref
@@ -2924,44 +3498,77 @@ def _read_board(ctx: GateContext, gid: str, fit: _Fit) -> str | None:
         raise _FitError(f"{label}file version {version} is older than "
                         f"{K.MIN_BOARD_VERSION} (KiCad 6): this reader finds footprints "
                         f"from KiCad 6 on")
-    parts, models = _parts_and_models(tree)
+    parts, models, unasked = _parts_and_models(tree)
     on_board = {K.footprint_ref(fp)[0] for fp in K.children(tree, "footprint")}
+    board_dir = os.path.dirname(os.path.abspath(fit.board))
 
-    def placed(ref: str, what: str) -> None:
-        if ref in parts:
+    def placed(ref: str, what: str, *, untyped: bool = False) -> None:
+        if ref in parts or (untyped and ref in unasked):
             return
-        why = ("the board does not place it (do not populate, board only, or neither "
-               "SMD nor through-hole)" if ref in on_board else "the board has no such part")
+        why = ("the board does not place it (do not populate, or no type and no 3D model)"
+               if ref in on_board else "the board has no such part")
         raise _FitError(f"{label}{what} names {ref}: {why}")
 
     for ref, rec in fit.heights.items():
-        placed(ref, "a declared height")
+        # A footprint with no type and no model takes a height too: a part
+        # fitted by hand is often drawn so.
+        placed(ref, "a declared height", untyped=True)
         if ref in fit.bodiless:
             raise _FitError(f"{label}{ref} is listed as bodiless and has a declared height: "
                             f"it has a body or it does not")
-        if models.get(ref):
-            raise _FitError(f"{label}{ref} names a 3D model ({models[ref][0]}) and a declared "
-                            f"height: one body each. Hide or remove the model to fit the "
-                            f"height, or drop the height to fit the model")
+        # One body each: the model where this host has it, else the declared
+        # height in its place. (What slipped through, a holdout run: a part
+        # that named a model was refused a height, so a board copied from a
+        # machine with other libraries could be fitted only by editing it.)
+        # *Rejected:* the height over a found model (a stated number in place
+        # of the part's drawn body); both at once (a union of the two, larger
+        # than either, fails a sound board on one host and not another); the
+        # old refusal (the only way past it was to edit the board).
+        shown = models.get(ref, [])
+        found = {m: _model_file(m, board_dir) for m in shown}
+        if any(found.values()):
+            fit.unused[ref] = next(f for f in found.values() if f)
+            continue
+        if shown:
+            fit.stand_in[ref] = shown[0]
         fp = next(f for f in K.children(tree, "footprint") if K.footprint_ref(f)[0] == ref)
-        box = _courtyard_box(fp)
+        box = rec.get("outline") or _courtyard_box(fp)
         if box is None:
             raise _FitError(f"{label}{ref} has a declared height and no courtyard on its own "
-                            f"side: the box is the courtyard's, raised to the height")
+                            f"side: give its outline as box_mm [[x0, y0], [x1, y1]] in the "
+                            f"footprint's frame, or draw its courtyard")
         rec["box"] = box
     for ref in fit.contacts:
         if ref != BODY:
-            placed(ref, "a contact")
+            # A footprint with no type and no model that takes a declared height
+            # is fitted, so it may seat by design too. (What slipped through in
+            # the review of H2: the height made it a part and the contact still
+            # read "the board does not place it".)
+            placed(ref, "a contact", untyped=ref in fit.heights)
             if ref in fit.bodiless:
                 raise _FitError(f"{label}{ref} is listed as bodiless and has a contact: a "
                                 f"part with no body touches nothing")
     fit.tree = tree
-    fit.parts = [r for r in parts if r not in fit.bodiless]
+    boxed = [r for r in fit.heights if r not in fit.unused]
+    fit.parts = [r for r in parts + [r for r in boxed if r not in parts]
+                 if r not in fit.bodiless]
     fit.models = models
-    unmodelled = sorted(r for r in fit.parts if not models.get(r) and r not in fit.heights)
+    fit.unasked = [r for r in unasked if r not in fit.parts and r not in fit.bodiless]
+    unmodelled = sorted(r for r in fit.parts if not models.get(r) and r not in boxed)
     if unmodelled:
-        # Held to the 200 characters a skip reason keeps: at 207 the last choice,
+        # The parts whose named model is found nowhere here are named in the
+        # same skip, so one run says all a person must state. (What slipped
+        # through, a holdout run: the first skip named only the parts with no
+        # model; a missing model surfaced after the export, a run later.) Held
+        # to the 200 characters a skip reason keeps: at 207 the last choice,
         # pcb_enclosure_bodiless, was cut off (seen in the review of P7).
+        lost = sorted(r for r in fit.parts if r not in boxed and models.get(r)
+                      and not any(_model_file(m, board_dir) for m in models[r]))
+        if lost:
+            return (f"{label}{len(unmodelled)} part(s) name no 3D model "
+                    f"({', '.join(unmodelled[:3])}), {len(lost)} one not found here "
+                    f"({', '.join(lost[:3])}): state each height in pcb_part_heights_mm, or "
+                    f"list a bodiless part in pcb_enclosure_bodiless")
         return (f"{label}{len(unmodelled)} placed part(s) name no 3D model: "
                 f"{', '.join(unmodelled[:8])}. Give each a model, state its height in "
                 f"pcb_part_heights_mm, or list a part with no body in pcb_enclosure_bodiless")
@@ -3006,21 +3613,28 @@ def _xyz(v) -> str:
     return "(" + ", ".join(f"{round(c, 3):g}" for c in v) + ")"
 
 
-def _region_refusal(fit: _Fit, parts: dict, enclosure_bbox,
-                    limit: float) -> tuple[str, str] | None:
-    """Why ``fit``'s contact regions cannot stand as measured, as ``(error,
-    detail)``, or None. The error is what to do, short enough for the 200
-    characters a verdict's error keeps; the detail has the boxes it read.
+def _region_refusals(fit: _Fit, parts: dict, enclosure_bbox,
+                     limit: float) -> list[tuple[str, str, str]]:
+    """Why each of ``fit``'s contact regions cannot stand as measured, as
+    ``(error, detail, which)`` rows, none when every one stands. Each error is
+    what to do, short enough for the 200 characters a verdict's error keeps; its
+    detail has the boxes it read; ``which`` names the part and region.
 
-    ``parts`` is the geometry's answer for the board (``_fit.py``: each part
-    with a region carries its box as placed and, for each region, the box of the
-    enclosure material it took out). A region is refused when it holds the
-    enclosure's whole box; when a part's regions together take out all of the
-    enclosure (its distance to the rest came back None, and before the review of
-    P7 such a part was left out of the verdict: judged against nothing); and when
-    the material it takes out reaches more than :data:`REGION_REACH_LIMITS` of the
-    claim's limits past the part's own box. Inside that reach a region is the
-    person's statement of the feature: one drawn over two features excuses both."""
+    ``parts`` is the geometry's answer for the board (``_fit.py``, its ``fit``
+    or its ``regions`` pass: each part with a region carries its box as placed,
+    whether its regions leave any enclosure (``rest_empty``) and, for each
+    region, the box of the enclosure material it took out). A region is refused
+    when it holds the enclosure's whole box; when a part's regions together take
+    out all of the enclosure (before the review of P7 such a part was left out
+    of the verdict: judged against nothing); and when the material it takes out
+    reaches more than :data:`REGION_REACH_LIMITS` of the claim's limits past the
+    part's own box. Inside that reach a region is the person's statement of the
+    feature: one drawn over two features excuses both.
+
+    Every refusal is listed, not the first. (What slipped through, a holdout
+    run: the check returned at the first refusal, so each region drawn too wide
+    cost a full fit of two to four minutes to learn of the next.)"""
+    out: list[tuple[str, str, str]] = []
     blo, bhi = enclosure_bbox
     reach = REGION_REACH_LIMITS * max(limit, 0.0)
     for ref, feats in sorted(fit.contacts.items()):
@@ -3028,22 +3642,29 @@ def _region_refusal(fit: _Fit, parts: dict, enclosure_bbox,
         if not regions:
             continue
         who = fit.name(ref)
+        whole = False
         for feat, (lo, hi) in sorted(regions.items()):
             if all(lo[i] <= blo[i] and hi[i] >= bhi[i] for i in range(3)):
-                return (f"{who} against {feat}: its region holds the whole enclosure, so it "
-                        f"excuses the part against anything. Draw the region around the "
-                        f"feature it touches",
-                        f"the region is {_xyz(lo)} to {_xyz(hi)} mm; the enclosure's box is "
-                        f"{_xyz(blo)} to {_xyz(bhi)} mm")
+                whole = True
+                out.append((f"{who} against {feat}: its region holds the whole enclosure, so "
+                            f"it excuses the part against anything. Draw the region around "
+                            f"the feature it touches",
+                            f"the region is {_xyz(lo)} to {_xyz(hi)} mm; the enclosure's box "
+                            f"is {_xyz(blo)} to {_xyz(bhi)} mm", f"{who} against {feat}"))
+        if whole:
+            continue
         row = (parts.get(ref) or {}).get("enclosure")
         if row is None:
             continue                # not in the export: named as missing, not judged
-        if row.get("clearance_mm") is None:
-            return (f"{who}: its regions ({', '.join(sorted(regions))}) take out all of the "
-                    f"enclosure, so they excuse it against anything. Draw each region "
-                    f"around the feature it touches",
-                    "; ".join(f"{feat} is {_xyz(lo)} to {_xyz(hi)} mm"
-                              for feat, (lo, hi) in sorted(regions.items())))
+        empty = row["rest_empty"] if "rest_empty" in row else row.get("clearance_mm") is None
+        if empty:
+            out.append((f"{who}: its regions ({', '.join(sorted(regions))}) take out all of "
+                        f"the enclosure, so they excuse it against anything. Draw each region "
+                        f"around the feature it touches",
+                        "; ".join(f"{feat} is {_xyz(lo)} to {_xyz(hi)} mm"
+                                  for feat, (lo, hi) in sorted(regions.items())),
+                        f"{who}'s regions"))
+            continue
         plo, phi = row["bbox"]
         rlo = [v - reach for v in plo]
         rhi = [v + reach for v in phi]
@@ -3064,25 +3685,68 @@ def _region_refusal(fit: _Fit, parts: dict, enclosure_bbox,
             clo = [round(max(lo[i], rlo[i]), 3) for i in range(3)]
             chi = [round(min(hi[i], rhi[i]), 3) for i in range(3)]
             if not all(a < b for a, b in zip(clo, chi)):
-                return (f"{who} against {feat}: the region holds no material within "
-                        f"{reach:g} mm of {ref}'s own box ({REGION_REACH_LIMITS:g} times the "
-                        f"claim's limit), so it excuses nothing. Remove it, or draw it where "
-                        f"{ref} touches", detail)
-            return (f"{who} against {feat}: the region reaches more than {reach:g} mm past "
-                    f"{ref}'s own box ({REGION_REACH_LIMITS:g} times the claim's limit). "
-                    f"Draw it within {json.dumps([clo, chi])}", detail)
-    return None
+                out.append((f"{who} against {feat}: the region holds no material within "
+                            f"{reach:g} mm of {ref}'s own box ({REGION_REACH_LIMITS:g} times "
+                            f"the claim's limit), so it excuses nothing. Remove it, or draw it "
+                            f"where {ref} touches", detail, f"{who} against {feat}"))
+                continue
+            out.append((f"{who} against {feat}: the region reaches more than {reach:g} mm "
+                        f"past {ref}'s own box ({REGION_REACH_LIMITS:g} times the claim's "
+                        f"limit). Draw it within {json.dumps([clo, chi])}", detail,
+                        f"{who} against {feat}"))
+    return out
 
 
-def _helper(mode: str, request: str, cwd: str, timeout: float, log: str):
+def _region_refusal(fit: _Fit, parts: dict, enclosure_bbox,
+                    limit: float) -> tuple[str, str] | None:
+    """The first of :func:`_region_refusals`, or None."""
+    found = _region_refusals(fit, parts, enclosure_bbox, limit)
+    return found[0][:2] if found else None
+
+
+def _refused(gid: str, refusals: list[tuple[str, str, str]], ev: list[str],
+             out_dir: str) -> Verdict:
+    """The error for every region refused, in one verdict: the first refusal's
+    words as the error and its boxes as the detail, then each other refusal
+    named, and an evidence file with every refusal's error (the box to draw)
+    and its boxes. Each fits what a verdict keeps: an error 200 characters, a
+    detail 500."""
+    path = os.path.join(out_dir, "regions_refused.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump([{"error": e, "detail": d} for e, d, _w in refusals], fh, indent=2)
+    error, detail, _which = refusals[0]
+    if len(refusals) > 1:
+        detail = (f"{len(refusals)} contact regions refused, each with its box to draw in "
+                  f"regions_refused.json: {', '.join(w for _e, _d, w in refusals)}; first: "
+                  f"{detail}")
+    return Verdict(gate=gid, passed=False, evidence=[path, *ev], error=error, detail=detail)
+
+
+def _fit_timeout(ctx: GateContext, parts: int) -> tuple[float, str]:
+    """``(seconds, how they were chosen)`` for one helper call over ``parts``
+    parts: ``pcb_fit_timeout_s`` when the project states it, else
+    :data:`DEFAULT_FIT_TIMEOUT_S` and :data:`FIT_TIMEOUT_PER_PART_S` a part."""
+    stated = ctx.param("pcb_fit_timeout_s")
+    if stated:
+        return float(stated), f"{parts} part(s), pcb_fit_timeout_s"
+    seconds = DEFAULT_FIT_TIMEOUT_S + FIT_TIMEOUT_PER_PART_S * parts
+    return seconds, (f"{parts} part(s), the default {DEFAULT_FIT_TIMEOUT_S:g} s and "
+                     f"{FIT_TIMEOUT_PER_PART_S:g} s a part: set pcb_fit_timeout_s")
+
+
+def _helper(mode: str, request: str, cwd: str, timeout: float, log: str, how: str = ""):
     """``_fit.py <mode> <request>``: ``(parsed answer, None)`` or ``(None, why)``
-    with ``why`` ``("skip"|"error", text)``."""
+    with ``why`` ``("skip"|"error", text)``. A timeout names the parts the call
+    held and how its time was chosen, so a person can choose another. (What
+    slipped through, a holdout run: the skip named the key and no count, and
+    the default was fitted to the baseline's two parts.)"""
     try:
         geo = subprocess.run([sys.executable, FIT_HELPER, mode, request], capture_output=True,
                              text=True, timeout=timeout, stdin=subprocess.DEVNULL, cwd=cwd)
     except subprocess.TimeoutExpired:
-        return None, ("skip", f"the fit geometry exceeded {timeout:g} s (pcb_fit_timeout_s) "
-                              f"and was killed: nothing was shown")
+        return None, ("skip", f"the fit geometry ({mode}) ran {timeout:g} s ("
+                              f"{how or 'pcb_fit_timeout_s'}) and was killed: nothing was "
+                              f"shown")
     with open(log, "a", encoding="utf-8") as fh:
         fh.write(f"\n_fit.py {mode} exit {geo.returncode}\n{geo.stdout}\n{geo.stderr}\n")
     lines = [ln for ln in geo.stdout.splitlines() if ln.startswith("{")]
@@ -3093,7 +3757,19 @@ def _helper(mode: str, request: str, cwd: str, timeout: float, log: str):
     return json.loads(lines[-1]), None
 
 
-def _export(ctx: GateContext, gid: str, fit: _Fit, timeout: float):
+def _project_model(model: str) -> str | None:
+    """The path inside the board's folder that a model names, or None for one
+    outside it: ``${KIPRJMOD}/x`` (or KiCad 5's ``$(KIPRJMOD)/x``) and a relative
+    path, which KiCad reads from the project's folder."""
+    for prefix in ("${KIPRJMOD}/", "$(KIPRJMOD)/"):
+        if model.startswith(prefix):
+            return model[len(prefix):]
+    if "$" in model or os.path.isabs(model):
+        return None
+    return model
+
+
+def _export(ctx: GateContext, gid: str, fit: _Fit, timeout: float, how: str = ""):
     """Stage ``fit``'s board, give each part fitted at a declared height its box
     as its model, and export the populated board as STEP. ``(step, log)`` or
     ``(None, ("skip"|"error", text, evidence))``."""
@@ -3102,20 +3778,28 @@ def _export(ctx: GateContext, gid: str, fit: _Fit, timeout: float):
     if isinstance(staged, Verdict):
         return None, ("error", staged.error or staged.detail, staged.evidence)
     stem, stage = staged
+    # Every part's model kept with the project goes to the stage, a part of
+    # any type among them (_parts_and_models), and a VRML model's STEP twin
+    # with it, which --subst-models reads in place of a VRML file that is there.
     src_dir = os.path.dirname(os.path.abspath(fit.board))
     for ref in fit.parts:
         for model in fit.models.get(ref, []):
-            if model.startswith("${KIPRJMOD}/"):
-                rel_model = model[len("${KIPRJMOD}/"):]
-                src = os.path.join(src_dir, rel_model)
+            rel_model = _project_model(model)
+            if rel_model is None:
+                continue
+            stem_m, ext = os.path.splitext(rel_model)
+            for name in ([rel_model] + ([stem_m + e for e in _SUBST_EXTS]
+                                        if ext.lower() == ".wrl" else [])):
+                src = os.path.join(src_dir, name)
                 if os.path.isfile(src):
-                    dst = os.path.join(stage, rel_model)
+                    dst = os.path.join(stage, name)
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
                     shutil.copyfile(src, dst)
     log = os.path.join(stage, "fit.log")
     with open(log, "w", encoding="utf-8") as fh:
         fh.write(f"fit {fit.key}: {fit.board}\n")
-    if fit.heights:
+    boxed = {r: rec for r, rec in fit.heights.items() if r not in fit.unused}
+    if boxed:
         # The box is in the footprint's model frame: x right, y UP (KiCad's
         # footprint frame is y down), z up from the seating plane. kicad-cli
         # then seats, turns and flips it as it does any model. Measured on
@@ -3128,13 +3812,16 @@ def _export(ctx: GateContext, gid: str, fit: _Fit, timeout: float):
         os.makedirs(os.path.join(stage, HEIGHT_DIR), exist_ok=True)
         tree = K.parse(K.dump(fit.tree))           # a copy: the loaded tree stays as read
         boxes = []
-        for n, (ref, rec) in enumerate(sorted(fit.heights.items())):
+        for n, (ref, rec) in enumerate(sorted(boxed.items())):
             x0, y0, x1, y1 = rec["box"]
             name = f"{n:03d}_{re.sub(r'[^A-Za-z0-9_-]', '_', ref)}.step"
             path = os.path.abspath(os.path.join(stage, HEIGHT_DIR, name))
             boxes.append({"ref": ref, "path": path,
                           "lo": [x0, -y1, 0.0], "hi": [x1, -y0, rec["h"]]})
             fp = next(f for f in K.children(tree, "footprint") if K.footprint_ref(f)[0] == ref)
+            # A model found nowhere here leaves the staged copy: the box is the
+            # part's one body, on whatever host kicad-cli could find more.
+            fp[:] = [x for x in fp if not (isinstance(x, list) and K.head(x) == "model")]
             fp.append(["model", K.Q(path),
                        ["offset", ["xyz", "0", "0", "0"]], ["scale", ["xyz", "1", "1", "1"]],
                        ["rotate", ["xyz", "0", "0", "0"]]])
@@ -3143,7 +3830,7 @@ def _export(ctx: GateContext, gid: str, fit: _Fit, timeout: float):
         request = os.path.join(stage, "boxes_request.json")
         with open(request, "w", encoding="utf-8") as fh:
             json.dump({"boxes": boxes}, fh, indent=2)
-        _answer, why = _helper("boxes", request, stage, timeout, log)
+        _answer, why = _helper("boxes", request, stage, timeout, log, how)
         if why is not None:
             return None, (*why, [log])
     step = os.path.join(stage, "board.step")
@@ -3155,8 +3842,8 @@ def _export(ctx: GateContext, gid: str, fit: _Fit, timeout: float):
     except FileNotFoundError as exc:
         return None, ("skip", f"could not launch kicad-cli: {exc}", [])
     except subprocess.TimeoutExpired:
-        return None, ("skip", f"kicad-cli pcb export step exceeded {timeout:g} s and was "
-                              f"killed", [log])
+        return None, ("skip", f"kicad-cli pcb export step ran {timeout:g} s ("
+                              f"{how or 'pcb_fit_timeout_s'}) and was killed", [log])
     with open(log, "a", encoding="utf-8") as fh:
         fh.write(" ".join(argv) + f"\nexit {proc.returncode}\n{proc.stdout}\n{proc.stderr}\n")
     if proc.returncode != 0 or not os.path.isfile(step):
@@ -3175,7 +3862,7 @@ def _placed_at(place: dict) -> str:
     id="pcb.enclosure_fit",
     basis="established",
     title="The populated boards fit their enclosure: nothing collides, every part keeps the claim's clearance",
-    claims=["pcb", "enclosure-fit", "packaging", "interference"],
+    claims=["pcb", "enclosure-fit"],
     tier=Tier.BUILD,
     settles="board fit in its enclosure",
     requires_tools=["kicad-cli"],
@@ -3207,12 +3894,15 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
     **A part the fit cannot see is a skip, never a pass.** kicad-cli leaves out,
     silently and with exit 0, every part whose 3D model it cannot find (KiCad's
     3D library is a separate install on most hosts), and a fit run without the
-    part reads clear. So every placed part (SMD or through-hole, not DNP) must
-    name a model and arrive in the export under its reference, or have a
-    declared height (``pcb_part_heights_mm``: its courtyard's box, raised to that
-    height, stands in for its body), or the gate skips naming it. A part that
-    truly has no body above the board (an antenna drawn in copper) goes in
-    ``pcb_enclosure_bodiless``, by reference, a recorded statement.
+    part reads clear. So every placed part (SMD or through-hole, or any footprint
+    that shows a model, whatever its type; not DNP) must name a model and arrive
+    in the export under its reference, or have a declared height
+    (``pcb_part_heights_mm``: its courtyard's box, or the outline it states,
+    raised to that height, stands in for its body where its model is found
+    nowhere on this host), or the gate skips naming it. A part that truly has
+    no body above the board (an antenna drawn in copper) goes in
+    ``pcb_enclosure_bodiless``, by reference, a recorded statement. A footprint
+    with no type and no model is not asked for, and the verdict names it.
 
     **A by-design contact is one part against one feature** (``pcb_enclosure_
     contacts``, :func:`_contacts`): a switch on its plunger, a receptacle in its
@@ -3273,12 +3963,10 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
         pairs = _board_contacts(fits)
     except _FitError as exc:
         return Verdict(gate=gid, passed=False, error=str(exc))
-    timeout = float(ctx.param("pcb_fit_timeout_s", DEFAULT_FIT_TIMEOUT_S) or
-                    DEFAULT_FIT_TIMEOUT_S)
     ev: list[str] = []
     exported = {}
     for fit in ready:
-        done, why = _export(ctx, gid, fit, timeout)
+        done, why = _export(ctx, gid, fit, *_fit_timeout(ctx, len(fit.parts)))
         if why is not None:
             kind, text, cited = why
             label = f"fit {fit.id}: " if fit.id else ""
@@ -3312,8 +4000,25 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
         with open(request, "w", encoding="utf-8") as fh:
             json.dump({"enclosure_step": os.path.abspath(enclosure), "boards": boards},
                       fh, indent=2)
-        result, why = _helper("fit", request, first_stage, timeout, members[0][2])
+        timeout, how = _fit_timeout(ctx, sum(len(f.parts) for f, _s, _l in members))
         ev += [log for _f, _s, log in members]
+        # The regions first, on their own: each part's box as placed and the
+        # material each region takes out, without the distances and shared
+        # volumes of every part. A refused region then costs the export and
+        # this pass, not the full fit. (What slipped through, a holdout run:
+        # the regions were checked only after the full fit, two to four minutes
+        # on a populated board, for each region drawn too wide.)
+        if any(b["regions"] for b in boards):
+            early, why = _helper("regions", request, first_stage, timeout, members[0][2], how)
+            if why is not None:
+                (skips if why[0] == "skip" else errors).append(why[1])
+                continue
+            refusals = [r for fit, _s, _l in members
+                        for r in _region_refusals(fit, early["boards"][fit.key]["parts"],
+                                                  early["enclosure_bbox"], acc.limit)]
+            if refusals:
+                return _refused(gid, refusals, ev, first_stage)
+        result, why = _helper("fit", request, first_stage, timeout, members[0][2], how)
         if why is not None:
             (skips if why[0] == "skip" else errors).append(why[1])
             continue
@@ -3322,13 +4027,14 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
             json.dump(result, fh, indent=2, sort_keys=True)
         ev = [report, *ev, *(step for _f, step, _l in members)]
         names = {fit.key: fit for fit, _s, _l in members}
+        refusals = [r for fit, _s, _l in members
+                    for r in _region_refusals(fit, result["boards"][fit.key]["parts"],
+                                              result["enclosure_bbox"], acc.limit)]
+        if refusals:
+            return _refused(gid, refusals, ev, first_stage)
         for fit, _step, _log in members:
             label = f"fit {fit.id}: " if fit.id else ""
             measured_parts = result["boards"][fit.key]["parts"]
-            refused = _region_refusal(fit, measured_parts, result["enclosure_bbox"], acc.limit)
-            if refused:
-                return Verdict(gate=gid, passed=False, evidence=ev, error=refused[0],
-                               detail=refused[1])
             # A board with a part missing from its export is still judged on what
             # arrived, and named as not judged. A shape that is there can only come
             # nearer to something when a missing one is added, never farther, so
@@ -3338,22 +4044,37 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
             # pair rows, so the same records read fail or skip by the order of
             # their keys.)
             missing = sorted(r for r in fit.parts if r not in measured_parts)
-            boxed = [r for r in missing if r in fit.heights]
-            unfound = [r for r in missing if r not in fit.heights]
+            boxed = [r for r in missing if r in fit.heights and r not in fit.unused]
+            unfound = [r for r in missing if r not in boxed]
             if boxed:
                 errors.append(f"{label}the declared-height box of {', '.join(boxed[:8])} did "
                               f"not reach kicad-cli's export")
             if unfound:
                 # Every part here names a model: one with neither skipped before the
-                # export, and one with both is refused (_read_board). So the advice
-                # is to hide the model as well as to state a height. (What slipped
-                # through in P7: the advice was to state a height alone, which the
-                # next run refused; and at 241 characters, past the 200 a skip
-                # reason keeps, that advice was cut off before it was shown.)
-                skips.append(f"{label}kicad-cli left out {', '.join(unfound[:8])}: it did not "
-                             f"find their 3D models. Install KiCad's 3D library, keep each "
-                             f"model beside the board, or hide it and state a height in "
-                             f"pcb_part_heights_mm")
+                # export. Where this host has no file its model names, a declared
+                # height stands in for it (_read_board), so the advice is to state
+                # one. Where it has the file and kicad-cli left the part out all the
+                # same, a height is named unused beside the model, so the advice is
+                # to hide the model. (What slipped through in P7: the advice was to
+                # state a height alone, which the next run refused; and at 241
+                # characters, past the 200 a skip reason keeps, that advice was cut
+                # off before it was shown. In the review of H2: the advice still
+                # said to hide a model after a height had come to stand in for a
+                # missing one, and a part whose height was stated was told to state
+                # one.)
+                board_dir = os.path.dirname(os.path.abspath(fit.board))
+                here = [r for r in unfound if r in fit.unused
+                        or any(_model_file(m, board_dir) for m in fit.models.get(r, []))]
+                gone = [r for r in unfound if r not in here]
+                if gone:
+                    skips.append(f"{label}kicad-cli left out {', '.join(gone[:8])}: it did "
+                                 f"not find their 3D models. Install KiCad's 3D library, keep "
+                                 f"each model beside the board, or state a height in "
+                                 f"pcb_part_heights_mm")
+                if here:
+                    skips.append(f"{label}kicad-cli left out {', '.join(here[:8])}: their "
+                                 f"model files are here and did not load. Hide each model, "
+                                 f"and state its height in pcb_part_heights_mm if it has none")
             judged_parts += sum(1 for r in fit.parts if r in measured_parts)
             for name, row in sorted(measured_parts.items()):
                 enc = row["enclosure"]
@@ -3408,6 +4129,22 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
                                exported.values()) + ")")
     if excused:
         detail += f"; declared contact(s): {', '.join(excused[:6])}"
+    # What the pass covers is said beside it: a part fitted at its declared
+    # height in place of a model this host lacks, a height not used because the
+    # model is here, and a footprint the fit did not ask for (no type, no
+    # model). (What slipped through, a holdout run: a display the fit never
+    # asked for was neither counted nor named, under "nothing collides".)
+    stood = [f.name(r) for f, _s, _l in exported.values() for r in sorted(f.stand_in)]
+    if stood:
+        detail += (f"; at its declared height, its model not found here: "
+                   f"{', '.join(stood[:6])}")
+    unused = [f.name(r) for f, _s, _l in exported.values() for r in sorted(f.unused)]
+    if unused:
+        detail += f"; declared height not used, its model found: {', '.join(unused[:6])}"
+    unasked = [f.name(r) for f, _s, _l in exported.values() for r in f.unasked]
+    if unasked:
+        detail += (f"; not fitted (no type, no 3D model): {', '.join(unasked[:6])}"
+                   + (f" and {len(unasked) - 6} more" if len(unasked) > 6 else ""))
     if skips or errors:
         detail += f"; not judged: {'; '.join([*skips, *errors])}"
     return Verdict(gate=gid, passed=not failed, measured=gap, limit=acc.limit,
@@ -3444,8 +4181,21 @@ ANTENNA_LIBRARIES = ("RF_Module",)
 #: registered by its pads needs only the vendor's figure).
 ANTENNA_FORMS = ("footprint", "none")
 ANTENNA_KEYS = ("ref", "value", "keepout", "source")
-ANTENNA_OPTIONAL = ("board",)
+ANTENNA_OPTIONAL = ("board", "own_nets")
 ANTENNA_DRAWN = ("drawing", "rule_area")
+
+#: How a ``rule_area`` keep-out picks the designer's areas, beside its name:
+#: ``{"uuid": id}``, one area by its id, and ``{"covers": ref}``, every rule area
+#: on the board whose outline holds a point of that part's copper (a pad's
+#: centre, a corner of a copper drawing): a printed antenna's keep-outs, drawn
+#: unnamed around it. What slipped through (a holdout run): a printed
+#: inverted-F antenna on a bare SoC kept its board clear with five unnamed rule
+#: areas, and a rule area was found by its name alone, so no record could name
+#: them. *Rejected:* every rule area on the board (a connector's or a card
+#: slot's keep-out guards no antenna); an area that merely comes near the part
+#: (the strips that keep an inner pour off a feed line beside the antenna are
+#: no keep-out of the antenna itself).
+RULE_AREA_PICKS = ("uuid", "covers")
 
 #: The name of each rule area this gate adds, ``nopekit_antenna_<ref>``. KiCad's
 #: DRC names the area in each finding ("Items not allowed (keepout area
@@ -3497,6 +4247,11 @@ def _antenna_record(rid, rec) -> dict:
     out = {"id": str(rid), "label": label, "ref": P.text(rec["ref"], f"{label}.ref"),
            "value": P.text(rec["value"], f"{label}.value"), "board": rec.get("board"),
            "source": rec["source"]}
+    own = rec.get("own_nets", [])
+    if not isinstance(own, list):
+        raise P.RecordError(f"{label}.own_nets is {own!r}: give the antenna's own nets, "
+                            f"[\"FEED\", \"GND\"]")
+    out["own_nets"] = [P.text(n, f"{label}.own_nets[{i}]") for i, n in enumerate(own)]
     form = rec["keepout"]
     if isinstance(form, dict):
         P.keys(form, f"{label}.keepout", (), ANTENNA_DRAWN)
@@ -3504,12 +4259,143 @@ def _antenna_record(rid, rec) -> dict:
             raise P.RecordError(f"{label}.keepout names {len(form)} of {', '.join(ANTENNA_DRAWN)}: "
                                 f"give one")
         (kind, where), = form.items()
-        out["keepout"] = (kind, P.text(where, f"{label}.keepout.{kind}"))
+        if kind == "rule_area" and isinstance(where, dict):
+            P.keys(where, f"{label}.keepout.rule_area", (), RULE_AREA_PICKS)
+            if len(where) != 1:
+                raise P.RecordError(f"{label}.keepout.rule_area: give one of "
+                                    f"{', '.join(RULE_AREA_PICKS)}")
+            (pick, value), = where.items()
+            out["keepout"] = (kind, (pick, P.text(value, f"{label}.keepout.rule_area.{pick}")))
+        else:
+            out["keepout"] = (kind, P.text(where, f"{label}.keepout.{kind}"))
     elif form in ANTENNA_FORMS:
         out["keepout"] = (form, "")
     else:
         raise P.RecordError(f"{label}.keepout is {form!r}: give \"footprint\", \"none\", "
-                            f"{{\"drawing\": <path>}} or {{\"rule_area\": <name>}}")
+                            f"{{\"drawing\": <path>}} or {{\"rule_area\": <name>}} "
+                            f"({{\"rule_area\": {{\"uuid\": id}}}} or "
+                            f"{{\"rule_area\": {{\"covers\": ref}}}})")
+    return out
+
+
+def _part_copper_points(fp: list) -> list[tuple[float, float]]:
+    """Points of footprint ``fp``'s own copper in the board's frame: each pad's
+    centre, and each corner of a copper drawing (a printed antenna's arms)."""
+    place = _footprint_to_board_raw(fp)
+    pts = [place((float(K.child(pad, "at")[1]), float(K.child(pad, "at")[2])))
+           for pad in K.children(fp, "pad") if K.child(pad, "at") is not None]
+    for item in fp:
+        if not isinstance(item, list) or K.head(item) not in _COURTYARD_ITEMS:
+            continue
+        if not str(K.value(item, "layer", default="")).endswith(".Cu"):
+            continue
+        for key in ("start", "end", "center", "mid"):
+            node = K.child(item, key)
+            if node is not None:
+                pts.append(place((float(node[1]), float(node[2]))))
+        for pt in K.children(K.child(item, "pts") or [], "xy"):
+            pts.append(place((float(pt[1]), float(pt[2]))))
+    return pts
+
+
+def _antenna_own_items(tree: list, board, fp: list, nets: list[str]) -> set[str]:
+    """The ids of the tracks and vias that are the antenna's own copper: on a
+    net the record names (``own_nets``), on a layer of the part's own pads, and
+    joined to those pads through such tracks alone; and each via of those nets
+    on such a track. A zone's fill is never the antenna's own, nor is anything
+    beyond a via or beyond another part's pad: two tracks that both reach one
+    via, or one pad of another part, are not joined through each other. What
+    slipped through (a holdout run): a printed antenna's feed and ground arm
+    are tracks, and the added area forbids every track, so a sound inverted-F
+    antenna read as findings of itself. And in the review of H2: two tracks
+    that end on one via touch each other there, so the search went on through
+    the ground arm's via, and through a decoupling capacitor's ground pad, and
+    excused a ground track that ran on, on the same layer, under the radiating
+    arm. *Rejected:* every item of a named net (a ground track that crosses
+    under the antenna, or a ground pour, would be excused by the ground arm's
+    net); the net alone without the copper (the same); a stop at a via of the
+    named nets only (a via of another net there is a short, which DRC names,
+    and the search must not run on through it either)."""
+    wanted = set(nets)
+    if not wanted:
+        return set()
+    copper = _copper_layers(tree) or ["F.Cu", "B.Cu"]
+    place = _footprint_to_board_raw(fp)
+    pads = []
+    for pad in K.children(fp, "pad"):
+        if K._net_name(K.child(pad, "net"), board.nets) not in wanted:
+            continue
+        size = K.child(pad, "size")
+        r = math.hypot(float(size[1]), float(size[2])) / 2.0 if size is not None else 0.0
+        at = K.child(pad, "at")
+        pads.append((place((float(at[1]), float(at[2]))), r,
+                     _layers_of((K.child(pad, "layers") or [])[1:], copper)))
+    layers = set().union(*(p[2] for p in pads)) if pads else set()
+    tracks = []
+    for item in list(K.children(tree, "segment")) + list(K.children(tree, "arc")):
+        if (K._net_name(K.child(item, "net"), board.nets) in wanted
+                and str(K.value(item, "layer", default="")) in layers):
+            pts = [(float(K.child(item, k)[1]), float(K.child(item, k)[2]))
+                   for k in ("start", "mid", "end") if K.child(item, k) is not None]
+            tracks.append((str(K.value(item, "uuid") or K.value(item, "tstamp") or ""),
+                           str(K.value(item, "layer")), list(zip(pts, pts[1:])),
+                           float(K.value(item, "width", default=0.0)) / 2.0))
+    # Where the search stops: every via, of any net, read on every layer (a
+    # blind via spans fewer, and reading it on all is the side that excuses
+    # less), and every pad of every other part, each as a circle of its half
+    # diagonal, the reach this function gives the part's own pads.
+    stops = []
+    for via in K.children(tree, "via"):
+        at = K.child(via, "at")
+        if at is not None:
+            stops.append(((float(at[1]), float(at[2])),
+                          float(K.value(via, "size", default=0.0)) / 2.0, set(copper)))
+    for other in K.children(tree, "footprint"):
+        if other is fp:
+            continue
+        oplace = _footprint_to_board_raw(other)
+        for pad in K.children(other, "pad"):
+            at, size = K.child(pad, "at"), K.child(pad, "size")
+            if at is None:
+                continue
+            r = math.hypot(float(size[1]), float(size[2])) / 2.0 if size is not None else 0.0
+            stops.append((oplace((float(at[1]), float(at[2]))), r,
+                          _layers_of((K.child(pad, "layers") or [])[1:], copper)))
+
+    def joined(lines, half, olines, ohalf, layer) -> bool:
+        if not any(_seg_seg(*a, *b) <= half + ohalf for a in lines for b in olines):
+            return False
+        return not any(layer in sl
+                       and any(_seg_point(c, *ln) <= half + r for ln in lines)
+                       and any(_seg_point(c, *ln) <= ohalf + r for ln in olines)
+                       for c, r, sl in stops)
+
+    found: set[int] = set()
+    todo = [i for i, (_u, layer, lines, half) in enumerate(tracks)
+            if any(layer in pl and _seg_point(c, *ln) <= half + r
+                   for c, r, pl in pads for ln in lines)]
+    while todo:
+        i = todo.pop()
+        if i in found:
+            continue
+        found.add(i)
+        _u, layer, lines, half = tracks[i]
+        for j, (_v, other, olines, ohalf) in enumerate(tracks):
+            if j not in found and other == layer and joined(lines, half, olines, ohalf,
+                                                            layer):
+                todo.append(j)
+    # As kicad-cli names each item in its report (_kicad.kiid).
+    out = {K.kiid(tracks[i][0]) for i in found} - {None}
+    for via in K.children(tree, "via"):
+        if K._net_name(K.child(via, "net"), board.nets) not in wanted:
+            continue
+        at = K.child(via, "at")
+        c = (float(at[1]), float(at[2]))
+        r = float(K.value(via, "size", default=0.0)) / 2.0
+        if any(_seg_point(c, *ln) <= tracks[i][3] + r for i in found for ln in tracks[i][2]):
+            uid = K.kiid(K.value(via, "uuid") or K.value(via, "tstamp"))
+            if uid:
+                out.add(uid)
     return out
 
 
@@ -3819,7 +4705,8 @@ def _refill(ctx: GateContext, gid: str, board: str, out: str, log: str):
 
 
 def _antenna_findings(doc: dict, owners: dict[str, str],
-                      bare: frozenset | set = frozenset()) -> tuple[list, list, list]:
+                      bare: frozenset | set = frozenset(),
+                      mine: dict[str, set] | None = None) -> tuple[list, list, list]:
     """``(findings, own items, bare holes)`` of one DRC report: each item KiCad
     reports in an added area, as ``((uuid, words), ref, words)``. An item of the
     area's own part (its pads: "Pad 1 [GND] of U1") is the part's own copper, and
@@ -3830,8 +4717,10 @@ def _antenna_findings(doc: dict, owners: dict[str, str],
     slipped through, review of P8: it counted, and a stock M2 hole for a plastic
     standoff under the antenna failed a sound board. Rejected: counting it on
     purpose, since the rule is copper; matching KiCad's words, which do not say
-    whether the pad has a ring.)"""
+    whether the pad has a ring.) An item among the part's own tracks and vias
+    (``mine``, :func:`_antenna_own_items`) is its own copper too."""
     found, own, holes = [], [], []
+    mine = mine or {}
     for v in doc.get("violations", []):
         if v.get("type") != "items_not_allowed":
             continue
@@ -3842,7 +4731,8 @@ def _antenna_findings(doc: dict, owners: dict[str, str],
         for item in v.get("items", []):
             words = str(item.get("description", ""))
             row = ((str(item.get("uuid", "")), words), ref, words)
-            if re.search(rf"(?<!\w)of {re.escape(ref)}(?!\w)", words):
+            if (re.search(rf"(?<!\w)of {re.escape(ref)}(?!\w)", words)
+                    or row[0][0] in mine.get(ref, ())):
                 own.append(row)
             elif row[0][0] in bare:
                 holes.append(row)
@@ -3852,7 +4742,7 @@ def _antenna_findings(doc: dict, owners: dict[str, str],
 
 
 def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
-                  copper: list[str], areas: dict[str, list]):
+                  copper: list[str], areas: dict[str, list], mine: dict | None = None):
     """Judge one board: KiCad's DRC on two staged copies, each with every other
     keep-out taken out and the added areas in: the board as stored, and the board
     after KiCad's own refill (run on the staged board with its project and rules
@@ -3909,10 +4799,10 @@ def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
             return Verdict(gate=gid, passed=False, evidence=ev,
                            error=f"kicad-cli exited {code} on the {copy} copy but its report "
                                  f"lists {len(everything)} item(s): the two disagree")
-        hits, mine, open_holes = _antenna_findings(doc, owners, bare)
+        hits, theirs, open_holes = _antenna_findings(doc, owners, bare, mine)
         for key, ref, words in hits:
             found.setdefault(key, {"ref": ref, "item": words, "copies": []})["copies"].append(copy)
-        for key, ref, words in mine:
+        for key, ref, words in theirs:
             own.setdefault(key, {"ref": ref, "item": words})
         for key, ref, words in open_holes:
             holes.setdefault(key, {"ref": ref, "item": words})
@@ -4056,20 +4946,45 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
                                    "holes_board_mm": [[]]})
                     continue
                 if kind == "rule_area":
-                    zones = [z for z in K.children(tree, "zone")
-                             if _keepout_flags(z) is not None
-                             and str(K.value(z, "name", default="")) == where]
+                    rule_areas = [z for z in K.children(tree, "zone")
+                                  if _keepout_flags(z) is not None]
+                    if isinstance(where, tuple) and where[0] == "uuid":
+                        wanted = K.kiid(where[1])
+                        zones = [z for z in rule_areas if wanted is not None and K.kiid(
+                            K.value(z, "uuid") or K.value(z, "tstamp")) == wanted]
+                        said = f"no rule area with uuid {where[1]}"
+                        what = short = f"rule area {where[1][:8]}"
+                    elif isinstance(where, tuple):
+                        covered = fps.get(where[1])
+                        if covered is None:
+                            raise P.RecordError(f"{rec['label']}: {bname} has no {where[1]} for "
+                                                f"a rule area to cover")
+                        points = _part_copper_points(covered)
+                        zones = [z for z in rule_areas if any(
+                            _inside(pt, [tuple(q) for q in _polygon_points(z)])
+                            for pt in points)]
+                        said = f"no rule area over {where[1]}'s copper"
+                        what = f"the board's rule area(s) over {where[1]}"
+                        short = f"rule area over {where[1]}"
+                    else:
+                        zones = [z for z in rule_areas
+                                 if str(K.value(z, "name", default="")) == where]
+                        said = f"no rule area named {where!r}"
+                        what, short = f"the board's rule area {where!r}", f"rule area {where!r}"
                     if not zones:
-                        raise P.RecordError(f"{rec['label']}: {bname} has no rule area named "
-                                            f"{where!r}")
-                    what, short = f"the board's rule area {where!r}", f"rule area {where!r}"
+                        raise P.RecordError(f"{rec['label']}: {bname} has {said}")
                 else:
                     zones = _footprint_areas(fps[ref], copper)
                     what, short = "its footprint's rule area", "footprint area"
                     if not zones and rec is not None:
-                        raise P.RecordError(f"{rec['label']}: {ref}'s footprint ({fp.lib_id}) "
-                                            f"carries no keep-out rule area that forbids tracks "
-                                            f"and copper pour: give the vendor's drawing")
+                        # Every form that fits is named. (What slipped through,
+                        # a holdout run: "give the vendor's drawing" could not be
+                        # followed for a two-pad printed antenna, whose
+                        # keep-outs were rule areas the designer drew.)
+                        raise P.RecordError(f"{rec['label']}: {ref}'s footprint carries no "
+                                            f"keep-out rule area: give a drawing, or a board "
+                                            f"rule area by name, {{\"uuid\": id}} or "
+                                            f"{{\"covers\": \"{ref}\"}}")
                     if not zones:
                         unkept.setdefault(bname, []).append(f"{ref} ({fp.lib_id})")
                         continue
@@ -4092,7 +5007,9 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
                                "polygons_board_mm": [_polygon_points(z) for z in zones],
                                "holes_board_mm": cutouts})
             if areas:
-                plans.append((n, path, bname, tree, copper, areas))
+                mine = {r: _antenna_own_items(tree, board, fps[r], by_ref[r]["own_nets"])
+                        for r in areas if by_ref.get(r) and by_ref[r]["own_nets"]}
+                plans.append((n, path, bname, tree, copper, areas, mine))
     except P.RecordError as exc:
         return Verdict(gate=gid, passed=False, error=str(exc))
     findings: list[dict] = []
@@ -4101,8 +5018,8 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
     ev: list[str] = []
     errors: list[Verdict] = []
     layers: dict[str, list[str]] = {}
-    for n, path, bname, tree, copper, areas in plans:
-        run = _antenna_runs(ctx, gid, n, path, tree, copper, areas)
+    for n, path, bname, tree, copper, areas, mine in plans:
+        run = _antenna_runs(ctx, gid, n, path, tree, copper, areas, mine)
         # A board KiCad could not judge (a timeout, a crash) leaves the others'
         # findings standing: a skip or an error beside a fail would hide the
         # fail (the power rules' lesson, P5, and the fit's, P7).
@@ -4137,7 +5054,8 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
                       for b, refs in on_board.items())
     notes = []
     if own:
-        notes.append(f"the part's own pads in its keep-out, left out: {len(own)}")
+        notes.append(f"the part's own copper in its keep-out (its pads, and its own_nets' "
+                     f"tracks), left out: {len(own)}")
     if holes:
         named = ", ".join(f"{h['item']} ({h['ref']})" for h in holes[:3])
         more = f" and {len(holes) - 3} more" if len(holes) > 3 else ""

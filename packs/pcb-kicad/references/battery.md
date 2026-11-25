@@ -15,12 +15,90 @@ leaf). Each record names the board it is for (`board`, from the project root;
 
 | Key | Each record holds | Read by |
 |---|---|---|
-| `pcb_batteries` | `terminals` {ref, value, pos, neg, therm, taps}, `chemistry`, `series`, `parallel`, `cell` {upper_charge_v, discharge_v_min, charge_a_max, charge_temp_c, short_a or internal_resistance_ohm}, `ntc` (a pack NTC) | all four, and `pcb.mismate` (its terminals) |
+| `pcb_batteries` | `terminals` {ref, value, pos, neg, therm, taps}, `chemistry`, `series`, `parallel`, `cell` {upper_charge_v, open_circuit_v, discharge_v_min, charge_a_max, charge_temp_c, short_a or internal_resistance_ohm}, `ntc` (a pack NTC) | all four, and `pcb.mismate` (its terminals) |
 | `pcb_protectors` | `battery`, `kind`, `where` (board, in-pack, firmware), ref and value on a board, `functions` {charge_v, charge_a, charge_temp, overcharge_v, overdischarge_v, trip, reverse_block, safety_timer} | all four; `pcb.mismate` reads trip and reverse_block |
 | `pcb_conductors` | `battery`, `kind` (wire, ffc, contact, track), ref, value and pins, or a track's net; `area_mm2`, `start_c`, `limit_c`, `continuous_a` or a track's `continuous_rise_c`; `protected_by` | `pcb.fault_current` |
 | `pcb_matings` | `a` {board, ref, value}; `b` another connector, `{battery: id}` or `{external: text}`; `map` (straight, reversed, or {a_pin: b_pin}) for two connectors; `modes` (references/mismate.md) | all four, `pcb.mismate` and `pcb.usbc_receptacle` |
 
-`selftest/baseline.json`'s `_notes` list every field.
+`selftest/baseline.json`'s `_notes` list every field, and "Every field" below
+marks which each record needs.
+
+### Every field
+
+**Required** keys must be there; an **optional** one may be left out. A missing
+required key is refused with its name quoted (`pcb_batteries.cell has no key
+'cell'`), so an id and a key of one name read apart. A rule that needs an
+optional value the record lacks errors, naming the key, unless something it can
+judge without the value fails first (a charger that senses nothing).
+
+- `pcb_batteries.<id>`: required `terminals`, `chemistry`, `series`, `parallel`,
+  `cell`, `source`; optional `board`, `ntc`.
+  - `terminals`: required `ref`, `value`, `pos`, `neg`; optional `therm`, and
+    `taps` (required for two or more cells in series: the junction pads from the
+    lowest up).
+  - `cell`: every key optional, so a cell nobody has chosen is stated `"cell":
+    {}` and `pcb.mismate` still reads its terminals. `upper_charge_v` (a
+    rechargeable cell's upper charge voltage, with its tolerance),
+    `open_circuit_v` (a primary cell's fresh open-circuit voltage: the most it
+    drives a fault with; beside `upper_charge_v`, the higher counts),
+    `discharge_v_min`, `charge_a_max`, `charge_temp_c` [lo, hi], `short_a`
+    [least, most] or `internal_resistance_ohm` [least, most].
+  - `ntc`: required `r25_ohm`, `r25_tol_pct`; optional `beta_k`, `beta_pair_c`,
+    `beta_tol_pct`, `rt_table_c_ohm`.
+- `pcb_protectors.<id>`: required `battery`, `kind`, `where`, `functions`,
+  `source`; `ref` and `value` on a board (and optional `board`).
+  - `charge_temp`: required `sense` and `ntc`, optional `network`, `acts`; in
+    the pack, `window_c` {`cold_c` [min, max], `hot_c` [min, max]} alone. A
+    charger may name its `sense` {`pin`} alone, with no `ntc`: the rule then
+    judges only whether its input is switched off (`pcb.charge_temperature`
+    below).
+    - `sense`: required `pin` and `kind`. A `current` source takes `i_a`,
+      `cold_v` and `hot_v`, each [min, max]; a `ratio` input (a divider) takes
+      `pullup_ref`, `pullup_tol_pct`, `cold_frac` and `hot_frac`, the two
+      fractions each [min, max]. Each kind refuses the other's keys.
+    - `ntc`: the board's thermistor, required `ref`, `value`, `r25_ohm`,
+      `r25_tol_pct`, optional `beta_k`, `beta_pair_c`, `beta_tol_pct`,
+      `rt_table_c_ohm`; or `{"battery_therm": true}`, the pack's own (its
+      battery's `ntc` record, on its `therm` pin).
+    - `network`: optional `series_ref`, `parallel_ref` (not across the pack's
+      own NTC), `tol_pct` (required with either), and `others` [{`ref`,
+      `value`, `why`}] (any other part on the sense net, declared).
+    - `acts` (required when the element is not the charger): {`pin`, `to`
+      {`ref`, `pin`}}: the element's output pin, and the pin it drives on the
+      part that stops the charge.
+  - `overcharge_v`, `overdischarge_v`: required `v_max` or `v_min`, `per_cell`;
+    on a board `sense` ({pin, through: [refs]}, or {taps} for two or more cells)
+    and `acts` {pin, switch {ref, value, control, path}}.
+  - `trip`: required `kind` (fuse, ptc, fet, efuse, pcm), `terminal` (pos, neg),
+    `trip_a`, `trip_max_s` [[A, s]]; `path_pins` [p, q] (fuse, ptc, efuse) or
+    `switch` {ref, value, path} (fet); `interrupt_a` (required for a fuse or a
+    PTC); optional `hold_a`, `ahead` [{ref, value, why}].
+  - `reverse_block` (read by `pcb.mismate` only): required `terminal` (pos,
+    neg); `path_pins` [p, q] (the element's own, a diode's anode and cathode) or
+    `switch` {ref, value, path} (an ideal-diode FET), one of the two; optional
+    `through` [{ref, value, path: [p, q], why}] (the series parts from the
+    terminal to the block, in order: a power switch, a fuse), and `ahead` [{ref,
+    value, why}] (a part on a net before the block, declared).
+  - `charge_v` (required of a charger): required `per_cell` (true when the
+    voltage is each cell's, false when it is the whole stack's); then one of
+    `v_reg_v` [min, max] (the datasheet's regulation voltage), `divider`
+    {`vfb_v` [min, max], `top_ref`, `bottom_ref`, `tol_pct`} (the feedback
+    divider on the board, read off its two resistors: a charger on the board
+    only), or `set_by`: `"firmware"` (named, never judged; refused beside a
+    value).
+  - `charge_a` (required of a charger): one of `a_max` (the most charge
+    current, A), `prog` {`ref`, `k_v` [min, max], `r_tol_pct`} (the PROG
+    resistor on the board: the current is `k_v` over its resistance; a charger
+    on the board only), or `set_by`: `"firmware"` (as above).
+  - `safety_timer`: a flag, kept as evidence. No rule reads it, and it is not a
+    function on its own: a record that states only it is refused.
+- `pcb_conductors.<id>`: required `battery`, `kind`, `start_c`, `limit_c`,
+  `protected_by`, `source`; a track's `net` and `continuous_rise_c`, any other
+  kind's `ref`, `value`, `pins`, `area_mm2`, `continuous_a`; optional `board`.
+  `protected_by` is a list of `pcb_protectors` ids that state a `trip`, or `[]`:
+  nothing protects it, a statement the rule judges.
+- `pcb_matings.<id>`: required `a`, `b`, `source`; `map` for two connectors;
+  `modes` (required by `pcb.mismate`).
 
 **One protector record holds every function of one element.** The baseline's
 protector IC, U2, has an overcharge and an overdischarge function in one record;
@@ -113,6 +191,20 @@ fixed resistors (`Device:R`, `R_Small`, `R_US`, `R_Small_US`) fails with no
 value. The test is negative on purpose: a project's own thermistor symbol need
 not say "Thermistor". With no schematic, the detail says the symbol was not
 read.
+
+**A defeat needs no window and no NTC numbers.** A charger that nothing senses
+the cell for fails without the cell's `charge_temp_c`: the window is read only
+for the headroom, after the elements. A charger whose record names only its sense
+pin (`charge_temp: {"sense": {"pin": "11"}}`, no `ntc`) is judged on its copper
+and its schematic alone. It fails when its sense pin is tied to its own pad,
+reaches no other part, or sees only fixed resistors (by their schematic symbol)
+whose other pads each sit on a net one of the charger's own pins or one of the
+cell's terminals is on: two 10 kOhm resistors from TS to REGN and to GND hold TS
+near half the charger's reference, inside its normal-charge zone at any
+temperature, so no window is enforced. A part on the sense net that may sense
+the cell (a thermistor's symbol, no schematic to read, a resistor to some other
+net, a part with more pads) is refused, asking for the full record. The NTC's
+coupling to the cell is still out of reach (PACK.md).
 
 **The trip resistances.** From the comparator's datasheet [min, max]:
 
@@ -241,9 +333,26 @@ element is refused until the record declares it in `ahead`, with why: a sound
 design may put a protector's own supply there, so it is never a fail.
 
 **The fault current** is `short_a` [least, most] times the cells in parallel,
-or `discharge_v_min` and `upper_charge_v` over `internal_resistance_ohm` [most,
-least]. The least decides which trip points count; the most decides the
+or `discharge_v_min` and the cell's most voltage over `internal_resistance_ohm`
+[most, least]. The most voltage is a rechargeable cell's `upper_charge_v` (or a
+higher `open_circuit_v` stated beside it), and a primary cell's `open_circuit_v`,
+its fresh open-circuit voltage: a primary cell has no charge voltage, and one
+that states only `upper_charge_v` is refused, naming `open_circuit_v` and
+`short_a`. The least decides which trip points count; the most decides the
 interrupt rating.
+
+**A conductor nothing protects** (`protected_by: []`) is judged, never refused:
+the better of two ratios, against 1.0. IEC 62368-1 (2018) 6.2.2.4's PS1, 15 W,
+over the most power the source can deliver into any load (its open-circuit
+voltage, every cell in series counted, times its short-circuit current, every
+cell in parallel counted, over four: the matched load's power), and the
+conductor's continuous rating over the most fault current (a conductor that
+carries every fault for good needs no protector). Below 1.0 the detail says
+nothing limits the fault. Two alkaline AAA cells, 1.65 V fresh and 0.15 ohm at
+the least each, deliver at most 9.1 W: PS1, a pass. The baseline's 18650 pack
+behind no protector delivers 42.5 W (4.25 V, 40 A) into a 1 A wire: a fail. A
+part named in `protected_by` that states no trip (a blocking diode) is refused,
+naming `[]`: it trips at nothing.
 
 **On the baseline.** F1, a fixture PTC, holds 0.5 A, trips by 1.0 A, trips
 within 0.1 s at 8 A and breaks 80 A. It sits between BT1 pin 1 and VSYS, and J6

@@ -2,6 +2,7 @@
 """``pcb.enclosure_fit``'s geometry, run by the gate in a child process:
 
     python3 _fit.py fit <request.json>
+    python3 _fit.py regions <request.json>
     python3 _fit.py boxes <request.json>
 
 ``fit``: the request names the enclosure's STEP and, for each board fitted in it,
@@ -24,6 +25,13 @@ hid a real interference. Here a contact names its feature, and shared volume
 still counts.) A part with a region also gets its box as placed, and each region
 the box of the enclosure material it took out, so the gate can hold a region to
 what the part can reach.
+
+``regions``: the same request, and for each part with a contact region only
+what the gate holds a region to: the part's box as placed, whether its regions
+leave any enclosure, and each region's box of enclosure material. No distance
+and no shared volume, so the gate can refuse every region drawn too wide before
+it pays for the full fit (a holdout run: two to four minutes on a populated
+board, for each region refused).
 
 ``boxes``: writes a box STEP for each part fitted at a declared height. The box
 is in the footprint's own model frame, so kicad-cli places it as it places any
@@ -139,17 +147,54 @@ def boxes(req: dict) -> dict:
     return {"written": [item["path"] for item in req["boxes"]]}
 
 
-def fit(req: dict) -> dict:
+def _enclosure(path: str):
+    """``(the enclosure's solids as one shape, its box)``."""
     import cadquery as cq
 
-    enclosure_wp = cq.importers.importStep(req["enclosure_step"])
-    solids = enclosure_wp.solids().vals()
+    solids = cq.importers.importStep(path).solids().vals()
     if not solids:
-        raise RuntimeError(f"no solid in {req['enclosure_step']}: an enclosure is a volume")
+        raise RuntimeError(f"no solid in {path}: an enclosure is a volume")
     enclosure = solids[0] if len(solids) == 1 else cq.Compound.makeCompound(solids)
     bb = enclosure.BoundingBox()
-    out: dict = {"enclosure_bbox": [[bb.xmin, bb.ymin, bb.zmin], [bb.xmax, bb.ymax, bb.zmax]],
-                 "boards": {}}
+    return enclosure, [[bb.xmin, bb.ymin, bb.zmin], [bb.xmax, bb.ymax, bb.zmax]]
+
+
+def _regions(shape, enclosure, mine: dict) -> dict:
+    """What the gate holds one part's regions to: its box as placed, whether
+    anything of the enclosure is left once its regions are taken out, the rest
+    itself, and each region's material box (and the material, for a distance)."""
+    rest = enclosure
+    excused, inside = {}, {}
+    for feature, (lo, hi) in sorted(mine.items()):
+        box = _box(lo, hi)
+        rest = rest.cut(box)
+        inside[feature] = enclosure.intersect(box)
+        excused[feature] = {"material_bbox": _bbox(inside[feature])}
+    return {"bbox": _bbox(shape, solid=False), "excused": excused,
+            "rest_empty": not rest.Solids(), "rest": rest, "inside": inside}
+
+
+def regions(req: dict) -> dict:
+    enclosure, bbox = _enclosure(req["enclosure_step"])
+    out: dict = {"enclosure_bbox": bbox, "boards": {}}
+    for board in req["boards"]:
+        rows: dict = {}
+        mine = board.get("regions", {})
+        if mine:
+            shapes = _named_shapes(board["board_step"])
+            loc = _location(board["rotation"], board["translation"])
+            for name, feats in sorted(mine.items()):
+                if name in shapes and name in set(board["refs"]):
+                    got = _regions(shapes[name].moved(loc), enclosure, feats)
+                    rows[name] = {"enclosure": {k: got[k] for k in
+                                                ("bbox", "excused", "rest_empty")}}
+        out["boards"][board["id"]] = {"parts": rows}
+    return out
+
+
+def fit(req: dict) -> dict:
+    enclosure, bbox = _enclosure(req["enclosure_step"])
+    out: dict = {"enclosure_bbox": bbox, "boards": {}}
     placed: dict[str, dict] = {}
     for board in req["boards"]:
         shapes = _named_shapes(board["board_step"])
@@ -169,17 +214,13 @@ def fit(req: dict) -> dict:
             row: dict = {"interference_mm3": _shared(shape, enclosure)}
             mine = regions.get(name, {})
             if mine:
-                rest = enclosure
-                excused = {}
-                for feature, (lo, hi) in sorted(mine.items()):
-                    box = _box(lo, hi)
-                    rest = rest.cut(box)
-                    inside = enclosure.intersect(box)
-                    excused[feature] = {"clearance_mm": _distance(shape, inside),
-                                        "material_bbox": _bbox(inside)}
-                row["clearance_mm"] = _distance(shape, rest)
-                row["excused"] = excused
-                row["bbox"] = _bbox(shape, solid=False)
+                got = _regions(shape, enclosure, mine)
+                for feature, inside in got["inside"].items():
+                    got["excused"][feature]["clearance_mm"] = _distance(shape, inside)
+                row["clearance_mm"] = _distance(shape, got["rest"])
+                row["excused"] = got["excused"]
+                row["bbox"] = got["bbox"]
+                row["rest_empty"] = got["rest_empty"]
             else:
                 row["clearance_mm"] = shape.distance(enclosure)
             rows[name] = {"enclosure": row, "boards": {}}
@@ -210,7 +251,7 @@ def main(argv: list[str]) -> int:
     mode, request_path = argv
     with open(request_path, encoding="utf-8") as fh:
         req = json.load(fh)
-    result = {"fit": fit, "boxes": boxes}[mode](req)
+    result = {"fit": fit, "regions": regions, "boxes": boxes}[mode](req)
     print(json.dumps(result))
     return 0
 
