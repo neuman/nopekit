@@ -27,9 +27,21 @@ marks which each record needs.
 
 **Required** keys must be there; an **optional** one may be left out. A missing
 required key is refused with its name quoted (`pcb_batteries.cell has no key
-'cell'`), so an id and a key of one name read apart. A rule that needs an
-optional value the record lacks errors, naming the key, unless something it can
-judge without the value fails first (a charger that senses nothing).
+'cell'`), so an id and a key of one name read apart.
+
+**A cell value that is not stated is never an error.** A rule that needs a key of
+`cell` that the record leaves out first judges all it can without it. Anything
+it finds fails, as beside a full record: a defeat, no overcharge stop
+independent of the charger, a cell that nothing cuts off, a protector out of
+its place, a fuse that trips past 1.45 times the conductor's rating, a ratio
+past 1.0 on a value that is there. If nothing fails, the rule skips and names
+each key it lacks: `not stated, so not judged: pcb_batteries.cell.cell has no
+key 'upper_charge_v': ...`. A value that is there and wrong (one number for a
+range, a word for a number, `FILL:` from the draft, a typo past the plausible
+band) is still an error. Each rule's section below says what it judges with no
+cell value. (What slipped through, holdout round 2: two rules read the cell's
+values first, so a cell stated `{}` made both error, and the fails they could
+find without a datasheet were never reached.)
 
 - `pcb_batteries.<id>`: required `terminals`, `chemistry`, `series`, `parallel`,
   `cell`, `source`; optional `board`, `ntc`.
@@ -37,7 +49,8 @@ judge without the value fails first (a charger that senses nothing).
     `taps` (required for two or more cells in series: the junction pads from the
     lowest up).
   - `cell`: every key optional, so a cell nobody has chosen is stated `"cell":
-    {}` and `pcb.mismate` still reads its terminals. `upper_charge_v` (a
+    {}`: `pcb.mismate` still reads its terminals, and each other rule judges
+    what it can and skips, naming each key it lacks. `upper_charge_v` (a
     rechargeable cell's upper charge voltage, with its tolerance),
     `open_circuit_v` (a primary cell's fresh open-circuit voltage: the most it
     drives a fault with; beside `upper_charge_v`, the higher counts),
@@ -194,7 +207,8 @@ read.
 
 **A defeat needs no window and no NTC numbers.** A charger that nothing senses
 the cell for fails without the cell's `charge_temp_c`: the window is read only
-for the headroom, after the elements. A charger whose record names only its sense
+for the headroom, after the elements. With no defeat and no `charge_temp_c`,
+the rule skips, naming it. A charger whose record names only its sense
 pin (`charge_temp: {"sense": {"pin": "11"}}`, no `ntc`) is judged on its copper
 and its schematic alone. It fails when its sense pin is tied to its own pad,
 reaches no other part, or sees only fixed resistors (by their schematic symbol)
@@ -287,6 +301,14 @@ charger's other function still is, so the rule skips only when nothing it can
 see fails: a firmware current beside a 4.232 V charger on a 3.65 V cell fails.
 NiMH has no constant-voltage phase and is not judged.
 
+**With no cell value.** A charger on a primary cell and the single fault need
+none. Each ratio reads only its own value: the voltage `upper_charge_v`, the
+current `charge_a_max`; a function set by firmware reads none. So a cell stated
+`{}` beside a charger whose functions firmware sets, with nothing independent of
+the charger to stop an overcharge, fails on the single fault. A ratio past 1.0
+fails beside a value that is not stated (a 3.65 V cell with no current, on a
+4.232 V charger). Otherwise the rule skips, naming each key a ratio needs.
+
 **On the baseline.** U1's 4.20 V option regulates at 4.168-4.232 V; the cell, an
 LG INR18650 MJ1, takes 4.2 +- 0.05 V (its specification, 2.4): 4.232 / 4.25 =
 0.9958. R3 is 3k at 1 %: 1100 V / 2970 ohm = 0.3704 A of the cell's 3.35 A
@@ -341,6 +363,16 @@ that states only `upper_charge_v` is refused, naming `open_circuit_v` and
 `short_a`. The least decides which trip points count; the most decides the
 interrupt rating.
 
+**With no cell value.** Each protector's place on the copper, and the overload
+band (c), need none, and are judged first: a fuse beside the path fails, and so
+does one whose best trip is past 1.45 Iz, "whatever the cell drives". The
+interrupt (b), the short circuit (d) and a conductor nothing protects need the
+fault range or the most power (`short_a`, or `internal_resistance_ohm` with
+`discharge_v_min` and the most voltage). A conductor whose cell does not state
+them is named, and the rule skips, naming the keys, unless another conductor
+fails. A primary cell that states neither `open_circuit_v` nor `short_a` skips
+the same way; one that states `upper_charge_v` in their place errors, as above.
+
 **A conductor nothing protects** (`protected_by: []`) is judged, never refused:
 the better of two ratios, against 1.0. IEC 62368-1 (2018) 6.2.2.4's PS1, 15 W,
 over the most power the source can deliver into any load (its open-circuit
@@ -391,6 +423,11 @@ senses the cell and opens a switch in its path:
 Each counts at `v_min`, its datasheet's least detection voltage. With none, the
 rule fails with no value. The parts left on the cell side of the switch, which
 keep drawing after the cutoff, are listed.
+
+**With no cell value.** Whether anything cuts the cell off needs none: "nothing
+cuts the cell off" fails without `discharge_v_min`. A cutoff that counts is held
+to it, so a cell with a counted cutoff and no `discharge_v_min` skips, naming
+it, unless another cell fails.
 
 **On the baseline.** U2, a fixture one-cell protector on KiCad's AP9101CK pins,
 senses the cell through F1 and R5 (330 ohm), and its DO drives Q1's G1 (an

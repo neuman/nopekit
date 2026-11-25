@@ -38,7 +38,7 @@ has heard its radio.
 | `pcb.charge_limits` | 0 | sourced | the charger's guaranteed maximum charge voltage per cell and current, as one ratio to the cell's datasheet limits, and an overcharge stop independent of the charger that senses the cell and opens its path (per cell for two or more in series) |
 | `pcb.fault_current` | 0 | sourced | every conductor in `pcb_conductors` is guarded across the fault range: its protector's interrupt rating, the overload band (I2 <= 1.45 Iz, by analogy with IEC 60364-4-43) and IEC 60949's adiabatic limit at every trip point the cell can reach; a fuse, PTC, eFuse, protector FETs on either side or an in-pack PCM. A conductor nothing protects (`protected_by: []`) passes on a source of at most 15 W (IEC 62368-1's PS1) or a rating that carries the whole fault |
 | `pcb.discharge_cutoff` | 0 | sourced | the highest per-cell cutoff that senses the cell (directly, through a named chain, or across a mating) and opens a switch in its path, or sits in the pack, is at or above the cell's minimum voltage |
-| `pcb.mismate` | 0 | model-only | no wrong way a mating's record states (a reversed plug, a narrower cable, an offset header, a rotated header, the other FFC type, a plug slid in, a plug that bridges contacts), nor its own map, joins a source to its return or to another source; a reversed cell is blocked (behind a stated chain of series parts, a power switch among them) or limited; one loose cell turned in its holder is counted; every connector that carries a source is named by a mating |
+| `pcb.mismate` | 0 | model-only | no wrong way a mating's record states (a reversed plug, a narrower cable, an offset header, a rotated header, the other FFC type, a plug slid in, a plug that bridges contacts), nor its own map, joins a source to its return or to another source; a reversed cell is blocked (behind a stated chain of series parts, a power switch among them) or limited; one loose cell turned in its holder is counted when a current runs through it backwards (three or more in series, a second string, or a charger; two alone cancel); every connector that carries a source is named by a mating |
 | `pcb.usbc_receptacle` | 0 | sourced | each USB-C receptacle's CC pins are terminated apart, as its role asks (one Rd or Rp each, in the Type-C specification's band, or a named controller), a source switches VBUS through a part with a control pin, each USB 2.0 data pin is on a net with D+ apart from D-, and, where `pcb.pin_names` cannot see them, the VBUS, GND, A6/B6 and A7/B7 pins are each bussed |
 | `pcb.antenna_keepout` | 1 | sourced | no track, via, other part's pad or zone sits on any copper layer in a radio module's antenna keep-out, as the board is stored and as KiCad's next refill pours it (the module's own footprint area, a vendor drawing registered by its pads, or a rule area the designer drew, picked by name, id or the part it covers); an antenna's own tracks on its named nets are its own copper; a module with no keep-out and no record skips by name |
 
@@ -377,8 +377,10 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   placement. A model drawn wrong, a cable's bend radius, a plug's mating
   clearance, a tolerance stack, assembly order, a lid that flexes: none of them
   is in two solids. A part with no model skips the gate rather than pass it,
-  unless the project states its height; the courtyard's box at that height is
-  then all the fit sees of it. And a part that passes through an opening cut
+  unless the project states its height; its courtyard's box or its stated
+  outline at that height, and a through-hole part's leads under the board, are
+  then all the fit sees of it (a lead bent over, a solder fillet and a peg in an
+  unplated hole are not drawn). And a part that passes through an opening cut
   wide enough to keep the claim's clearance (a knob, a button, a light pipe)
   reads clear, however far it stands proud of the face; so does one whose
   contact against the opening is declared. A tighter opening fails on
@@ -474,6 +476,9 @@ Read this before you write a claim. Every one of these has passed a "0 violation
     the board. Settle it with a physical claim at the window's edges;
   - a window, a charge voltage or a cutoff set by firmware or a register: the
     rules name it and skip, unless something they can see fails;
+  - a cell value the record does not state (a cell nobody has chosen, `"cell":
+    {}`): each rule judges what it can without it and fails on what it finds,
+    and otherwise skips, naming each key; it never errors on one;
   - JEITA's reduced-rate zones: only the outer window is judged;
   - the single-fault overcharge element's threshold: its presence and its copper
     are judged, its number is printed (no general source gives a cell's
@@ -617,9 +622,13 @@ and left out; against the rest it keeps the limit, and shared volume still fails
 it. The regions are held to that reach in a pass of their own, before the full
 fit, and every region refused is listed in one run with the box to draw.
 `pcb_part_heights_mm` gives a part whose model is not on this host (none named,
-or one found nowhere here) its courtyard's box, or the outline its `box_mm`
-states, raised to a stated height. `pcb_model_dirs` (`{variable: folder}`, from
-the project root or absolute) names the folder a model path variable stands for:
+or one found nowhere here) its courtyard's box, or the outline its record
+states (`box_mm`, `circle_mm` for a round part, or `polygon_mm`), raised to a
+stated height, and a through-hole part its leads under the board: a cylinder
+the drill wide in each plated hole, to `lead_mm` past the far face (2.5 mm,
+IPC-A-610 class 2's longest, when unstated, and the verdict names the part).
+`pcb_model_dirs` (`{variable: folder}`, from the project root or absolute) names
+the folder a model path variable stands for:
 a model naming `${KICAD9_3DMODEL_DIR}`, or a variable of the project's own, is
 looked for there alone, and the staged board names the folder in its place, so
 kicad-cli reads the same file. The gate reads no environment variable, so a
@@ -643,8 +652,9 @@ helper call gets `pcb_fit_timeout_s`, or 120 s and 5 s for each part it handles.
 "pcb_enclosure_contacts": {"J5": {"cutout": {"region_mm": [[-1, 2, 4], [3, 12, 9]],
                                              "reason": "the receptacle's shell seats in its cutout"}}},
 "pcb_model_dirs": {"KICAD9_3DMODEL_DIR": "hardware/3dmodels"},
-"pcb_part_heights_mm": {"SW2": {"h": 3.5, "source": "the switch's datasheet, seated height"},
-                        "LS1": {"h": 2.8, "box_mm": [[-6, -6], [6, 6]],
+"pcb_part_heights_mm": {"SW2": {"h": 3.5, "lead_mm": 1.5,
+                                "source": "the switch's datasheet: seated height, lead length"},
+                        "LS1": {"h": 2.8, "circle_mm": {"center": [0, 0], "d": 12},
                                 "source": "the speaker's drawing; its footprint has no courtyard"}},
 "pcb_land_drawings": {"U3": "hardware/lands/u3.json"},
 "pcb_pin_names_series": {"FL1": {"pairs": [["1", "8"], ["2", "7"]],

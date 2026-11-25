@@ -33,9 +33,11 @@ and no shared volume, so the gate can refuse every region drawn too wide before
 it pays for the full fit (a holdout run: two to four minutes on a populated
 board, for each region refused).
 
-``boxes``: writes a box STEP for each part fitted at a declared height. The box
-is in the footprint's own model frame, so kicad-cli places it as it places any
-model, on the same seating plane, turned and flipped with its footprint.
+``boxes``: writes a STEP for each part fitted at a declared height: its outline
+(a box, a cylinder or a prism on a polygon) raised to its height, and a cylinder
+for each lead under it, one solid each in one compound. It is in the footprint's
+own model frame, so kicad-cli places it as it places any model, on the same
+seating plane, turned and flipped with its footprint.
 
 In a child, not in nopekit's process: an OpenCascade boolean can crash the
 interpreter on bad geometry, and a crash here must read as this gate erroring,
@@ -141,9 +143,30 @@ def _distance(shape, other):
     return shape.distance(other)
 
 
+def _solid(spec: dict):
+    """One solid of a declared part: ``{"box": [lo, hi]}``, ``{"cylinder": {at,
+    r, z: [z0, z1]}}`` (upright) or ``{"prism": {points, z: [z0, z1]}}`` (a
+    polygon extruded upright)."""
+    import cadquery as cq
+    if "box" in spec:
+        return _box(*spec["box"])
+    if "cylinder" in spec:
+        c = spec["cylinder"]
+        z0, z1 = c["z"]
+        return cq.Solid.makeCylinder(c["r"], z1 - z0, cq.Vector(c["at"][0], c["at"][1], z0),
+                                     cq.Vector(0, 0, 1))
+    p = spec["prism"]
+    z0, z1 = p["z"]
+    return (cq.Workplane("XY", origin=(0, 0, z0)).polyline([tuple(q) for q in p["points"]])
+            .close().extrude(z1 - z0).val())
+
+
 def boxes(req: dict) -> dict:
+    import cadquery as cq
     for item in req["boxes"]:
-        _box(item["lo"], item["hi"]).exportStep(item["path"])
+        shapes = [_solid(spec) for spec in item["solids"]]
+        shape = shapes[0] if len(shapes) == 1 else cq.Compound.makeCompound(shapes)
+        shape.exportStep(item["path"])
     return {"written": [item["path"] for item in req["boxes"]]}
 
 

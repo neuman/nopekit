@@ -4440,7 +4440,29 @@ class AFitRecordIsReadStrictly(unittest.TestCase):
                  "give [[x0, y0], [x1, y1]] in mm, in the footprint's own frame"),
                 ("no source", {"U1": {"h": 1.0, "source": " "}}, "source is empty"),
                 ("no height", {"U1": {"h": 0, "source": "datasheet"}}, "a height is above 0 mm"),
-                ("a flag", {"U1": {"h": True, "source": "datasheet"}}, "give a number")):
+                ("a flag", {"U1": {"h": True, "source": "datasheet"}}, "give a number"),
+                # Holdout round 3: a round part takes a circle, any other a
+                # polygon, one outline each; a lead stands 0 mm or more past.
+                ("two outlines", {"U1": {"h": 1.0, "source": "datasheet",
+                                         "box_mm": [[0, 0], [1, 1]],
+                                         "circle_mm": {"center": [0, 0], "d": 1}}},
+                 "states box_mm and circle_mm: give one outline"),
+                ("a circle with no diameter", {"U1": {"h": 1.0, "source": "datasheet",
+                                                      "circle_mm": {"center": [0, 0]}}},
+                 "circle_mm has no d"),
+                ("a circle of no size", {"U1": {"h": 1.0, "source": "datasheet",
+                                                "circle_mm": {"center": [0, 0], "d": 0}}},
+                 "a diameter is above 0 mm"),
+                ("a polygon of two points", {"U1": {"h": 1.0, "source": "datasheet",
+                                                    "polygon_mm": [[0, 0], [1, 1]]}},
+                 "give three or more [x, y]"),
+                ("a polygon whose edges cross",
+                 {"U1": {"h": 1.0, "source": "datasheet",
+                         "polygon_mm": [[0, 0], [2, 2], [2, 0], [0, 1]]}},
+                 "its edges 1 and 3 cross"),
+                ("a lead above the board", {"U1": {"h": 1.0, "source": "datasheet",
+                                                   "lead_mm": -1}},
+                 "lead_mm is -1: how far the leads stand past the board's far face")):
             with self.subTest(case=name):
                 v = self._verdict(pcb_part_heights_mm=heights)
                 self.assertEqual(v.outcome, "error", v.render())
@@ -7430,9 +7452,15 @@ class ThePowerRulesTakeWhatAHoldoutCouldNotState(_PowerCase):
             _move_pad_net(tree, "BT1", "3", "CELL_M")
         board = self.board(third_pad, stem="two_cells")
         v = self.run_gate("pcb.mismate", records=cell_turned(2), board=board)
+        # Two cells cancel, so the hazard is the charger's: U1 charges the
+        # string the board reads as 0 V, through the turned cell backwards.
+        # (Until holdout round 3 the words were "the board sees 0 cell(s)'
+        # voltage", a hazard counted for any string of two:
+        # TwoCellsTurnedOneCancel.)
         self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
-        self.assertIn("cell: one cell of main turned in BT1: the board sees 0 cell(s)' voltage "
-                      "the right way round", v.detail)
+        self.assertIn("cell: one cell of main turned in BT1: the string reads 0 V, and U1 "
+                      "MCP73833-AMI/UN charges it, its current through the turned cell "
+                      "backwards", v.detail)
 
     def test_a_primary_cells_fault_range_takes_its_open_circuit_voltage(self):
         def alkaline(cell):
@@ -7488,11 +7516,14 @@ class ThePowerRulesTakeWhatAHoldoutCouldNotState(_PowerCase):
         self.assertEqual(v.outcome, "fail", v.render())
         self.assertIn("no element senses its temperature", v.detail)
 
+        # With no defeat, the window is the one thing left to judge: the rule
+        # skips, naming it. (It errored until holdout round 3:
+        # ACellWithNoDatasheetIsJudgedThenSkipped.)
         def window_only(p):
             p["pcb_batteries"]["main"]["cell"].pop("charge_temp_c")
         v = self.run_gate("pcb.charge_temperature", records=window_only)
-        self.assertEqual(v.outcome, "error", v.render())
-        self.assertIn("has no key 'charge_temp_c'", v.error)
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertIn("has no key 'charge_temp_c'", v.skip_reason)
 
     def test_a_sense_pin_alone_is_judged_on_the_schematic(self):
         """The charger's record names only its THERM pin. On a schematic that
@@ -7520,6 +7551,162 @@ class ThePowerRulesTakeWhatAHoldoutCouldNotState(_PowerCase):
                 v = self.run_gate("pcb.charge_temperature", records=sense_only, board=board)
                 self.assertEqual(v.outcome, outcome, v.render())
                 self.assertIn(said, v.detail if outcome == "fail" else v.error)
+
+
+class ACellWithNoDatasheetIsJudgedThenSkipped(_PowerCase):
+    """A cell stated ``"cell": {}`` (references/battery.md: every cell key is
+    optional, for a cell nobody has chosen). Each power rule judges all it can
+    without the cell's values, and fails on what it finds; with nothing found,
+    it skips, naming each key it lacks. It never errors. What slipped through
+    (holdout round 2, three designs): ``pcb.charge_limits`` and
+    ``pcb.discharge_cutoff`` read the cell's value first, so the empty cell
+    made both read errored, and a charger with nothing independent of it to
+    stop an overcharge, and a cell nothing cuts off, were never reached."""
+
+    @staticmethod
+    def _no_datasheet(p):
+        p["pcb_batteries"]["main"]["cell"] = {}
+
+    def test_an_empty_cell_skips_naming_each_key(self):
+        for gid, keys in (("pcb.charge_temperature", ["'charge_temp_c'"]),
+                          ("pcb.charge_limits", ["'upper_charge_v'", "'charge_a_max'"]),
+                          ("pcb.fault_current", ["'short_a'", "'internal_resistance_ohm'"]),
+                          ("pcb.discharge_cutoff", ["'discharge_v_min'"])):
+            with self.subTest(gate=gid):
+                v = self.run_gate(gid, records=self._no_datasheet)
+                self.assertEqual(v.outcome, "skipped", v.render())
+                for key in keys:
+                    self.assertIn(key, v.skip_reason)
+                self.assertIn("not stated, so not judged", v.skip_reason)
+
+    def test_what_needs_no_value_still_fails(self):
+        """The charger's two functions set by firmware, no overcharge or
+        overdischarge element, and F1's record tripping by 2 A on the 1 A wire:
+        each rule finds its fail without one cell number."""
+        def bare(p):
+            self._no_datasheet(p)
+            p["pcb_protectors"].pop("pack_pcm")
+            p["pcb_protectors"].pop("protector")
+            c = p["pcb_protectors"]["charger"]["functions"]
+            c["charge_v"] = {"per_cell": False, "set_by": "firmware"}
+            c["charge_a"] = {"set_by": "firmware"}
+            p["pcb_protectors"]["fuse"]["functions"]["trip"]["trip_a"] = 2.0
+        for gid, said in (
+                ("pcb.charge_limits", "nothing independent of the charger stops an "
+                                      "overcharge"),
+                ("pcb.discharge_cutoff", "main: nothing cuts the cell off"),
+                ("pcb.fault_current", "trips by 2 A, against 1.45 x 1 A (0.7250): nothing "
+                                      "guards the overload band, whatever main drives")):
+            with self.subTest(gate=gid):
+                v = self.run_gate(gid, records=bare)
+                self.assertEqual((v.outcome, v.measured), ("fail", None), v.render())
+                self.assertIn(said, v.detail)
+
+    def test_each_ratio_reads_only_its_own_value(self):
+        """A LiFePO4 cell's 3.65 V with no current stated still fails at 4.232 /
+        3.65; a firmware voltage reads no voltage, so a cell with no
+        upper_charge_v is judged on its current, and skips on the firmware
+        alone; a value that is there and wrong still errors."""
+        def lfp_no_current(p):
+            p["pcb_batteries"]["main"]["cell"] = {"upper_charge_v": 3.65}
+        v = self.run_gate("pcb.charge_limits", records=lfp_no_current)
+        self.assertEqual((v.outcome, v.measured), ("fail", round(4.232 / 3.65, 4)), v.render())
+        self.assertIn("has no key 'charge_a_max'", v.detail)
+
+        def firmware_voltage(p):
+            p["pcb_batteries"]["main"]["cell"].pop("upper_charge_v")
+            p["pcb_protectors"]["charger"]["functions"]["charge_v"] = {
+                "per_cell": False, "set_by": "firmware"}
+        v = self.run_gate("pcb.charge_limits", records=firmware_voltage)
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertIn("U1 MCP73833-AMI/UN's charge voltage", v.skip_reason)
+        self.assertNotIn("upper_charge_v", v.skip_reason)
+
+        def typo(p):
+            p["pcb_batteries"]["main"]["cell"] = {"discharge_v_min": "FILL: from the sheet"}
+        v = self.run_gate("pcb.discharge_cutoff", records=typo)
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("discharge_v_min is 'FILL: from the sheet': give a number", v.error)
+
+    def test_a_primary_cell_with_no_values_skips(self):
+        """An alkaline cell stated {} on an unprotected wire: its fault range is
+        not stated, a skip naming open_circuit_v's alternatives, never the
+        error a charge voltage typed for a primary cell earns."""
+        def alkaline(p):
+            p["pcb_batteries"]["main"]["chemistry"] = "alkaline"
+            p["pcb_batteries"]["main"]["cell"] = {"internal_resistance_ohm": [0.15, 0.3],
+                                                  "discharge_v_min": 0.8}
+            p["pcb_conductors"]["wire_out"]["protected_by"] = []
+        v = self.run_gate("pcb.fault_current", records=alkaline)
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertIn("has no key 'open_circuit_v'", v.skip_reason)
+
+
+class TwoCellsTurnedOneCancel(_PowerCase):
+    """``cell_reversed`` on a holder of loose cells: one cell of n turned leaves
+    the string at n - 2 cells' voltage, the right way round. Three or more
+    drive the load's current through the turned cell backwards; two cancel,
+    and are a hazard only when something drives the string (a charger, a
+    second string). What slipped through (holdout round 2): two AAA cells in
+    an open holder behind a series diode read "the board sees 0 cell(s)'
+    voltage ... the other cell(s) drive the turned one backwards", a raw
+    hazard on a sound design, so the project left out the mode mismate.md
+    prescribes."""
+
+    def _holder(self, cells: int, parallel: int = 1):
+        """BT1 as a holder of ``cells`` AAA cells in series (a junction pad each,
+        on a net of its own), its charger and protector records gone, and R5
+        stated as the series diode behind F1, as ``_block_r5`` states it."""
+        def edit(tree):
+            fp = _footprint(tree, "BT1")
+            for n in range(3, cells + 2):
+                pad = copy.deepcopy(_pad(tree, "BT1", "2"))
+                pad[1] = K.Q(str(n))
+                fp.append(pad)
+                _move_pad_net(tree, "BT1", str(n), f"CELL_J{n}")
+        board = self.board(edit, stem=f"holder_{cells}s{parallel}p")
+        block = ThePowerRulesTakeWhatAHoldoutCouldNotState._block_r5(
+            self, through=[{"ref": "F1", "value": "PTC_FIXTURE_0A5", "path": ["1", "2"],
+                            "why": "test: the series part between the cells and the diode"}],
+            ahead=[{"ref": r, "value": v, "why": "test: on the net behind F1"}
+                   for r, v in (("U1", "MCP73833-AMI/UN"), ("C3", "10uF"),
+                                ("J6", "WIRE_OUT"))])
+
+        def records(p):
+            block(p)
+            p["pcb_protectors"]["blocker"]["board"] = board
+            bat = p["pcb_batteries"]["main"]
+            bat.update(chemistry="alkaline", series=cells, parallel=parallel, cell={})
+            bat["terminals"]["taps"] = [str(n) for n in range(3, cells + 2)]
+            for pid in ("charger", "protector", "pack_pcm"):
+                p["pcb_protectors"].pop(pid)
+            p["pcb_matings"]["cell"]["modes"] = ["reversed", "cell_reversed"]
+            p["pcb_matings"]["cell"]["source"] = "test: loose AAA cells in an open holder"
+        return board, records
+
+    def test_two_aaa_cells_behind_a_series_diode_pass(self):
+        board, records = self._holder(2)
+        v = self.run_gate("pcb.mismate", records=records, board=board)
+        self.assertEqual((v.outcome, v.measured), ("pass", 0), v.render())
+        self.assertIn("cell: main reversed in BT1 is blocked by R5 330 through F1", v.detail)
+        self.assertIn("cell: one cell of main turned in BT1: the two cells cancel, so the "
+                      "board sees 0 V and nothing here drives a current through the turned "
+                      "cell; R5 330 through F1 keeps the board's other sources off the string",
+                      v.detail)
+
+    def test_what_drives_the_turned_cell_fails(self):
+        for name, cells, parallel, said in (
+                ("three in series", 3, 1, "the board sees 1 cell(s)' voltage the right way "
+                                          "round and draws its current through the turned "
+                                          "cell backwards"),
+                ("two strings of two", 2, 2, "its string reads 0 V beside 1 string(s) at two "
+                                             "cells' voltage")):
+            with self.subTest(case=name):
+                board, records = self._holder(cells, parallel)
+                v = self.run_gate("pcb.mismate", records=records, board=board)
+                self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+                self.assertIn(said, v.detail)
+                self.assertIn("a holder that keys each cell does", v.detail)
 
 
 class TheGatesTagsAreThisPacksOwn(unittest.TestCase):
@@ -7710,6 +7897,50 @@ class ThePartSetHasNoTypeFilter(unittest.TestCase):
         self.assertIsNone(self.g["_read_board"](ctx, "pcb.enclosure_fit", fit))
         self.assertEqual(fit.heights["U1"]["box"], (-1.5, -1.45, 1.5, 1.45))
 
+    def test_a_declared_part_takes_its_leads_from_its_plated_holes(self):
+        """J2, a through-hole header with its model gone: a cylinder for each
+        plated hole, the drill wide, from its seating plane to lead_mm past the
+        far face (the default named when unstated). U1, all SMD, has no hole a
+        lead could pass through, so a lead_mm there is refused. What slipped
+        through (holdout round 2): a declared height modelled the body above
+        the board alone, so leads under it were never fitted."""
+        root = tempfile.mkdtemp(prefix="nopekit-fit-leads-")
+        self.addCleanup(shutil.rmtree, root, True)
+
+        def no_models(tree):
+            _drop_model("J2")(tree)
+            _drop_model("U1")(tree)
+        board = _variant_board(root, no_models)
+        ctx = _fit_ctx(tempfile.mkdtemp(dir=root), dict(_baseline(), pcb_board=board))
+        Fit, heights = self.g["_Fit"], self.g["_heights"]
+        place = {"x": 0.0, "y": 0.0, "z": 0.0, "rot_x_deg": 0.0, "rot_y_deg": 0.0,
+                 "rot_z_deg": 0.0}
+
+        def read(recs):
+            fit = Fit("", board, "e.step", place, set(), {}, heights(recs, "h"))
+            self.assertIsNone(self.g["_read_board"](ctx, "pcb.enclosure_fit", fit))
+            return fit
+        smd = {"h": 1.0, "source": "datasheet"}
+        fit = read({"J2": {"h": 8.5, "source": "datasheet"}, "U1": smd})
+        self.assertEqual(fit.heights["J2"]["leads"],
+                         [(0.0, 0.0, 1.0), (0.0, 2.54, 1.0), (0.0, 5.08, 1.0), (0.0, 7.62, 1.0)])
+        self.assertEqual((fit.heights["J2"]["lead"], fit.default_leads),
+                         (self.g["LEAD_DEFAULT_MM"], ["J2"]))
+        self.assertNotIn("leads", fit.heights["U1"])
+        solids = self.g["_height_solids"](fit.heights["J2"], fit.thickness)
+        self.assertEqual(len(solids), 5)
+        tip = -(1.6 + self.g["FAR_FACE_EXTRA_MM"] + self.g["LEAD_DEFAULT_MM"])
+        self.assertEqual(solids[2], {"cylinder": {"at": [0.0, -2.54], "r": 0.5,
+                                                  "z": [tip, 0.0]}})
+        fit = read({"J2": {"h": 8.5, "lead_mm": 1.2, "source": "datasheet"}, "U1": smd})
+        self.assertEqual((fit.heights["J2"]["lead"], fit.default_leads), (1.2, []))
+        fit = Fit("", board, "e.step", place, set(), {},
+                  heights({"U1": dict(smd, lead_mm=1.0)}, "h"))
+        with self.assertRaises(self.g["_FitError"]) as raised:
+            self.g["_read_board"](ctx, "pcb.enclosure_fit", fit)
+        self.assertIn("U1 states lead_mm and its footprint has no plated hole",
+                      str(raised.exception))
+
     def test_an_untyped_part_at_its_height_may_seat_by_design(self):
         """What slipped through (review of H2): a footprint with no type and no
         model took a declared height and was fitted, and a contact on it read
@@ -7826,6 +8057,76 @@ class ABodiedPartOfAnyTypeIsFitted(unittest.TestCase):
 
 
 @unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
+@unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
+class ADeclaredPartIsFittedWithItsLeadsAndItsShape(unittest.TestCase):
+    """Holdout round 3. J2 with its model gone, at its declared height, over a
+    floor 2 mm under the board: its leads hit the floor at the default 2.5 mm
+    (a collision, the default named), keep 0.915 mm at 1.0 mm (against the
+    claim's 1.0) and 1.415 mm at 0.5 mm. And U1 with its model gone beside a
+    block cut to clear a 4 mm round body by 1.104 mm and a 4 mm square's
+    corner by 0.276 mm (against 0.5): the square fails, the circle and a
+    diamond pass. What slipped through: a declared height was a box above the
+    board alone, so a switch's leads under it read clear of a floor they hit
+    (a possible false pass), and a round speaker stated as its square read a
+    collision with a cover its body cleared (a wrong FAIL)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="nopekit-fit-leads-")
+        # KiCad 9.0.9's board body spans z 0 to 1.51; the far face a lead
+        # stands past is at -0.085 (FAR_FACE_EXTRA_MM): the floor's top at -2.0.
+        cls.floor = _enclosure_step(os.path.join(cls.tmp, "floor.step"), "block",
+                                    (22.0, -14.0, -6.0), (30.0, -1.0, -2.0))
+        cls.header = _variant_board(tempfile.mkdtemp(dir=cls.tmp), _drop_model("J2"))
+        # U1 sits at (15, -7.81) in the export: the block's corner (17.2, -10.0)
+        # is 3.104 mm from its centre, and 0.276 mm from a 4 mm square's corner.
+        cls.corner = _enclosure_step(os.path.join(cls.tmp, "corner.step"), "block",
+                                     (17.2, -14.0, 1.7), (20.0, -10.0, 5.0))
+        cls.chip = _variant_board(tempfile.mkdtemp(dir=cls.tmp), _drop_model("U1"))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, True)
+
+    def _run(self, board, enclosure, heights, limit):
+        params = dict(_baseline(), pcb_board=board, pcb_enclosure_step=enclosure,
+                      pcb_board_placement={"x": 0.0, "y": 0.0, "z": 0.0},
+                      pcb_part_heights_mm=heights)
+        return gates_mod.run_gate(*_registry().get("pcb.enclosure_fit"),
+                                  _fit_ctx(tempfile.mkdtemp(dir=self.tmp), params,
+                                           _fit_claim(limit)))
+
+    def test_the_leads_under_the_board_are_fitted(self):
+        for name, lead, outcome, gap in (("the default", None, "fail", 0.0),
+                                         ("1.0 mm", 1.0, "fail", 0.915),
+                                         ("0.5 mm", 0.5, "pass", 1.415)):
+            with self.subTest(lead=name):
+                rec = {"h": 8.5, "source": "the header's drawing, seated height"}
+                if lead is not None:
+                    rec["lead_mm"] = lead
+                v = self._run(self.header, self.floor, {"J2": rec}, 1.0)
+                self.assertEqual((v.outcome, v.measured), (outcome, gap), v.render())
+                if lead is None:
+                    self.assertIn("J2 shares", v.detail)
+                    self.assertIn("leads at the default 2.5 mm past the board, no lead_mm "
+                                  "stated: J2", v.detail)
+                else:
+                    self.assertIn(f"nearest J2 is {gap:g} mm", v.detail)
+                    self.assertNotIn("leads at the default", v.detail)
+
+    def test_a_round_part_is_fitted_round(self):
+        for name, outline, outcome, gap in (
+                ("a square", {"box_mm": [[-2, -2], [2, 2]]}, "fail", 0.276),
+                ("a circle", {"circle_mm": {"center": [0, 0], "d": 4}}, "pass", 1.104),
+                ("a diamond", {"polygon_mm": [[0, -2], [2, 0], [0, 2], [-2, 0]]}, "pass",
+                 1.69)):
+            with self.subTest(outline=name):
+                rec = dict(outline, h=1.5, source="the part's drawing")
+                v = self._run(self.chip, self.corner, {"U1": rec}, 0.5)
+                self.assertEqual((v.outcome, v.measured), (outcome, gap), v.render())
+                self.assertIn(f"nearest U1 is {gap:g} mm", v.detail)
+
+
 class ARefusedRegionCostsNoFullFit(unittest.TestCase):
     """Two regions drawn too wide, refused together, before the full fit runs:
     the evidence holds the refusals and no fit.json. What slipped through (a
