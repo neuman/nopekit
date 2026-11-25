@@ -23,7 +23,9 @@ established; ``pcb.fab_rules`` sourced, for the fab's numbers it hands KiCad),
 ngspice's ``.meas`` value, OpenCascade's shared volume and distance, and for
 ``pcb.antenna_keepout`` KiCad's DRC on the board as stored and after KiCad's own
 zone refill (sourced: the keep-out is the module's, its every-layer reach the
-vendor's guidance), each on a copy staged under the gate's out directory. They
+vendor's guidance), each on a copy staged under the gate's out directory.
+``pcb.drc`` and ``pcb.fab_rules`` judge a board with a zone as stored and as
+KiCad refills it, each finding once (``REFILL_DIR``). They
 read inside a subprocess the trace cannot see into, so they are opaque and re-run
 on every check where their tool exists, as openmodelica's ``omc`` gates do. The tier-0 gates read
 the board with the pack's own reader (``_kicad.py``), so they run where KiCad is not
@@ -602,9 +604,16 @@ def _land_fit(ref: str, board_pads: list, vendor: list,
     return {"ref": ref, "paired_by": pair_by, "search": search,
             "rotation_deg": round(angle, 3),
             "rms_mm": round(math.sqrt(sum(r * r for r in res) / len(res)), 4),
+            # The residual rounded up against its limit, and the unrounded ratio
+            # the gate decides on (``_kicad.toward_fail``): both were rounded to
+            # the nearest 0.1 um and then compared, so a residual a hair past its
+            # limit read equal to it and passed (holdout round 2 found the
+            # pattern in pcb.net_width).
             "worst": {"function": meta[worst][0], "board_pad": meta[worst][1],
-                      "drawing_pad": meta[worst][2], "residual_mm": round(res[worst], 4),
-                      "limit_mm": round(meta[worst][3], 4)},
+                      "drawing_pad": meta[worst][2],
+                      "residual_mm": K.toward_fail(res[worst], "<=", meta[worst][3], 4),
+                      "limit_mm": round(meta[worst][3], 4),
+                      "of_limit": res[worst] / meta[worst][3]},
             "pairs": [{"function": f, "board_pad": bn, "drawing_pad": vn,
                        "residual_mm": round(r, 4), "limit_mm": round(lim, 4)}
                       for (f, bn, vn, lim), r in zip(meta, res)]}
@@ -719,10 +728,10 @@ def land_pattern(ctx: GateContext) -> Verdict:
         fit["drawing"] = rel
         fit["source"] = str(record.get("source", ""))
         fits.append(fit)
-    worst = max(fits, key=lambda f: f["worst"]["residual_mm"] / f["worst"]["limit_mm"])
+    worst = max(fits, key=lambda f: f["worst"]["of_limit"])
     w = worst["worst"]
     ev = _evidence(ctx, "land_pattern", {"fits": fits, "notes": notes})
-    passed = w["residual_mm"] <= w["limit_mm"]
+    passed = w["of_limit"] <= 1.0
     anchored = (f" ({worst['search']})" if worst["search"].startswith("anchored") else "")
     detail = (f"{worst['ref']} pad {w['board_pad']} ({w['function']}) sits {w['residual_mm']:g} mm "
               f"from the drawing's pad {w['drawing_pad']} after the best rigid fit (no "
@@ -1179,7 +1188,9 @@ def net_width(ctx: GateContext) -> Verdict:
     (width x copper thickness), k 0.048 outside the stack and 0.024 inside
     (references/ipc-2221.md). ``pcb_net_currents_a`` names the nets and their
     currents, ``pcb_temp_rise_limit_c`` the rise a track may reach. The verdict is
-    the worst track of any named net.
+    the worst track of any named net, decided on its computed rise and reported
+    rounded up to 0.1 C, so the figure is never under the rise
+    (``_kicad.toward_fail``).
 
     A net named with one current has every track judged at it: the board does
     not say which path is which. A net named with a route (:data:`NET_PATH_KEYS`)
@@ -1239,7 +1250,17 @@ def net_width(ctx: GateContext) -> Verdict:
         return _skip(gid, f"none of {sorted(currents)} has a track on this board "
                           f"(carried by pours or pads alone?): nothing this gate can judge")
     rise, net, amps, width, _layer, outer, _length, _shape = max(rows)
-    reported = round(rise, 1)
+    # Decided on the computed rise, reported rounded up to 0.1 C
+    # (``_kicad.toward_fail``). What slipped through (holdout round 2): the rise
+    # was rounded to the nearest 0.1 C and then compared, so a computed 10.0207 C
+    # read 10.0 and passed against 10 C, and the claim read Checked on a value its
+    # own condition rejects.
+    passed = rise <= limit
+
+    def shown(value: float) -> float:
+        return K.toward_fail(value, "<=", limit, 1)
+
+    reported = shown(rise)
     # The hottest stretches: a net's tracks at one width on one side of the stack
     # heat alike, so each is named with the layers it runs on and its length, the
     # same copper counted once; and every other stretch that reads as hot at the
@@ -1253,11 +1274,10 @@ def net_width(ctx: GateContext) -> Verdict:
     # VBUS and GND, the line named one net and not the other.)
     stretches: dict[tuple, list] = {}
     for r in rows:
-        if round(r[0], 1) == reported:
+        if shown(r[0]) == reported:
             stretches.setdefault((r[1], r[3], r[5], r[2]), []).append(r)
     first = (net, width, outer, amps)
     order = [first] + sorted(k for k in stretches if k != first)
-    passed = reported <= limit
     lo, hi = K.FIT_RANGE["temp_rise_c"]
     # The fitted range is held over every stretch the line says reaches its rise,
     # each value named with its net. (What slipped through, in review: it read
@@ -1642,7 +1662,8 @@ def _tool_limit(ctx: GateContext, path: str) -> str:
     return ""
 
 
-def _kicad_cli(ctx: GateContext, gid: str, stage: str, argv: list[str], report: str):
+def _kicad_cli(ctx: GateContext, gid: str, stage: str, argv: list[str], report: str,
+               log_name: str = "kicad-cli.log"):
     """Run ``kicad-cli argv`` writing its JSON report to ``<stage>/<report>``;
     ``(exit code, report, evidence)`` or a skip/error Verdict.
 
@@ -1669,7 +1690,7 @@ def _kicad_cli(ctx: GateContext, gid: str, stage: str, argv: list[str], report: 
     except subprocess.TimeoutExpired:
         return _skip(gid, f"kicad-cli {what} exceeded {timeout:g} s (pcb_drc_timeout_s) "
                           f"and was killed: nothing was shown")
-    log = os.path.join(stage, "kicad-cli.log")
+    log = os.path.join(stage, log_name)
     with open(log, "w", encoding="utf-8") as fh:
         fh.write(" ".join(argv) + f"\nexit {proc.returncode}\n{proc.stdout}\n{proc.stderr}")
     if proc.returncode not in (EXIT_CLEAN, EXIT_VIOLATIONS) or not os.path.isfile(out):
@@ -1687,11 +1708,12 @@ def _kicad_cli(ctx: GateContext, gid: str, stage: str, argv: list[str], report: 
 
 
 def _drc(ctx: GateContext, gid: str, path: str, severity: str, *, parity: bool = False,
-         notes: list | None = None):
+         notes: list | None = None, staged_out: list | None = None):
     """``kicad-cli pcb drc`` on a staged copy of the board (and, for parity, its
     schematic): ``(code, report, evidence)`` or a skip/error Verdict. With
     ``notes`` the board's project libraries are staged too, and a note for each
-    one the stage could not take goes into it."""
+    one the stage could not take goes into it. ``staged_out`` takes ``(staged
+    stem, stage, argv)``, for a second run on the same stage (:func:`_refill_run`)."""
     if not os.path.isfile(path):
         return Verdict(gate=gid, passed=False, detail=f"no board at {path}")
     staged = _stage(ctx, gid, path, board=True, schematic=parity,
@@ -1706,7 +1728,10 @@ def _drc(ctx: GateContext, gid: str, path: str, severity: str, *, parity: bool =
     argv = ["pcb", "drc", SEVERITY_FLAGS[severity]]
     if parity:
         argv.append("--schematic-parity")
-    return _kicad_cli(ctx, gid, stage, argv + [stem + ".kicad_pcb"], "drc.json")
+    argv.append(stem + ".kicad_pcb")
+    if staged_out is not None:
+        staged_out.append((stem, stage, argv))
+    return _kicad_cli(ctx, gid, stage, argv, "drc.json")
 
 
 def _found(doc: dict) -> list:
@@ -1851,6 +1876,189 @@ def _waived_note(waived: list) -> str:
             + (f" ({comment[:60]!r})" if comment else ""))
 
 
+# --------------------------------------------------------------------------- #
+# the zones as stored and as KiCad refills them
+# --------------------------------------------------------------------------- #
+#: Where a KiCad gate refills the board's zones: a folder of its stage, holding a
+#: copy of the board beside the project's own ``.kicad_pro`` and ``.kicad_dru``,
+#: so the refill is the one a person's KiCad makes, under the project's
+#: clearances, never under the rules a gate writes into its stage (the fab's).
+#:
+#: **Why both.** kicad-cli judges a zone, a teardrop among them, by the fill the
+#: file stores. A person's DRC run in KiCad refills first (its dialog's "Refill
+#: all zones before performing DRC"), so a stale stored fill reads clean there
+#: and full of findings here. What slipped through (holdout round 2): on a KiCad
+#: 10 board 20 of pcb.drc's 21 counted errors, and 13 of pcb.fab_rules'
+#: findings, were stored teardrops KiCad 10.0.8's own ``--refill-zones`` clears,
+#: and the line sent a person to fix clearances that a refill removes. But the
+#: stored fill is what a fab plots: ``kicad-cli pcb export gerbers`` 9.0.9 has no
+#: refill, and 10.0.8's ``--check-zones`` is off unless asked for (measured on
+#: that board: the two plots of B.Cu differ), and one of those stored teardrops
+#: sat on another net's pad at 0.0000 mm. So each finding is counted once over
+#: both copies, as ``pcb.antenna_keepout`` counts its own, and the line says
+#: apart how many only the stored fill shows, with the remedy: refill the zones
+#: and save the board. A finding only the refill shows (a pour moved and not
+#: refilled since) is counted too: the next refill puts that copper there.
+#: Measured on the baseline with a stored fill drawn over two pads of other nets
+#: (tests/test_pcb_kicad.py): 9 findings stored, 0 refilled, under kicad-cli
+#: 9.0.9 with pcbnew 9.0.9 and under 10.0.8; with a thermal-relief pad
+#: connection, one starved thermal relief only the refill shows, under both.
+#:
+#: **How.** kicad-cli 10 refills and saves the copy itself (``pcb drc
+#: --refill-zones --save-board``); kicad-cli 9.0.9 has no refill, so the copy is
+#: refilled with KiCad's ``pcbnew`` in a child (``_keepout_fill.py``, as the
+#: keep-out's). Where neither can (kicad-cli 9 and no ``pcbnew`` in nopekit's
+#: Python), the stored fill alone is judged and the line says so.
+#:
+#: *Rejected:* the refilled copy alone (the stored fill a fab plots, a short among
+#: it, would pass); the stored copy alone (the first cut: a sound design with a
+#: stale fill read as clearance faults to fix one by one, and a pour moved under
+#: a track read clean); leaving the stored-only findings out of the count (the
+#: same short would pass, and KiCad's remedy, a refill and a save, is the
+#: design's to make, as a parity mark is); refilling under the stage's rules
+#: (``pcb.fab_rules`` writes the fab's: a refill there would pour to the fab's
+#: clearance, not the project's, and hide a gap the person's refill leaves).
+REFILL_DIR = "nopekit-refill"
+
+
+def _zoned(tree: list) -> bool:
+    """Whether the board holds a copper zone a refill may change: a pour or a
+    teardrop, on the board or in a footprint; a rule area fills nothing."""
+    zones = list(K.children(tree, "zone"))
+    for fp in K.children(tree, "footprint"):
+        zones += K.children(fp, "zone")
+    return any(_keepout_flags(z) is None for z in zones)
+
+
+def _refilled(ctx: GateContext, gid: str, path: str, stem: str, release: str):
+    """The staged board ``stem`` refilled under the project's own settings
+    (:data:`REFILL_DIR`): ``(refilled board, how)``, ``(None, "")`` for a board
+    with no zone, ``(None, why it cannot here)``, or an error or skip Verdict. A
+    refill that runs and fails is an error, never a quiet return to the stored
+    fill."""
+    tree = ctx.load_file(path, loader=K.load_tree)
+    if not _zoned(tree):
+        return None, ""
+    folder = os.path.join(os.path.dirname(stem), REFILL_DIR)
+    os.makedirs(folder, exist_ok=True)
+    name = os.path.basename(stem)
+    board = os.path.join(folder, name + ".kicad_pcb")
+    shutil.copyfile(stem + ".kicad_pcb", board)
+    for ext in STEM_FILES:
+        if os.path.isfile(_stem(path) + ext):
+            shutil.copyfile(_stem(path) + ext, os.path.join(folder, name + ext))
+    log = os.path.join(folder, "refill.log")
+    timeout = float(ctx.param("pcb_drc_timeout_s", DEFAULT_DRC_TIMEOUT_S) or
+                    DEFAULT_DRC_TIMEOUT_S)
+    if release and _release_key(release)[0] >= 10:
+        argv = ["kicad-cli", "pcb", "drc", "--refill-zones", "--save-board", "--format",
+                "json", "-o", os.path.join(folder, "refill.json"), name + ".kicad_pcb"]
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                                  stdin=subprocess.DEVNULL, cwd=folder)
+        except FileNotFoundError as exc:
+            return _skip(gid, f"could not launch kicad-cli for the zone refill: {exc}")
+        except subprocess.TimeoutExpired:
+            return _skip(gid, f"kicad-cli's zone refill exceeded {timeout:g} s "
+                              f"(pcb_drc_timeout_s) and was killed: nothing was shown")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write(" ".join(argv) + f"\nexit {proc.returncode}\n{proc.stdout}\n{proc.stderr}")
+        if proc.returncode not in (EXIT_CLEAN, EXIT_VIOLATIONS):
+            return Verdict(gate=gid, passed=False, evidence=[log],
+                           error=f"kicad-cli {release}'s zone refill exited {proc.returncode}: "
+                                 f"{(proc.stderr or proc.stdout).strip()[-200:]}")
+        return board, f"kicad-cli {release}"
+    pcb = _pcbnew_release(gid)
+    if isinstance(pcb, Verdict) or not pcb[0]:
+        return None, (f"kicad-cli {release or '(no release named)'} has no zone refill and "
+                      f"KiCad's pcbnew does not import in nopekit's Python here")
+    out = os.path.join(folder, "refilled", name + ".kicad_pcb")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    got = _refill(ctx, gid, board, out, log)
+    if isinstance(got, Verdict):
+        return got
+    return out, f"pcbnew {pcb[0]}"
+
+
+def _finding_key(v: dict) -> tuple:
+    """A finding as both runs name it: its type and the ids of its items. A
+    refill keeps every id (measured, kicad-cli 10.0.8 and pcbnew 9.0.9: the 12
+    findings a refill left on a holdout board kept theirs); the words do not
+    stay (the actual gap moves)."""
+    return (str(v.get("type")), tuple(sorted(K.kiid(i.get("uuid")) for i in v.get("items", []))))
+
+
+def _over_both(stored: list, refilled: list) -> tuple[list, list, list]:
+    """``(each finding once over both runs, those only the stored fill shows,
+    those only the refill shows)``. A finding both show is the refill's; a key
+    the stored run lists more often than the refilled one counts its extra
+    findings as the stored fill's."""
+    left = Counter(_finding_key(v) for v in refilled)
+    stored_only = []
+    for v in stored:
+        k = _finding_key(v)
+        if left[k]:
+            left[k] -= 1
+        else:
+            stored_only.append(v)
+    seen = Counter(_finding_key(v) for v in stored)
+    refill_only = []
+    for v in refilled:
+        k = _finding_key(v)
+        if seen[k]:
+            seen[k] -= 1
+        else:
+            refill_only.append(v)
+    return refilled + stored_only, stored_only, refill_only
+
+
+def _fill_note(total: int, stored_only: list, refill_only: list, how: str,
+               refilled: bool) -> str:
+    """The line's words on the two copies (:data:`REFILL_DIR`): ``how`` names
+    what refilled them, or, with ``refilled`` false, why nothing could."""
+    if not how:
+        return ""
+    if not refilled:
+        return f"; the stored zone fill only: {how}, so what a refill pours is not judged"
+    words = []
+    if stored_only:
+        kinds = ", ".join(f"{n}x {t}" for t, n in Counter(
+            str(v.get("type", "?")) for v in stored_only).most_common())
+        words.append(f"{len(stored_only)} of {total} only on the stored zone fill ({kinds}), "
+                     f"which KiCad's refill clears: refill the zones and save the board, "
+                     f"since a fab plots the stored fill")
+    if refill_only:
+        words.append(f"{len(refill_only)} of {total} only after KiCad's refill: the stored "
+                     f"fill is out of date there")
+    return "; " + ("; ".join(words) if words else
+                   f"the zones judged as stored and as refilled ({how})")
+
+
+def _refill_run(ctx: GateContext, gid: str, path: str, stem: str, stage: str,
+                argv: list[str], doc: dict):
+    """The same kicad-cli run again on the staged board refilled
+    (:func:`_refilled`): ``(report, how, evidence)``, ``(None, how, [])`` where
+    nothing was refilled (``how`` says why, or is "" for a board with no zone),
+    or an error or skip Verdict. The refilled copy takes the staged board's place,
+    so the run reads the same project, rules and libraries."""
+    got = _refilled(ctx, gid, path, stem, _release_of(doc.get("kicad_version")))
+    if isinstance(got, Verdict):
+        return got
+    board, how = got
+    if board is None:
+        return None, how, []
+    shutil.copyfile(board, stem + ".kicad_pcb")
+    run = _kicad_cli(ctx, gid, stage, argv, "drc_refilled.json", log_name="kicad-cli-refilled.log")
+    if isinstance(run, Verdict):
+        return run
+    code, refilled, ev = run
+    if _disagree(code, _found(refilled), _counted(_found(refilled))):
+        return Verdict(gate=gid, passed=False, evidence=ev,
+                       error=f"kicad-cli exited {code} on the refilled board but its report "
+                             f"lists {len(_counted(_found(refilled)))} item(s): the two disagree")
+    return refilled, how, ev
+
+
 @gate(
     id="pcb.drc",
     basis="established",
@@ -1877,7 +2085,9 @@ def drc(ctx: GateContext) -> Verdict:
     """``kicad-cli pcb drc --severity-all --exit-code-violations``: the verdict is
     the count of the report's findings that no exclusion waives
     (:func:`_counted`). An exit code that disagrees with the report is an error,
-    never a pass (:func:`_disagree`).
+    never a pass (:func:`_disagree`). On a board with a zone, the board as stored
+    and as KiCad refills it, each finding once over both, and the line says apart
+    what only the stored fill shows (:data:`REFILL_DIR`).
 
     ``pcb_drc_severity`` narrows it (``error``, ``warning``); the default is every
     severity, because a check at error severity cannot see a warning and the fab
@@ -1898,7 +2108,8 @@ def drc(ctx: GateContext) -> Verdict:
                        error=f"pcb_drc_severity {severity!r} is not one of "
                              f"{sorted(SEVERITY_FLAGS)}")
     libraries: list[str] = []
-    run = _drc(ctx, gid, path, severity, notes=libraries)
+    where: list = []
+    run = _drc(ctx, gid, path, severity, notes=libraries, staged_out=where)
     if isinstance(run, Verdict):
         return run
     code, doc, ev = run
@@ -1908,6 +2119,20 @@ def drc(ctx: GateContext) -> Verdict:
         return Verdict(gate=gid, passed=False, evidence=ev,
                        error=f"kicad-cli exited {code} but its report lists "
                              f"{len(counted)} item(s): the two disagree")
+    # The zones as stored and as KiCad refills them, each finding once over
+    # both (:data:`REFILL_DIR`).
+    stem, stage, argv = where[0]
+    fill = _refill_run(ctx, gid, path, stem, stage, argv, doc)
+    if isinstance(fill, Verdict):
+        return fill
+    refilled, how, fill_ev = fill
+    ev += fill_ev
+    stored_only: list = []
+    refill_only: list = []
+    waived = _waived(found)
+    if refilled is not None:
+        counted, stored_only, refill_only = _over_both(counted, _counted(_found(refilled)))
+        waived = _over_both(waived, _waived(_found(refilled)))[0]
     dead: list[str] = []
     note = ""
     if os.path.isfile(_stem(path) + ".kicad_dru"):
@@ -1921,7 +2146,9 @@ def drc(ctx: GateContext) -> Verdict:
     found_parts = ([f"{len(counted)} finding(s), ", (_kinds(counted), 2)] if counted
                    else ["nothing found"])
     detail = _line(f"KiCad DRC at {severity} severities: ", *found_parts,
-                   (_waived_note(_waived(found)), 1), (note, 3, "; ", ""),
+                   (_fill_note(len(counted), stored_only, refill_only, how,
+                               refilled is not None), 5),
+                   (_waived_note(waived), 1), (note, 3, "; ", ""),
                    (_libraries_note(libraries), 4), f"; {_release(ctx, doc)}")
     # A dead rule beside a clean run is an error: the run cannot show what the
     # rule was written to hold. Beside a finding it stays a fail, because a
@@ -2208,13 +2435,21 @@ PARITY_APART = {
 }
 
 #: Footprint kinds a parity item names whose footprints are all board-only
-#: drawing (``_kicad.not_a_part``) are said apart too: KiCad lists a mounting
-#: hole or a logo not marked "Not in schematic" as an extra footprint, and two
-#: such with no reference as duplicates. What slipped through, in the holdout run:
-#: a board whose every part, value, footprint and net agreed read 16 differences,
-#: all mounting holes and an outline. A footprint with a numbered pad, or one a
-#: bill of materials would take, still counts, and so does one the report names
-#: by an id the board does not keep: no item is said apart on a guess.
+#: drawing (``_kicad.not_a_part``) are counted, and said apart in the line with
+#: KiCad's remedy: KiCad lists a mounting hole or a logo not marked "Not in
+#: schematic" as an extra footprint, and two such with no reference as
+#: duplicates, and its own "Update PCB from Schematic" with "delete extra
+#: footprints" would remove them. The mark is the design's to set, and it is one
+#: click. What slipped through, in the holdout run: a board whose every part,
+#: value, footprint and net agreed read 16 differences, all mounting holes and an
+#: outline, in words ("Duplicate footprints; ...") that did not show no part
+#: differed. The holdout's fix that followed said them apart and left them out
+#: of the count, and round 2 of the holdout read that as a regression: round 1
+#: had confirmed each such footprint a real, minor defect (three refuters of
+#: three, on two boards) and asked only for the split line. Rejected: leaving
+#: them out of the count (a defect KiCad and round 1 both name would pass, and
+#: no record could make the gate count it again); counting them in the words
+#: alone, unsplit (the first cut: a person read 16 differences and no part).
 PARITY_FOOTPRINT_KINDS = ("extra_footprint", "duplicate_footprints")
 
 
@@ -2242,9 +2477,12 @@ def parity(ctx: GateContext) -> Verdict:
     ``.kicad_sch``. The verdict is the count of the report's parity items that
     are a difference in what is built (:data:`PARITY_COUNTED`): a part on one and
     not the other, a value, footprint or fitting that differs, a pad on a net the
-    schematic does not give it. Said apart and not counted: data that moves none
-    of those (:data:`PARITY_APART`), board-only drawing KiCad lists as extra
-    (:data:`PARITY_FOOTPRINT_KINDS`), an open pin on a pad with no net, and an item
+    schematic does not give it. Board-only drawing KiCad lists as extra or
+    duplicate (:data:`PARITY_FOOTPRINT_KINDS`) is counted and said apart in the
+    line, "k of n: board-only footprint(s) not marked 'Not in schematic' (...),
+    mark them so in KiCad", with "no part, value, footprint or pad net differs"
+    when it is every difference. Said apart and not counted: data that moves none
+    of those (:data:`PARITY_APART`), an open pin on a pad with no net, and an item
     a person excluded in KiCad. A parity type this pack does not know is named;
     beside no counted difference it is an error, since the gate cannot say what
     it means. The run's exit code must agree with the report, or it errors.
@@ -2294,14 +2532,21 @@ def parity(ctx: GateContext) -> Verdict:
     unknown = Counter(str(v.get("type", "?")) for v in items
                       if v.get("type") not in PARITY_COUNTED and v.get("type") not in PARITY_APART)
     left = {id(v) for v in agreed + board_only}
-    items = [v for v in items if v.get("type") in PARITY_COUNTED and id(v) not in left]
-    where = "; ".join(f"{v.get('description', '?')}" for v in items[:3])
+    built = [v for v in items if v.get("type") in PARITY_COUNTED and id(v) not in left]
+    # Counted, the board-only drawing after what is built: the words quoted are
+    # the built differences' first (:data:`PARITY_FOOTPRINT_KINDS`).
+    items = built + board_only
+    where = "; ".join(f"{v.get('description', '?')}" for v in built[:3])
     said = [f"{n}x {t} ({PARITY_APART[t]})" for t, n in apart.most_common()]
+    drawn = ""
     if board_only:
         refs = sorted({K.footprint_ref(footprints[K.kiid(i.get("uuid"))])[0] or "no reference"
                        for v in board_only for i in v.get("items", [])})
-        said.append(f"{len(board_only)}x board-only drawing not marked 'Not in schematic' "
-                    f"({', '.join(refs[:3])}{', ...' if len(refs) > 3 else ''})")
+        drawn = (f"{len(board_only)} of {len(items)}: board-only footprint(s) not marked 'Not "
+                 f"in schematic' ({', '.join(refs[:3])}{', ...' if len(refs) > 3 else ''}), "
+                 f"mark them so in KiCad")
+        if not built:
+            drawn += "; no part, value, footprint or pad net differs"
     kinds = ", ".join(f"{n}x {t}" for t, n in unknown.most_common())
     if unknown and not items:
         return Verdict(gate=gid, passed=False, evidence=ev,
@@ -2309,8 +2554,10 @@ def parity(ctx: GateContext) -> Verdict:
                              f"it is a difference in what is built is not known here "
                              f"({_release(ctx, doc)})")
     # Within the spine's 500 characters (_line): the count and the release kept,
-    # the differences' own words cut first, a type this pack does not know last.
-    found_parts = ([f"{len(items)} difference(s) between board and schematic: ", (where, 1)]
+    # the differences' own words cut first, the board-only split and a type this
+    # pack does not know last.
+    found_parts = ([f"{len(items)} difference(s) between board and schematic: ",
+                    (where, 1, "", "; " if drawn else ""), (drawn, 5)]
                    if items else ["the board matches its schematic: every part, value, "
                                   "footprint and pad net"])
     detail = _line(*found_parts, (", ".join(said), 3, "; said apart, not counted: ", ""),
@@ -2464,7 +2711,10 @@ def fab_rules(ctx: GateContext) -> Verdict:
     ``pcb.drc``), a constrained type it set to "ignore" is raised to "error", and a
     local clearance override below the fab's clearance is held at it: one written
     to relax a constraint must not relax the fab. An override above the fab's
-    clearance still binds and fails copper inside it (GitHub #13).
+    clearance still binds and fails copper inside it (GitHub #13). On a board
+    with a zone, the fab's DRC runs on the board as stored and on a copy KiCad
+    refilled under the project's own settings, never the fab's, each finding once
+    over both (:data:`REFILL_DIR`).
     """
     gid = "pcb.fab_rules"
     path = _board_path(ctx)
@@ -2548,8 +2798,8 @@ def fab_rules(ctx: GateContext) -> Verdict:
         raised = _zeroed_project(_stem(path) + ".kicad_pro", stem + ".kicad_pro", table)
     except ValueError as exc:
         return Verdict(gate=gid, passed=False, error=str(exc))
-    run = _kicad_cli(ctx, gid, stage, ["pcb", "drc", "--severity-all", stem + ".kicad_pcb"],
-                     "drc.json")
+    argv = ["pcb", "drc", "--severity-all", stem + ".kicad_pcb"]
+    run = _kicad_cli(ctx, gid, stage, argv, "drc.json")
     if isinstance(run, Verdict):
         return run
     code, doc, ev = run
@@ -2557,14 +2807,30 @@ def fab_rules(ctx: GateContext) -> Verdict:
         return Verdict(gate=gid, passed=False, evidence=ev,
                        error=f"kicad-cli exited {code} but its report lists "
                              f"{len(_counted(_found(doc)))} item(s): the two disagree")
+    # The zones as stored and as KiCad refills them under the project's own
+    # settings, never the fab's this stage holds; each finding once over both
+    # (:data:`REFILL_DIR`): a fab plots the stored fill.
+    fill = _refill_run(ctx, gid, path, stem, stage, argv, doc)
+    if isinstance(fill, Verdict):
+        return fill
+    refilled, how, fill_ev = fill
+    ev += fill_ev
     pads = K.pad_ids(tree)
     fab_found, guessed = K.fab_findings(doc, table, pads, "fab")
+    found = _found(doc)
+    stored_only: list = []
+    refill_only: list = []
+    if refilled is not None:
+        fab_refilled, guessed_refilled = K.fab_findings(refilled, table, pads, "fab")
+        fab_found, stored_only, refill_only = _over_both(fab_found, fab_refilled)
+        guessed = max(guessed, guessed_refilled)
+        found = _over_both(found, _found(refilled))[0]
     # A finding of a type the project ignores, raised for this run and not the
     # fab's (silk on silk, when the project ignores silk_overlap), is no finding
     # pcb.drc sees: it runs under the project's own severities. Said apart, never
     # called pcb.drc's. (What slipped through, in review: it was.)
-    counted = {id(v) for v in fab_found}
-    rest = [v for v in _found(doc) if id(v) not in counted]
+    counted = {_finding_key(v) for v in fab_found}
+    rest = [v for v in found if _finding_key(v) not in counted]
     waived = Counter(v.get("type", "?") for v in rest if v.get("type") in raised)
     others = len(rest) - sum(waived.values())
     # Grouped by type with the fab rule's name, never the first descriptions: on a
@@ -2608,8 +2874,10 @@ def fab_rules(ctx: GateContext) -> Verdict:
     # a board read as KiCad's default stackup says so, never as if the board had
     # stated FR4.
     detail = _line(f"{who} {service['name']} ({table['name']}{oz_note}, read "
-                   f"{fab.get('read', '?')}): ", *found_parts, (guessed_note, 2),
-                   (others_note, 1), (waived_note, 3), (excluded_note, 5),
+                   f"{fab.get('read', '?')}): ", *found_parts,
+                   (_fill_note(len(fab_found), stored_only, refill_only, how,
+                               refilled is not None), 7),
+                   (guessed_note, 2), (others_note, 1), (waived_note, 3), (excluded_note, 5),
                    (_libraries_note(libraries), 4), f"; {_release(ctx, doc)}",
                    f"; the board: {', '.join(built)}")
     return Verdict(gate=gid, passed=not fab_found, measured=len(fab_found), limit=0,
@@ -3109,6 +3377,17 @@ REGION_REACH_LIMITS = 2.0
 REGION_REACH_TOL_MM = 1e-3
 
 
+#: How a line names a footprint with an empty reference (KiCad leaves a logo or
+#: a mounting hole so). What slipped through (holdout round 2): the fit's line
+#: read "not fitted (no type, no 3D model): , G***", a blank name first.
+NO_REFERENCE = "(no reference)"
+
+
+def _ref_word(ref: str) -> str:
+    """``ref`` as a line names it: :data:`NO_REFERENCE` for an empty one."""
+    return ref if str(ref).strip() else NO_REFERENCE
+
+
 class _FitError(ValueError):
     """A fit record the gate cannot read: the gate errors, naming it."""
 
@@ -3514,6 +3793,7 @@ class _Fit:
     model_dirs: dict = dataclasses.field(default_factory=dict)
 
     def name(self, ref: str) -> str:
+        ref = _ref_word(ref)
         return f"{self.id}:{ref}" if self.id else ref
 
     @property
@@ -3665,14 +3945,18 @@ def _read_board(ctx: GateContext, gid: str, fit: _Fit) -> str | None:
         lost = sorted(r for r in fit.parts if r not in boxed and models.get(r)
                       and not any(_model_file(m, board_dir, fit.model_dirs)
                                   for m in models[r]))
+        # "name a model not found here", never "one not found here": the skip
+        # read "19 one not found here" (holdout round 2).
         if lost:
             return (f"{label}{len(unmodelled)} part(s) name no 3D model "
-                    f"({', '.join(unmodelled[:3])}), {len(lost)} one not found here "
-                    f"({', '.join(lost[:3])}): state each height in pcb_part_heights_mm, or "
-                    f"list a bodiless part in pcb_enclosure_bodiless")
+                    f"({', '.join(map(_ref_word, unmodelled[:3]))}), {len(lost)} name a model "
+                    f"not found here ({', '.join(map(_ref_word, lost[:3]))}): state each "
+                    f"height in pcb_part_heights_mm, or list a bodiless part in "
+                    f"pcb_enclosure_bodiless")
         return (f"{label}{len(unmodelled)} placed part(s) name no 3D model: "
-                f"{', '.join(unmodelled[:8])}. Give each a model, state its height in "
-                f"pcb_part_heights_mm, or list a part with no body in pcb_enclosure_bodiless")
+                f"{', '.join(map(_ref_word, unmodelled[:8]))}. Give each a model, state its "
+                f"height in pcb_part_heights_mm, or list a part with no body in "
+                f"pcb_enclosure_bodiless")
     return None
 
 
@@ -4219,8 +4503,14 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
     # beside a fail would hide the fail (the power rules' lesson, P5).
     judged = rows or body_rows
     hits.sort(reverse=True)
-    gap = round(min(d for d, _w, _a in judged), 3) if judged else 0.0
-    failed = bool(hits) or (bool(judged) and not acc.holds(gap))
+    # Decided on the computed gap, reported rounded down to a micrometre
+    # (``_kicad.toward_fail``). What slipped through (holdout round 2, in
+    # pcb.net_width, and the same pattern here): the gap was rounded to the
+    # nearest micrometre and then compared, so a 0.4996 mm gap read 0.5 and
+    # passed ``>= 0.5 mm``.
+    least = min(d for d, _w, _a in judged) if judged else 0.0
+    gap = K.toward_fail(least, ">=", acc.limit, 3) if judged else 0.0
+    failed = bool(hits) or (bool(judged) and not acc.holds(least))
     if not failed and errors:
         return Verdict(gate=gid, passed=False, evidence=ev, error="; ".join(errors))
     if not failed and (skips or not judged):
@@ -4719,7 +5009,7 @@ def _drawing_area(ctx: GateContext, tree: list, fp: list, ref: str, rel: str,
     if isinstance(fit, str):
         raise P.RecordError(f"{label}: the drawing {rel} does not register: {fit}")
     w = fit["worst"]
-    if w["residual_mm"] > w["limit_mm"]:
+    if w["of_limit"] > 1.0:
         raise P.RecordError(f"{label}: the drawing {rel} does not register on {ref}: pad "
                             f"{w['board_pad']} sits {w['residual_mm']:g} mm from the drawing's "
                             f"after the best rigid fit (no mirror), past {w['limit_mm']:g} mm")

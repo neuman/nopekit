@@ -160,9 +160,20 @@ record's board, ref and value, and the pads that a pin name or the copper shows.
 Every datasheet number, flag and choice is a string that starts `FILL:`, which
 every rule here refuses where it reads a value. Every source is a list, which
 every rule here refuses, since a source must be a string. So the draft passes
-nothing until a person states each value and writes each source. PACK.md ("The
-proposer: `pcb.battery_record_draft`") says what it finds, what it may draft
-wrong and what it cannot see.
+nothing until a person states each value and writes each source. A cell is
+drafted before its chemistry is known: each `cell` key says whether a
+rechargeable or a primary cell takes it (`open_circuit_v` for a primary cell,
+the charge voltage, current and window for a rechargeable one), and you drop the
+other kind's. PACK.md ("The proposer: `pcb.battery_record_draft`") says what it
+finds, what it may draft wrong and what it cannot see.
+
+**A value is decided before it is rounded.** Each rule decides on the ratio,
+the headroom or the temperature it computed, and reports it rounded toward the
+side that fails: a ratio held to at most 1.0 up to 0.0001, a headroom held to at
+least 0 K down to 0.01 K, an NTC's cold edge down and its hot edge up. (What
+slipped through, holdout round 2, in `pcb.net_width`, and here too: a value was
+rounded to the nearest and then compared, so a ratio of 1.00004 read 1.0 and
+passed `<= 1`.)
 
 ## `pcb.charge_temperature`
 
@@ -242,12 +253,13 @@ uA and compares it with VT1 1.20-1.26 V and VT2 0.235-0.265 V (DS22005B,
 electrical characteristics). So it stops charging cold above 22.64-26.81 kOhm
 and hot below 4.43-5.64 kOhm. TH1 is a fixture NTC, 10 kOhm +- 1 %, B25/85
 4250 K +- 1 %. At the corners charging is allowed from 5.34 C to 43.47 C,
-against the cell's 0..45 C: 1.53 K of headroom, on the hot side. The cold edge
-lies below the B pair, and the detail says so. A coarser grade of the same NTC
-does not move its nominal curve: R25 5 % and B 3 % leave 0.17 K, and R25 10 %
-charges the cell to 45.97 C (-0.97 K). `ntc_swapped` puts a 100 kOhm NTC of
-the same B in TH1's place, on the board, the schematic and its record: charging
-is then allowed from 54.75 C to 109.83 C, -64.83 K.
+against the cell's 0..45 C: 1.5295 K of headroom, on the hot side, reported
+1.52 K (rounded down, toward the side that fails). The cold edge lies below the
+B pair, and the detail says so. A coarser grade of the same NTC does not move
+its nominal curve: R25 5 % and B 3 % leave 0.17 K, and R25 10 % charges the
+cell to 45.97 C (-0.98 K as reported). `ntc_swapped` puts a 100 kOhm NTC of the
+same B in TH1's place, on the board, the schematic and its record: charging is
+then allowed from 54.75 C to 109.83 C, -64.84 K as reported.
 
 The AMI option's safety timer is disabled (DS22005B, "Timer Period 0 hours").
 It passes: IEC 62368-1 M.4.2 measures the charge voltage, current and cell

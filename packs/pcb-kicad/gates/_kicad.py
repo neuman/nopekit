@@ -46,6 +46,7 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Context, Decimal
 
 # --------------------------------------------------------------------------- #
 # S-expressions
@@ -131,7 +132,22 @@ def _quote(s: str) -> str:
 
 
 def dump(node, indent: int = 0) -> str:
-    """``node`` as KiCad S-expression text, one child list per line."""
+    """``node`` as KiCad S-expression text, one child list per line, every item
+    in the order :func:`parse` read it.
+
+    The atoms before a list's first child list share its opening line; an atom
+    after a child list takes a line of its own, in its place. KiCad's reader
+    reads by token, not by line, but it reads a list's items in order. What
+    slipped through (holdout round 2): this wrote every atom of a list before
+    its child lists, so a KiCad 6/7 board's ``(fp_text reference "Q3" (at 0 0)
+    (layer "F.SilkS") hide ...)`` came back as ``(fp_text reference "Q3" hide
+    (at 0 0) ...)``, and kicad-cli 9.0.9 refused the staged copy, "Failed to
+    load board" (measured on a KiCad 7 board, and on the KiCad 7-form board in
+    tests/test_pcb_kicad.py). The keep-out and the fit's declared heights write
+    a staged board with this function, so both errored on every KiCad 6/7
+    board. Rejected: moving a trailing atom into the list's head only for the
+    words known to trail (``hide``, ``locked``), since a later format may add
+    another and the order is the file's, not this pack's."""
     if isinstance(node, Q):
         return _quote(node)
     if isinstance(node, str):
@@ -139,11 +155,10 @@ def dump(node, indent: int = 0) -> str:
     pad = "\t" * indent
     if not any(isinstance(x, list) for x in node):
         return pad + "(" + " ".join(dump(x) for x in node) + ")"
-    head = [dump(x) for x in node if not isinstance(x, list)]
-    lines = [pad + "(" + " ".join(head)]
-    for x in node:
-        if isinstance(x, list):
-            lines.append(dump(x, indent + 1))
+    first = next(i for i, x in enumerate(node) if isinstance(x, list))
+    lines = [pad + "(" + " ".join(dump(x) for x in node[:first])]
+    for x in node[first:]:
+        lines.append(dump(x, indent + 1) if isinstance(x, list) else pad + "\t" + dump(x))
     lines.append(pad + ")")
     return "\n".join(lines)
 
@@ -604,6 +619,39 @@ def sheet_files(root_sch: str) -> list[str]:
 NO_FUNCTION_NAMES = ("NC", "DNC", "N.C.", "N/C", "~", "")
 
 
+def numbered_pin_names(version: int | None, board: Board) -> bool:
+    """Whether ``board`` carries KiCad 10's pin names: each pad's ``pinfunction``
+    its pin's name, an underscore and the pad's own number (``TS_11``, ``BAT_13``,
+    ``Pin_1_1``), as KiCad 10.0.8 writes them when a board is updated from its
+    schematic. Read as KiCad 10's only on a format past KiCad 9's
+    (:data:`TOOL_RUN_VERSION`) where every numbered pad that carries a name ends
+    in ``_<its number>``: measured on two KiCad 10 boards, 1022 of 1022 and 342
+    of 342. A KiCad 9 board, and a KiCad 10 file KiCad upgraded and never updated
+    from its schematic (the pack's ``selftest/assets/kicad10/``: 8 of 14), keep
+    the names as the symbol gives them, among them a connector's ``Pin_1`` on pad
+    1, which is a name and not a suffix. What slipped through (holdout round 2):
+    ``pcb.battery_record_draft`` matched its pin tables against these names, so
+    on a KiCad 10 board no ``TS`` and no ``BAT`` matched and it drafted no
+    charger. *Rejected:* stripping a pad's own number wherever it ends a name (a
+    KiCad 9 connector's ``Pin_1`` and ``Pin_2`` would both read ``Pin``);
+    stripping any trailing ``_<digits>`` (``VC_1`` on pad 9 is a name)."""
+    if version is None or version <= TOOL_RUN_VERSION:
+        return False
+    named = [(p.number, p.pinfunction) for fp in board.footprints for p in fp.pads
+             if p.number and p.pinfunction]
+    return bool(named) and all(len(f) > len(n) + 1 and f.endswith("_" + n) for n, f in named)
+
+
+def plain_pin_name(pinfunction: str, number: str) -> str:
+    """``pinfunction`` without KiCad 10's ``_<pad number>`` (:func:`numbered_pin_names`
+    says where a board carries it): ``TS_11`` on pad 11 is ``TS``, ``Pin_1_1`` on
+    pad 1 is ``Pin_1``; a name without its pad's number is returned as it is."""
+    suffix = "_" + number
+    if number and len(pinfunction) > len(suffix) and pinfunction.endswith(suffix):
+        return pinfunction[:-len(suffix)]
+    return pinfunction
+
+
 def pin_name_conflicts(board: Board, ignore=NO_FUNCTION_NAMES):
     """Every footprint pin name that two or more different nets share.
 
@@ -678,6 +726,79 @@ def width_for_rise_mm(current_a: float, temp_rise: float, copper_oz: float, oute
     k = K_EXTERNAL if outer else K_INTERNAL
     area_mil2 = (abs(current_a) / (k * temp_rise ** EXP_DT)) ** (1.0 / EXP_AREA)
     return area_mil2 / (copper_oz * MIL_PER_OZ) * MM_PER_MIL
+
+
+# --------------------------------------------------------------------------- #
+# A value as a verdict reports it
+# --------------------------------------------------------------------------- #
+
+#: The most decimals :func:`toward_fail` keeps before it gives the value itself,
+#: and the floor below which :func:`round_toward` takes a difference for float
+#: noise: a nanometre of clearance, a billionth of a ratio. Past that a limit is
+#: finer than any number this pack computes. Rejected: no bound (a limit a float
+#: holds inexactly, 10.05, never meets its own rounded value, and the loop would
+#: not end); no noise floor (a clearance OpenCascade computes as
+#: 1.3499999999999999 mm would be reported 1.349, a micrometre under a figure
+#: its own geometry gives as 1.35).
+REPORT_PLACES_MAX = 9
+
+
+def holds(value: float, comparator: str, limit: float) -> bool:
+    """``value comparator limit`` for the four comparators a verdict states."""
+    return {"<=": value <= limit, "<": value < limit,
+            ">=": value >= limit, ">": value > limit}[comparator]
+
+
+def toward_fail(value: float, comparator: str, limit: float, places: int) -> float:
+    """``value`` as a verdict reports it: rounded to ``places`` decimals toward the
+    side ``comparator limit`` fails on, up for an at-most limit (a rise, a ratio)
+    and down for an at-least one (a headroom, a clearance). A gate decides on
+    ``value`` itself, never on this figure.
+
+    The figure is never on the passing side of the value, so a fail reports a
+    figure its limit rejects. A pass whose rounded figure would cross the limit
+    (a limit finer than ``places``: 10.05 against a value of 10.03, read at one
+    decimal) keeps more decimals, up to :data:`REPORT_PLACES_MAX`, then reports
+    the value itself: the spine compares the figure with the claim's acceptance
+    condition, and a pass must not report a figure that condition rejects.
+    Rounded in decimal from the float's shortest form (``repr``), so 0.3 is
+    0.3 and not 0.4.
+
+    What slipped through (holdout round 2): ``pcb.net_width`` rounded a rise to
+    the nearest 0.1 C and then compared, so a computed 10.0207 C read 10.0 and
+    passed ``<= 10 C``, and the claim read Checked on a value its own condition
+    rejects; the spine's cross-check, handed 10.0, could not see it. The other
+    gates here that rounded and then compared did the same at their own digit (a
+    charge headroom of -0.004 K read -0.0 and passed ``>= 0``). firmware-ci's
+    ``fw.image_fits`` reports flash use rounded up for the same reason.
+    *Rejected:* rounding to the nearest and deciding on the rounded figure (the
+    false pass); reporting the unrounded value (a line of sixteen digits nobody
+    reads, for a pass it changes nothing in)."""
+    up = comparator in ("<=", "<")
+    meets = holds(value, comparator, limit)
+    for p in range(places, REPORT_PLACES_MAX + 1):
+        shown = round_toward(value, p, up)
+        if holds(shown, comparator, limit) == meets:
+            return shown
+    return float(value)
+
+
+#: Room for every digit :func:`round_toward` keeps: Python's default context
+#: holds 28, and a large ratio with nine decimals needs more.
+_WIDE = Context(prec=60)
+
+
+def round_toward(value: float, places: int, up: bool) -> float:
+    """``value`` rounded to ``places`` decimals, up (toward +inf) or down, in
+    decimal from its shortest form, so 0.3 stays 0.3, after a difference under
+    :data:`REPORT_PLACES_MAX` decimals is taken for float noise. An infinite value
+    (a zero-width track's rise) is returned as it is: nothing to round."""
+    if not math.isfinite(value):
+        return float(value)
+    exact = Decimal(repr(float(value))).quantize(Decimal(1).scaleb(-REPORT_PLACES_MAX),
+                                                 rounding=ROUND_HALF_EVEN, context=_WIDE)
+    return float(exact.quantize(Decimal(1).scaleb(-places), context=_WIDE,
+                                rounding=ROUND_CEILING if up else ROUND_FLOOR))
 
 
 # --------------------------------------------------------------------------- #
