@@ -675,7 +675,12 @@ class Draft:
         cell was drafted with a rechargeable cell's keys alone (its charge
         voltage, current and window) and no open-circuit voltage, so a person
         drafting an alkaline cell was pointed at a charge voltage that
-        ``pcb.fault_current`` then refuses for a primary cell. *Rejected:* a
+        ``pcb.fault_current`` then refuses for a primary cell. And in review of
+        that fix, ``discharge_v_min`` was marked for a rechargeable cell alone,
+        while ``pcb.fault_current`` reads it for any chemistry that gives
+        ``internal_resistance_ohm``, which ``short_a``'s own words offer: a
+        primary cell stated as the draft says was refused for the key. It is
+        drafted for either kind, with the two rules that read it. *Rejected:* a
         draft per chemistry guessed from the board (no charger on a board says
         no more than "charged elsewhere"); the rechargeable keys alone with a
         note (the keys a person fills are the ones the draft holds)."""
@@ -696,8 +701,12 @@ class Draft:
                                          f"cell, from its datasheet (drop for a rechargeable "
                                          f"cell, unless its datasheet gives one above its "
                                          f"charge voltage)",
-                "discharge_v_min": FILL + f"{rechargeable}: its end (cut-off) voltage, V per "
-                                          f"cell, from its datasheet (drop for a primary cell)",
+                "discharge_v_min": FILL + "for either kind of cell: its end (cut-off) voltage, "
+                                          "V per cell, from its datasheet (pcb.discharge_cutoff "
+                                          "reads it for a li-ion, li-polymer, lifepo4 or lto "
+                                          "cell, and pcb.fault_current wherever "
+                                          "internal_resistance_ohm is given: drop it only for "
+                                          "another cell that keeps short_a)",
                 "charge_a_max": FILL + f"{rechargeable}: its maximum charge current, A per "
                                        f"cell, from its datasheet (drop for a primary cell)",
                 "charge_temp_c": FILL + f"{rechargeable}: [lo, hi], the widest window its "

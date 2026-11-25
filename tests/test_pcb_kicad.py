@@ -1187,6 +1187,41 @@ class APartCachedUnderItsLibNameKeepsItsNames(unittest.TestCase):
                 self.assertIn("U1 COM: GND on 2, VBUS on 5", verdict.detail)
 
 
+class APinNameIsReadWithoutKiCad10sPadNumber(unittest.TestCase):
+    """On a KiCad 10 board updated from its schematic each pad's name ends in its
+    own number (``COM_2``, ``COM_5``: ``_numbered``). With no schematic beside
+    the board, the gates that read pin names read them without it. What slipped
+    through (review of holdout round 3, raised in round 2): read whole, no two
+    pads shared a name, so pcb.pin_names could only pass, and the ESD array's
+    COM on two nets passed."""
+
+    def _run(self, gid: str, text: str, **params):
+        root = tempfile.mkdtemp(prefix="nopekit-pcb-numbered-")
+        self.addCleanup(shutil.rmtree, root, True)
+        board = _board_copy(root, text)
+        return _run(_registry(), gid, root, dict(_baseline(), pcb_board=board, **params))
+
+    def test_the_split_pair_fails_on_numbered_names(self):
+        tree = K.load_tree(BOARD)
+        K.child(_pad(tree, "U1", "5"), "net")[1:] = [_net_code(tree, "VBUS"), K.Q("VBUS")]
+        split = _numbered(K.dump(tree) + "\n")
+        self.assertIn('(pinfunction "COM_5")', split)
+        verdict = self._run("pcb.pin_names", split)
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("U1 COM: GND on 2, VBUS on 5", verdict.detail)
+        self.assertEqual(self._run("pcb.pin_names", _numbered(_board_text())).outcome, "pass")
+
+    def test_the_land_pairs_numbered_names_with_the_drawings_functions(self):
+        drawings = {"U1": os.path.join(ASSETS, "esda6v1bc6_land.json")}
+        plain = self._run("pcb.land_pattern", _by_name(_board_text()),
+                          pcb_land_drawings=drawings)
+        numbered = self._run("pcb.land_pattern", _numbered(_board_text()),
+                             pcb_land_drawings=drawings)
+        self.assertEqual(plain.outcome, "pass", plain.render())
+        self.assertEqual((numbered.outcome, numbered.measured, numbered.detail),
+                         (plain.outcome, plain.measured, plain.detail))
+
+
 @unittest.skipIf(os.name == "nt", "the stand-in kicad-cli is a #! script")
 class AnOpenPinOnAPadWithNoNetIsAgreement(unittest.TestCase):
     """KiCad 9.0.9 names every open schematic pin's net ``unconnected-(...)`` and
@@ -8698,6 +8733,50 @@ class AValueIsDecidedBeforeItIsRounded(_PowerCase):
         verdict = self.run_gate("pcb.charge_limits", records=tight)
         self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1.0001), verdict.render())
 
+    def test_an_ntc_edge_a_hair_past_the_cells_window_fails(self):
+        """The baseline's NTC edges, as computed: cold 5.340979 C, hot
+        43.470409 C. A cell whose window ends a hair inside either edge is
+        charged past it, so the rule fails. Each edge rounded to the nearest
+        0.0001 C read on the window's own bound (5.341, 43.4704), the headroom
+        read 0, and the rule passed; an edge is rounded toward the side that
+        protects less, and the headroom decided before it is rounded. (Review of
+        holdout round 3: no test had a value near either step.)"""
+        for window in ([5.341, 45.0], [0.0, 43.4704]):
+            with self.subTest(window=window):
+                def tight(p, window=window):
+                    p["pcb_batteries"]["main"]["cell"]["charge_temp_c"] = window
+                verdict = self.run_gate("pcb.charge_temperature", records=tight)
+                self.assertEqual((verdict.outcome, verdict.measured), ("fail", -0.01),
+                                 verdict.render())
+        def roomy(p):
+            p["pcb_batteries"]["main"]["cell"]["charge_temp_c"] = [5.3409, 43.4705]
+        verdict = self.run_gate("pcb.charge_temperature", records=roomy)
+        self.assertEqual((verdict.outcome, verdict.measured), ("pass", 0.0), verdict.render())
+
+    @unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
+    def test_a_fit_gap_a_hair_under_its_limit_fails(self):
+        """Two baseline boards side by side, their bodies 0.4996 mm apart, under
+        a claim of >= 0.5 mm: the gap rounded to the nearest micrometre read 0.5
+        and passed. It is decided as measured and reported rounded down."""
+        out = tempfile.mkdtemp(prefix="nopekit-fit-hair-")
+        self.addCleanup(shutil.rmtree, out, True)
+        box = _enclosure_step(os.path.join(out, "box.step"), "shell",
+                              (-10.0, -30.0, 0.0), (80.0, 10.0, 30.0))
+        base = {k: v for k, v in _baseline().items()
+                if k not in ("pcb_enclosure_step", "pcb_board_placement",
+                             "pcb_enclosure_bodiless")}
+
+        def fit(x):
+            return {"board": _baseline()["pcb_board"], "enclosure_step": box,
+                    "placement": {"x": x, "y": 0.0, "z": 4.0}}
+        params = dict(base, pcb_enclosure_fits={"left": fit(0.0), "right": fit(30.4996)})
+        verdict = gates_mod.run_gate(*self.registry.get("pcb.enclosure_fit"),
+                                     _fit_ctx(tempfile.mkdtemp(dir=out), params,
+                                              _fit_claim(0.5)))
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 0.499), verdict.render())
+        self.assertIn("nearest left:board is 0.499 mm from board right vs >= 0.5 mm",
+                      verdict.detail)
+
 
 def _stale_board(connect: str = "yes") -> str:
     """The baseline with a GND pour on F.Cu whose stored fill is its whole
@@ -8726,17 +8805,25 @@ def _stale_board(connect: str = "yes") -> str:
 #: ``stored.json`` for the board as given and ``refilled.json`` for one this
 #: stand-in or the stand-in refill marked, saves a refill with
 #: ``--refill-zones --save-board`` (KiCad 10's), and logs every call and the
-#: project file beside the board it refilled.
+#: project file beside the board it refilled. A file ``sleep_save`` or
+#: ``sleep_refilled`` beside it holds the seconds its refill, or its run on a
+#: refilled board, sleeps first; ``exit_refilled`` the code its run on a refilled
+#: board exits with, writing no report.
 _FILL_CLI = r"""
-import json, os, shutil, sys
+import json, os, shutil, sys, time
 here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 with open(os.path.join(here, "calls.log"), "a") as fh:
     fh.write(" ".join(args) + "\n")
+def flag(name):
+    path = os.path.join(here, name)
+    return open(path).read().strip() if os.path.isfile(path) else None
 if args[:1] == ["version"]:
     print(RELEASE); sys.exit(0)
 board = args[-1]
 if "--save-board" in args:
+    if flag("sleep_save"):
+        time.sleep(float(flag("sleep_save")))
     with open(board, "a") as fh:
         fh.write("\n#refilled\n")
     stem = os.path.splitext(board)[0]
@@ -8746,6 +8833,10 @@ if "--save-board" in args:
     sys.exit(0)
 with open(board) as fh:
     marked = "#refilled" in fh.read()
+if marked and flag("sleep_refilled"):
+    time.sleep(float(flag("sleep_refilled")))
+if marked and flag("exit_refilled"):
+    print("Failed to load board", file=sys.stderr); sys.exit(int(flag("exit_refilled")))
 report = json.load(open(os.path.join(here, "refilled.json" if marked else "stored.json")))
 json.dump(report, open(args[args.index("-o") + 1], "w"))
 counted = [v for v in report["violations"] if not v.get("excluded")]
@@ -8767,6 +8858,18 @@ print(json.dumps({"zones": 1, "filled": True, "bare_holes": []}))
 #: The same stand-in where pcbnew does not import.
 _NO_PCBNEW = "import sys\nprint('ModuleNotFoundError: No module named pcbnew', file=sys.stderr)\n" \
              "sys.exit(1)\n"
+
+#: The same stand-in whose refill sleeps 30 s first, past a short pcb_drc_timeout_s.
+_SLOW_FILL_HELPER = _FILL_HELPER.replace("shutil.copyfile(", "import time; time.sleep(30)\n"
+                                         "shutil.copyfile(", 1)
+
+#: The same stand-in as a pcbnew newer than kicad-cli 9: it saves the copy in
+#: KiCad 10's board format, which kicad-cli 9.0.9 does not read.
+_NEWER_FILL_HELPER = _FILL_HELPER.replace(
+    'with open(sys.argv[2], "a") as fh:',
+    'import re\ntext = open(sys.argv[2]).read()\n'
+    'open(sys.argv[2], "w").write(re.sub(r"\\(version \\d+\\)", "(version 20260206)", '
+    'text, count=1))\nwith open(sys.argv[2], "a") as fh:', 1)
 
 ZONE_ID = "5ea1f111-0000-4000-8000-000000000001"
 
@@ -8872,6 +8975,141 @@ class AStoredFillIsJudgedBesideKiCadsRefill(_StandIn):
         self.assertEqual(verdict.outcome, "error", verdict.render())
         self.assertIn("the zone refill (KiCad's pcbnew, in a child) failed", verdict.error)
 
+    def flag(self, name: str, text: str) -> None:
+        with open(os.path.join(self.bin, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def refill_skips(self, release: str, why: str, helper: str = _FILL_HELPER,
+                     flag: tuple = (), gid: str = "pcb.drc") -> None:
+        """A skip on the refill side keeps the stored run's finding: it fails,
+        and the line says the refill was not judged, and why; with no stored
+        finding the skip stands."""
+        for stored in ([_zone_item("clearance", PAD)], []):
+            with self.subTest(release=release, why=why, gid=gid, stored=len(stored)):
+                if flag:
+                    self.flag(*flag)
+                self.cli(release, stored, [], helper=helper)
+                verdict = self.gate(gid, pcb_drc_timeout_s=3)
+                if stored:
+                    self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1),
+                                     verdict.render())
+                    self.assertIn(f"; the stored zone fill only: the refill side skipped "
+                                  f"({why}), so what a refill pours is not judged",
+                                  verdict.detail)
+                else:
+                    self.assertEqual(verdict.outcome, "skipped", verdict.render())
+                    self.assertIn(why, verdict.skip_reason)
+
+    def test_a_refill_past_its_time_keeps_the_stored_fail(self):
+        """What slipped through (review of holdout round 3): a refill, or the
+        run on the refilled copy, past pcb_drc_timeout_s read Skipped, "nothing
+        was shown", where the stored run alone had failed."""
+        self.refill_skips("9.0.9", "the zone refill exceeded 3 s (pcb_drc_timeout_s) and "
+                                   "was killed", helper=_SLOW_FILL_HELPER)
+        os.remove(os.path.join(self.bin, "calls.log"))
+        self.refill_skips("10.0.8", "kicad-cli's zone refill exceeded 3 s (pcb_drc_timeout_s) "
+                                    "and was killed", flag=("sleep_save", "30"))
+        os.remove(os.path.join(self.bin, "sleep_save"))
+        for release in ("9.0.9", "10.0.8"):
+            self.refill_skips(release, "kicad-cli pcb drc exceeded 3 s (pcb_drc_timeout_s) and "
+                                       "was killed", flag=("sleep_refilled", "30"))
+
+    def test_a_refilled_copy_in_a_newer_format_keeps_the_stored_fail(self):
+        """A pcbnew newer than kicad-cli 9 saves the refilled copy in a format
+        kicad-cli 9 does not load: a tool limit, which skips, beside the stored
+        run's fail, never in its place."""
+        why = ("kicad-cli 9.0.9 reads board formats through 20241229; this board is format "
+               "20260206, saved by a newer KiCad: a tool limit, not a defect "
+               "(references/installing.md)")
+        for gid in ("pcb.drc", "pcb.fab_rules"):
+            self.refill_skips("9.0.9", why, helper=_NEWER_FILL_HELPER,
+                              flag=("exit_refilled", "3"), gid=gid)
+
+    def test_a_kicad_cli_that_does_not_launch_for_the_refill_keeps_the_stored_fail(self):
+        import subprocess
+        import types
+        fake = types.ModuleType("subprocess")
+        fake.__dict__.update(subprocess.__dict__)
+
+        def run(argv, *args, **kwargs):
+            if "--refill-zones" in argv or any(str(a).endswith("drc_refilled.json")
+                                               for a in argv):
+                raise FileNotFoundError(2, "No such file or directory", "kicad-cli")
+            return subprocess.run(argv, *args, **kwargs)
+        fake.run = run
+        globs = self.registry.get("pcb.drc")[1].__globals__
+        with mock.patch.dict(globs, {"subprocess": fake}):
+            self.refill_skips("10.0.8", "could not launch kicad-cli for the zone refill: "
+                                        "[Errno 2] No such file or directory: 'kicad-cli'")
+            self.refill_skips("9.0.9", "could not launch kicad-cli: [Errno 2] No such file or "
+                                       "directory: 'kicad-cli'")
+
+    #: Three random ids KiCad gave one item with no id at three loads.
+    LOADS = tuple(f"{n}{n}{n}{n}0000-0000-4000-8000-000000000000" for n in "abc")
+    LOOSE = ("name an item KiCad gives a new id at each load (%s): matched by kind and "
+             "their other items alone, so each count apart is the least it can be")
+
+    def test_a_pad_with_no_id_is_matched_by_its_other_items(self):
+        """On a board whose pads have no id, KiCad names a pad by a new random
+        id at each load, and the refilled copy by the one it saved: matched by
+        every id, one finding read as two, one "only on the stored zone fill"
+        and one "only after KiCad's refill" (review of holdout round 3, measured
+        under kicad-cli 9.0.9 with pcbnew 9.0.9). It is matched by its type and
+        its other items' ids, and said apart."""
+        tree = K.parse(_stale_board())
+        for fp in K.children(tree, "footprint"):
+            for pad in K.children(fp, "pad"):
+                pad[:] = [x for x in pad if K.head(x) != "uuid"]
+        self.board = _board_copy(self.root, K.dump(tree) + "\n", stem="noid")
+        one, two, three = self.LOADS
+        for release in ("10.0.8", "9.0.9"):
+            with self.subTest(release=release):
+                self.cli(release, [_zone_item("holes_co_located", one),
+                                   _zone_item("clearance", SILK_REF)],
+                         [_zone_item("holes_co_located", two)])
+                verdict = self.gate("pcb.drc")
+                self.assertEqual((verdict.outcome, verdict.measured), ("fail", 2),
+                                 verdict.render())
+                self.assertIn("; 1 of 2 " + self.LOOSE % "1x holes_co_located", verdict.detail)
+                self.assertNotIn("only after KiCad's refill", verdict.detail)
+                # J1's reference keeps its id: a finding on it is matched by every id.
+                self.assertIn("1 of 2 only on the stored zone fill (1x clearance)",
+                              verdict.detail)
+        # Two in the stored run, one in the refilled: at least one is the stored
+        # fill's alone, and two are counted, never three.
+        self.cli("9.0.9", [_zone_item("holes_co_located", one),
+                           _zone_item("holes_co_located", three)],
+                 [_zone_item("holes_co_located", two)])
+        verdict = self.gate("pcb.drc")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 2), verdict.render())
+        self.assertIn("1 of 2 only on the stored zone fill (1x holes_co_located)",
+                      verdict.detail)
+        self.assertIn("2 of 2 " + self.LOOSE % "2x holes_co_located", verdict.detail)
+        self.assertNotIn("only after KiCad's refill", verdict.detail)
+
+    def test_a_teardrop_with_no_id_keeps_the_refills_remedy(self):
+        """KiCad 10.0.8 writes a teardrop zone with no id (measured on a holdout
+        board: each of its 20 stale teardrop findings named an id the file does
+        not hold). A teardrop only the stored fill shows is still the stored
+        fill's, with the remedy; one both show counts once."""
+        def tear(load: str) -> dict:
+            return {"type": "clearance", "severity": "error",
+                    "description": "clearance (actual 0.0000 mm)",
+                    "items": [{"description": "Pad 1 [DP] of J1", "uuid": PAD},
+                              {"description": "Teardrop [GND] on F.Cu", "uuid": load}]}
+        one, two, _three = self.LOADS
+        self.cli("10.0.8", [tear(one)], [])
+        verdict = self.gate("pcb.drc")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("; 1 of 1 only on the stored zone fill (1x clearance), which KiCad's "
+                      "refill clears: refill the zones and save the board", verdict.detail)
+        self.assertIn("; 1 of 1 " + self.LOOSE % "1x clearance", verdict.detail)
+        self.cli("10.0.8", [tear(one)], [tear(two)])
+        verdict = self.gate("pcb.drc")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("; the zones judged as stored and as refilled (kicad-cli 10.0.8); 1 of 1 "
+                      + self.LOOSE % "1x clearance", verdict.detail)
+
     def test_a_board_with_no_zone_runs_once(self):
         self.board = _board_copy(self.root, _board_text(), stem="flat")
         self.cli("10.0.8", [], [])
@@ -8923,6 +9161,40 @@ class KiCadRefillsAStaleFill(unittest.TestCase):
             clean = _board_copy(self.root, fh.read(), stem="c")
         verdict = _run(self.registry, "pcb.drc", self.root, dict(_baseline(), pcb_board=clean))
         self.assertEqual(verdict.outcome, "pass", verdict.render())
+
+    def test_a_pad_with_no_id_is_counted_once(self):
+        """A GND pour never filled and a via on J2's pad 1, on the baseline with
+        its pad ids and with none: the same findings, counted once each. (Review
+        of holdout round 3, measured under kicad-cli 9.0.9 with pcbnew 9.0.9:
+        3 with pad ids, 5 without, 2 of them "only on the stored zone fill" and
+        2 "only after KiCad's refill", since KiCad gives an id-less pad a new id
+        at each load and the refilled copy the one it saved.)"""
+        release = _kicad_cli_release()
+        if release.startswith("9.") and importlib.util.find_spec("pcbnew") is None:
+            self.skipTest("kicad-cli 9 refills through pcbnew, which does not import here")
+        got = {}
+        for ids in (True, False):
+            tree = K.parse(_board_text() if ids else _pad_ids_rewritten(lambda _u: ""))
+            box = [["xy", "2", "5"], ["xy", "8", "5"], ["xy", "8", "14"], ["xy", "2", "14"]]
+            tree.append(["zone", ["net", _net_code(tree, "GND")], ["net_name", K.Q("GND")],
+                         ["layer", K.Q("F.Cu")],
+                         ["uuid", K.Q("5ea1f111-0000-4000-8000-000000000002")],
+                         ["hatch", "edge", "0.5"], ["connect_pads", "yes", ["clearance", "0.5"]],
+                         ["min_thickness", "0.25"], ["filled_areas_thickness", "no"],
+                         ["fill", "yes", ["thermal_gap", "0.5"],
+                          ["thermal_bridge_width", "0.5"]],
+                         ["polygon", ["pts", *box]]])
+            _via((26, 4), net="DP")(tree)
+            board = _board_copy(self.root, K.dump(tree) + "\n", stem="ids" if ids else "noids")
+            got[ids] = _run(self.registry, "pcb.drc", self.root,
+                            dict(_baseline(), pcb_board=board))
+        self.assertEqual(got[True].outcome, "fail", got[True].render())
+        self.assertEqual((got[False].outcome, got[False].measured),
+                         (got[True].outcome, got[True].measured), got[False].render())
+        self.assertNotIn("only on the stored zone fill", got[False].detail)
+        self.assertNotIn("only after KiCad's refill", got[False].detail)
+        self.assertIn("name an item KiCad gives a new id at each load (2x holes_co_located): "
+                      "matched by kind and their other items alone", got[False].detail)
 
 
 REFILL_DIR = "nopekit-refill"
@@ -9011,12 +9283,37 @@ class ADraftReadsKiCad10sPinNames(_PowerCase):
         cell = records["pcb_batteries"]["bt1"]["cell"]
         self.assertIn("open_circuit_v", cell)
         self.assertTrue(cell["open_circuit_v"].startswith("FILL: for a primary cell"))
-        for key in ("upper_charge_v", "discharge_v_min", "charge_a_max", "charge_temp_c"):
+        for key in ("upper_charge_v", "charge_a_max", "charge_temp_c"):
             with self.subTest(key=key):
                 self.assertTrue(cell[key].startswith("FILL: for a rechargeable cell"))
                 self.assertIn("(drop for a primary cell)", cell[key])
+        # The fault rule reads it for either kind (review of holdout round 3).
+        self.assertTrue(cell["discharge_v_min"].startswith("FILL: for either kind of cell"))
         self.assertIn("then drop each cell key marked for the other kind",
                       records["pcb_batteries"]["bt1"]["chemistry"])
+
+    def test_a_primary_cell_stated_as_the_draft_says_is_judged(self):
+        """An alkaline cell stated as the draft says: each key marked for a
+        rechargeable cell dropped, and short_a's other road taken
+        (internal_resistance_ohm). pcb.fault_current judges it. What slipped
+        through (review of holdout round 3): discharge_v_min was marked for a
+        rechargeable cell alone, and the fault rule, which reads it beside an
+        internal resistance for any chemistry, refused the cell for it."""
+        records, _s = self._drafted(self.power_text(), "primary")
+        drafted = records["pcb_batteries"]["bt1"]["cell"]
+        keys = [k for k, words in drafted.items()
+                if not words.startswith("FILL: for a rechargeable cell")]
+        self.assertIn("internal_resistance_ohm", drafted["short_a"])
+        keys = [k for k in keys if k != "short_a"] + ["internal_resistance_ohm"]
+        numbers = {"open_circuit_v": 1.65, "discharge_v_min": 0.8,
+                   "internal_resistance_ohm": [0.15, 0.3]}
+
+        def alkaline(p):
+            p["pcb_batteries"]["main"]["chemistry"] = "alkaline"
+            p["pcb_batteries"]["main"]["cell"] = {k: numbers[k] for k in keys}
+            p["pcb_conductors"]["wire_out"]["protected_by"] = []
+        v = self.run_gate("pcb.fault_current", records=alkaline)
+        self.assertEqual(v.outcome, "pass", v.render())
 
 
 class AFootprintWithNoReferenceIsNamed(unittest.TestCase):

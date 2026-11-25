@@ -1059,6 +1059,33 @@ def footprints_by_id(tree: list) -> dict[str, list]:
     return out
 
 
+def kept_ids(tree: list) -> set[str]:
+    """Every id a load of the board gives back as it is written: :func:`kiid` of
+    each ``(uuid ...)`` (KiCad 8 and later) or ``(tstamp ...)`` (KiCad 6 and 7)
+    the file holds exactly once, on any item, a footprint's own items among them.
+    An item with no id, a bad id or an id the file holds twice gets a fresh random
+    one at each load (:func:`kiid`, :func:`pad_ids`), so two runs on the same
+    board name it by two ids, and a copy KiCad saved names it by a third; KiCad
+    10.0.8 writes every teardrop zone with no id (measured on a holdout board).
+    What slipped through (review of holdout round 3): two runs' findings were
+    matched by their items' ids as if a reload kept every one, and on a board
+    whose pads had no id each finding that named a pad was counted twice, once
+    as the stored fill's and once as the refill's. *Rejected:* :func:`pad_ids`
+    alone (a track, a via, a teardrop or a text with no id, or two footprints
+    copied with one id, is the same case)."""
+    seen: Counter = Counter()
+    todo = [tree]
+    while todo:
+        node = todo.pop()
+        if head(node) in ("uuid", "tstamp") and len(node) == 2 and not isinstance(node[1], list):
+            found = kiid(node[1])
+            if found:
+                seen[found] += 1
+            continue
+        todo.extend(x for x in node[1:] if isinstance(x, list))
+    return {i for i, n in seen.items() if n == 1}
+
+
 #: The last character of a reference KiCad writes for a footprint nobody
 #: annotated: ``REF**`` (a footprint placed from the library), ``G***`` (a logo
 #: from KiCad's image converter), ``U?`` (KiCad 5's unannotated symbol).

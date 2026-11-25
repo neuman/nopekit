@@ -163,9 +163,11 @@ every rule here refuses, since a source must be a string. So the draft passes
 nothing until a person states each value and writes each source. A cell is
 drafted before its chemistry is known: each `cell` key says whether a
 rechargeable or a primary cell takes it (`open_circuit_v` for a primary cell,
-the charge voltage, current and window for a rechargeable one), and you drop the
-other kind's. PACK.md ("The proposer: `pcb.battery_record_draft`") says what it
-finds, what it may draft wrong and what it cannot see.
+the charge voltage, current and window for a rechargeable one, `discharge_v_min`
+for either, as the fault current below reads it beside `internal_resistance_ohm`
+for any chemistry), and you drop the other kind's. PACK.md ("The proposer:
+`pcb.battery_record_draft`") says what it finds, what it may draft wrong and
+what it cannot see.
 
 **A value is decided before it is rounded.** Each rule decides on the ratio,
 the headroom or the temperature it computed, and reports it rounded toward the

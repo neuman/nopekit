@@ -24,7 +24,7 @@ has heard its radio.
 | Gate | Tier | Basis | Settles |
 |---|---|---|---|
 | `pcb.board_readable` | 0 | model-only | the board is a KiCad 6-10 file whose every track names a defined net (the guard); nets read by code and by name; a newer file is skipped, never failed |
-| `pcb.pin_names` | 0 | sourced | pins the library gives one name (a TVS array's two `COM`, a part's several `GND`) carry one net, except the ends of a series element stated per ref (`pcb_pin_names_series`); the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` |
+| `pcb.pin_names` | 0 | sourced | pins the library gives one name (a TVS array's two `COM`, a part's several `GND`) carry one net, except the ends of a series element stated per ref (`pcb_pin_names_series`); the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` (on a KiCad 10 board, read without the pad number it appends: `COM_5` is `COM`) |
 | `pcb.land_pattern` | 0 | model-only | each footprint `pcb_land_drawings` names fits its vendor's drawing: pads paired by pin function (anchored on the pads of a function of their own when the pairings are too many to try), one rigid fit with no mirror, every centre within half its smaller pad's smaller side |
 | `pcb.net_width` | 0 | sourced | every track of each named net stays inside its temperature-rise limit, IPC-2221, at the net's current, or at a route's current on the tracks of its route between two pads and the rest's elsewhere; decided on the computed rise, reported rounded up to 0.1 C; the detail names the hottest stretch |
 | `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing a person did not exclude in KiCad, at every severity by default, on the board as stored and as KiCad refills its zones, each finding once (the line says apart what only the stored fill shows), and every custom rule in the board's `.kicad_dru`, and every property its conditions read, is shown to select something; the line names the errors first |
@@ -133,7 +133,11 @@ refills first. So on a board with a zone, `pcb.drc` and `pcb.fab_rules` run
 KiCad's DRC on the board as stored and again on a copy KiCad refilled under the
 project's own `.kicad_pro` and `.kicad_dru` (never under the fab's rules
 `pcb.fab_rules` writes into its stage: they would pour to the fab's clearance),
-and count each finding once over both, by its type and the ids of its items.
+and count each finding once over both, by its type and the ids of its items
+that a reload keeps. A finding that names an item KiCad gives a new id at each
+load (no id, a bad one or one held twice; every teardrop KiCad 10 writes) is
+matched by its type and its other items' ids, counted as often as the run that
+lists it more, and said apart: a count said apart is then the least it can be.
 The line says apart how many only the stored fill shows, "k of n only on the
 stored zone fill (...), which KiCad's refill clears: refill the zones and save
 the board, since a fab plots the stored fill", and how many only the refill
@@ -145,7 +149,11 @@ KiCad's "Fill All Zones" (B) and a save. kicad-cli 10 refills its copy itself
 (`pcb drc --refill-zones --save-board`); under kicad-cli 9 the copy is refilled
 by `pcbnew` in a child process, as the keep-out's is. Where neither can (kicad-cli
 9 and no `pcbnew` in nopekit's Python), the stored fill alone is judged and the
-line says so. A board with no zone runs once, as before.
+line says so. A refill side that skips (past `pcb_drc_timeout_s`, a kicad-cli that
+does not launch, a refilled copy in a format the kicad-cli on PATH does not read)
+keeps the stored run's findings, which fail, and the line says why the refill was
+not judged; the skip stands only where the stored run finds nothing. A board with
+no zone runs once, as before.
 
 **The antenna's keep-out, on every copper layer.** `pcb.antenna_keepout` finds
 each radio module by itself: every footprint from KiCad's `RF_Module` library on
@@ -296,10 +304,15 @@ sits is the cell's return, and drives nothing. On a KiCad 10 board updated from
 its schematic, every pad's name ends in its own number (`TS_11`, `BAT_13`): the
 draft reads the name without it, and only there (`_kicad.numbered_pin_names`), so a
 KiCad 9 connector's `Pin_1` stays a name. (What slipped through, holdout round 2:
-no pin table matched on two KiCad 10 boards, and no charger was drafted.) A
+no pin table matched on two KiCad 10 boards, and no charger was drafted.)
+`pcb.pin_names` and `pcb.land_pattern` read a pad's name the same way where no
+schematic names the part (review of holdout round 3: read whole, `COM_2` and
+`COM_5` were two names, and a TVS array's COM on two nets passed). A
 cell is drafted before its chemistry is known: each `cell` key says which kind
 of cell takes it, a rechargeable cell's charge voltage, current and window and a
-primary cell's `open_circuit_v`, and you drop the other kind's.
+primary cell's `open_circuit_v`, and you drop the other kind's. `discharge_v_min`
+is either kind's: `pcb.fault_current` reads it beside `internal_resistance_ohm`
+for any chemistry.
 
 **It never fills a datasheet number, a flag or a choice that is yours** (a
 chemistry, a cell count, what kind of element a part is, a role, a mating's far

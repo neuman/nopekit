@@ -144,10 +144,31 @@ as stored, and on a copy refilled under the project's own `.kicad_pro` and
 - neither (kicad-cli 9 and no `pcbnew` in nopekit's Python): no refill; the
   stored fill alone is judged, and the line says so.
 
+A refill side that skips keeps the stored run's findings: the refill or its run
+past `pcb_drc_timeout_s`, a kicad-cli that does not launch, or a refilled copy
+saved in a format the kicad-cli on PATH does not read (a `pcbnew` newer than
+kicad-cli 9). They fail, and the line says "the stored zone fill only: the
+refill side skipped (why), so what a refill pours is not judged". The skip
+stands only where the stored run counts nothing; an error stands always. (What
+slipped through, in review of holdout round 3: the skip took the gate's place,
+so a short the stored run counted read Skipped, "nothing was shown".)
+
 A finding is the same in both runs when its type and the ids of its items are:
-a refill keeps every id (measured: the 12 findings a refill left on a holdout
-board kept theirs), and the words move (the actual gap). Each finding counts
-once over both. The line says apart how many only the stored fill shows ("k of
+a refill keeps every id the file holds once (measured: the 12 findings a refill
+left on a holdout board kept theirs), and the words move (the actual gap). An
+item with no id, a bad one or one the file holds twice takes a new random id at
+each load, and the refilled copy keeps the one KiCad saved; KiCad 10.0.8 writes
+every teardrop with no id. A finding that names one is matched by its type and
+its other items' ids alone (loosely), counted as often as the run that lists it
+more, and said apart ("k of n name an item KiCad gives a new id at each load"):
+the extra findings one run lists are at least that many the other does not
+show, so a count said apart is the least it can be, never more. (What slipped
+through, in review of holdout round 3: on the baseline with no pad ids, an
+unfilled pour and a via on a pad, kicad-cli 9.0.9 with pcbnew 9.0.9, the 3
+findings read 5, 2 of them "only on the stored zone fill" and 2 "only after
+KiCad's refill". Rejected: such a finding never called either copy's own, which
+took the remedy from the 20 stale teardrops below.) Each finding counts once
+over both. The line says apart how many only the stored fill shows ("k of
 n only on the stored zone fill (18x clearance, 2x hole_clearance), which KiCad's
 refill clears: refill the zones and save the board, since a fab plots the
 stored fill") and how many only the refill shows (the stored fill is out of
@@ -155,7 +176,7 @@ date there). Measured:
 
 | Board | stored | refilled | counted |
 |---|---|---|---|
-| a KiCad 10 holdout board, kicad-cli 10.0.8 | 32 (21 errors) | 12 (1 error) | 32: 20 only on the stored fill, every one a teardrop |
+| a KiCad 10 holdout board, kicad-cli 10.0.8 | 32, 2 of them excluded in the project: 30 counted (21 errors) | 12, the same 2 excluded: 10 counted (1 error) | 30: 20 only on the stored fill, every one a teardrop KiCad 10 writes with no id, so matched loosely |
 | the baseline with a GND fill stored over three pads and two tracks (tests/test_pcb_kicad.py), 9.0.9 with pcbnew 9.0.9, and 10.0.8 | 9 | 0 | 9, all only on the stored fill |
 | the same with a thermal-relief pad connection | 9 | 1 (`starved_thermal`) | 10: 1 only after the refill |
 

@@ -225,10 +225,23 @@ def _pad_names(ctx: GateContext, board) -> tuple[dict[str, dict[str, str]], set[
     as ``lib_name`` ("<symbol>_1"). A pad the symbol gives no name keeps its
     pinfunction: a name is never erased. (What slipped through, in review: looked
     up by ``lib_id`` alone, such a part read no names at all, and its shorted pin
-    pair, which its pads' pinfunction had shown, passed.) Raises
+    pair, which its pads' pinfunction had shown, passed.) On a board that carries
+    KiCad 10's names, each ending in its pad's number (``COM_2``, ``COM_5``:
+    :func:`_kicad.numbered_pin_names`), a pad's pinfunction is read without that
+    number (:func:`_kicad.plain_pin_name`), as the symbol names the pin. (What
+    slipped through, review of holdout round 3: read whole, no two pads of a part
+    shared a name on such a board with no schematic beside it, so
+    ``pcb.pin_names`` could only pass, a TVS array's COM on two nets among it, and
+    ``pcb.land_pattern`` paired no pad with a drawing's ``COM``.) Raises
     :class:`_kicad.KicadFormatError` or FileNotFoundError on a schematic or sheet
     that cannot be read."""
-    names = {fp.ref: {p.number: p.pinfunction for p in fp.pads} for fp in board.footprints}
+    try:
+        version = int(board.version)
+    except ValueError:
+        version = None
+    numbered = K.numbered_pin_names(version, board)
+    names = {fp.ref: {p.number: K.plain_pin_name(p.pinfunction, p.number) if numbered
+                      else p.pinfunction for p in fp.pads} for fp in board.footprints}
     sch = _schematic_path(ctx)
     if sch is None or not os.path.isfile(sch):
         return names, set()
@@ -1910,6 +1923,24 @@ def _waived_note(waived: list) -> str:
 #: keep-out's). Where neither can (kicad-cli 9 and no ``pcbnew`` in nopekit's
 #: Python), the stored fill alone is judged and the line says so.
 #:
+#: **A refill side that skips** (the refill or its DRC run past
+#: ``pcb_drc_timeout_s``, a kicad-cli that does not launch, a refilled copy saved
+#: in a format the kicad-cli on PATH does not read) keeps the stored run's
+#: findings: they fail, and the line says that the refill was not judged and why
+#: (:func:`_stored_if_skipped`). The skip stands only where the stored run counts
+#: nothing; an error stands always, as it is louder. What slipped through (review
+#: of holdout round 3): the skip took the gate's place, so a short the stored run
+#: had counted read Skipped, "nothing was shown", on a board whose doubled run
+#: passed the timeout, and on every zoned board where pcbnew is newer than
+#: kicad-cli 9. A skip is said beside a fail, never in its place (the power
+#: rules', ``pcb.enclosure_fit``'s).
+#:
+#: **Matching** (:func:`_finding_key`, :func:`_over_both`): only by the ids a
+#: reload keeps (:func:`_kicad.kept_ids`). A finding that names an item with no
+#: kept id (a pad with none; every teardrop KiCad 10 writes) is matched by its
+#: type and its other items' ids, counted as often as the run that lists it more,
+#: and said apart: a count of either copy's own is then the least it can be.
+#:
 #: *Rejected:* the refilled copy alone (the stored fill a fab plots, a short among
 #: it, would pass); the stored copy alone (the first cut: a sound design with a
 #: stale fill read as clearance faults to fix one by one, and a pour moved under
@@ -1980,36 +2011,80 @@ def _refilled(ctx: GateContext, gid: str, path: str, stem: str, release: str):
     return out, f"pcbnew {pcb[0]}"
 
 
-def _finding_key(v: dict) -> tuple:
-    """A finding as both runs name it: its type and the ids of its items. A
-    refill keeps every id (measured, kicad-cli 10.0.8 and pcbnew 9.0.9: the 12
-    findings a refill left on a holdout board kept theirs); the words do not
+def _finding_key(v: dict, kept: set | None = None) -> tuple:
+    """A finding as both runs name it: its type and the ids of its items; with
+    ``kept`` (:func:`_kicad.kept_ids`), its type, the ids of its items a reload
+    keeps, and how many of its items have none. A refill keeps every id the file
+    holds once (measured, kicad-cli 10.0.8 and pcbnew 9.0.9: the 10 findings
+    both runs showed on a holdout board kept theirs); an item with no id, a bad
+    one or one held twice takes a new random id at each load and in the copy
+    KiCad saves. Measured: kicad-cli 9.0.9 with pcbnew 9.0.9, the baseline with
+    no pad ids and a via on a pad, two holes_co_located in each run, each pair
+    named by other pad ids; and KiCad 10.0.8 writes a teardrop zone with no id
+    at all (the holdout board: each of the 20 findings only its stored fill
+    showed named a teardrop by an id the file does not hold). The words do not
     stay (the actual gap moves)."""
-    return (str(v.get("type")), tuple(sorted(K.kiid(i.get("uuid")) for i in v.get("items", []))))
+    ids = [K.kiid(i.get("uuid")) or "" for i in v.get("items", [])]
+    if kept is None:
+        return (str(v.get("type")), tuple(sorted(ids)))
+    return (str(v.get("type")), tuple(sorted(i for i in ids if i in kept)),
+            sum(1 for i in ids if i not in kept))
 
 
-def _over_both(stored: list, refilled: list) -> tuple[list, list, list]:
+def _over_both(stored: list, refilled: list,
+               kept: set) -> tuple[list, list, list, list]:
     """``(each finding once over both runs, those only the stored fill shows,
-    those only the refill shows)``. A finding both show is the refill's; a key
-    the stored run lists more often than the refilled one counts its extra
-    findings as the stored fill's."""
-    left = Counter(_finding_key(v) for v in refilled)
+    those only the refill shows, those matched loosely)``, by
+    :func:`_finding_key` with ``kept``. A finding both show is the refill's; a
+    key the stored run lists more often than the refilled one counts its extra
+    findings as the stored fill's, and the other way round. A finding that names
+    an item with no kept id is matched by its type and its other items' ids
+    alone (loosely): each such key counts as often as the run that lists it
+    more, which is never more than the findings there are, and the extra ones a
+    run lists are at least that many findings the other run does not show, so a
+    count said apart is the least it can be, never more. *Rejected:* matching by
+    every id (on a board whose pads have no id, one via on a pad read as four
+    findings, two of them "only on the stored fill": review of holdout round 3);
+    counting such a finding apart and never as either copy's own (KiCad 10
+    writes every teardrop with no id, so the 20 stale teardrops on the holdout
+    board this split was made for lost the remedy, a refill and a save); leaving
+    the split out on a board with any such item (the same)."""
+    left = Counter(_finding_key(v, kept) for v in refilled)
     stored_only = []
     for v in stored:
-        k = _finding_key(v)
+        k = _finding_key(v, kept)
         if left[k]:
             left[k] -= 1
         else:
             stored_only.append(v)
-    seen = Counter(_finding_key(v) for v in stored)
+    seen = Counter(_finding_key(v, kept) for v in stored)
     refill_only = []
     for v in refilled:
-        k = _finding_key(v)
+        k = _finding_key(v, kept)
         if seen[k]:
             seen[k] -= 1
         else:
             refill_only.append(v)
-    return refilled + stored_only, stored_only, refill_only
+    both = refilled + stored_only
+    return both, stored_only, refill_only, [v for v in both if _finding_key(v, kept)[2]]
+
+
+def _stored_if_skipped(fill, stored: list):
+    """:func:`_refill_run`'s result, except that a skip on the refill side beside
+    a stored run that counted something (``stored``) reads as no refill, with
+    why: ``(None, how, [])``. The stored run's findings then fail on their own,
+    and the line says the refill was not judged (:data:`REFILL_DIR`)."""
+    if isinstance(fill, Verdict) and fill.skipped and stored:
+        why, tail = fill.skip_reason, ": nothing was shown"
+        why = why[:-len(tail)] if why.endswith(tail) else why
+        return None, f"the refill side skipped ({why})", []
+    return fill
+
+
+def _type_counts(found: list) -> str:
+    """``found`` counted by type, most first: ``18x clearance, 2x hole_clearance``."""
+    return ", ".join(f"{n}x {t}" for t, n in Counter(
+        str(v.get("type", "?")) for v in found).most_common())
 
 
 def _fill_note(total: int, stored_only: list, refill_only: list, how: str,
@@ -2022,16 +2097,26 @@ def _fill_note(total: int, stored_only: list, refill_only: list, how: str,
         return f"; the stored zone fill only: {how}, so what a refill pours is not judged"
     words = []
     if stored_only:
-        kinds = ", ".join(f"{n}x {t}" for t, n in Counter(
-            str(v.get("type", "?")) for v in stored_only).most_common())
-        words.append(f"{len(stored_only)} of {total} only on the stored zone fill ({kinds}), "
-                     f"which KiCad's refill clears: refill the zones and save the board, "
-                     f"since a fab plots the stored fill")
+        words.append(f"{len(stored_only)} of {total} only on the stored zone fill "
+                     f"({_type_counts(stored_only)}), which KiCad's refill clears: refill the "
+                     f"zones and save the board, since a fab plots the stored fill")
     if refill_only:
         words.append(f"{len(refill_only)} of {total} only after KiCad's refill: the stored "
                      f"fill is out of date there")
     return "; " + ("; ".join(words) if words else
                    f"the zones judged as stored and as refilled ({how})")
+
+
+def _loose_note(total: int, loose: list) -> str:
+    """The findings :func:`_over_both` matched loosely, said apart. Its own part
+    of the line, cut first: the kinds and the remedy are worth more. (In review,
+    measured: as one part with the fill's words it cut the holdout board's kinds
+    to "18x clearance (erro...".)"""
+    if not loose:
+        return ""
+    return (f"; {len(loose)} of {total} name an item KiCad gives a new id at each load "
+            f"({_type_counts(loose)}): matched by kind and their other items alone, so each "
+            f"count apart is the least it can be")
 
 
 def _refill_run(ctx: GateContext, gid: str, path: str, stem: str, stage: str,
@@ -2087,7 +2172,8 @@ def drc(ctx: GateContext) -> Verdict:
     (:func:`_counted`). An exit code that disagrees with the report is an error,
     never a pass (:func:`_disagree`). On a board with a zone, the board as stored
     and as KiCad refills it, each finding once over both, and the line says apart
-    what only the stored fill shows (:data:`REFILL_DIR`).
+    what only the stored fill shows (:data:`REFILL_DIR`); a refill side that skips
+    leaves the stored run's findings counted (:func:`_stored_if_skipped`).
 
     ``pcb_drc_severity`` narrows it (``error``, ``warning``); the default is every
     severity, because a check at error severity cannot see a warning and the fab
@@ -2122,17 +2208,20 @@ def drc(ctx: GateContext) -> Verdict:
     # The zones as stored and as KiCad refills them, each finding once over
     # both (:data:`REFILL_DIR`).
     stem, stage, argv = where[0]
-    fill = _refill_run(ctx, gid, path, stem, stage, argv, doc)
+    fill = _stored_if_skipped(_refill_run(ctx, gid, path, stem, stage, argv, doc), counted)
     if isinstance(fill, Verdict):
         return fill
     refilled, how, fill_ev = fill
     ev += fill_ev
     stored_only: list = []
     refill_only: list = []
+    loose: list = []
     waived = _waived(found)
     if refilled is not None:
-        counted, stored_only, refill_only = _over_both(counted, _counted(_found(refilled)))
-        waived = _over_both(waived, _waived(_found(refilled)))[0]
+        kept = K.kept_ids(ctx.load_file(path, loader=K.load_tree))
+        counted, stored_only, refill_only, loose = _over_both(
+            counted, _counted(_found(refilled)), kept)
+        waived = _over_both(waived, _waived(_found(refilled)), kept)[0]
     dead: list[str] = []
     note = ""
     if os.path.isfile(_stem(path) + ".kicad_dru"):
@@ -2147,7 +2236,7 @@ def drc(ctx: GateContext) -> Verdict:
                    else ["nothing found"])
     detail = _line(f"KiCad DRC at {severity} severities: ", *found_parts,
                    (_fill_note(len(counted), stored_only, refill_only, how,
-                               refilled is not None), 5),
+                               refilled is not None), 5), (_loose_note(len(counted), loose), 0),
                    (_waived_note(waived), 1), (note, 3, "; ", ""),
                    (_libraries_note(libraries), 4), f"; {_release(ctx, doc)}")
     # A dead rule beside a clean run is an error: the run cannot show what the
@@ -2809,28 +2898,33 @@ def fab_rules(ctx: GateContext) -> Verdict:
                              f"{len(_counted(_found(doc)))} item(s): the two disagree")
     # The zones as stored and as KiCad refills them under the project's own
     # settings, never the fab's this stage holds; each finding once over both
-    # (:data:`REFILL_DIR`): a fab plots the stored fill.
-    fill = _refill_run(ctx, gid, path, stem, stage, argv, doc)
+    # (:data:`REFILL_DIR`): a fab plots the stored fill. A skip on the refill
+    # side keeps the stored run's fab findings, so they are found first.
+    pads = K.pad_ids(tree)
+    fab_found, guessed = K.fab_findings(doc, table, pads, "fab")
+    fill = _stored_if_skipped(_refill_run(ctx, gid, path, stem, stage, argv, doc), fab_found)
     if isinstance(fill, Verdict):
         return fill
     refilled, how, fill_ev = fill
     ev += fill_ev
-    pads = K.pad_ids(tree)
-    fab_found, guessed = K.fab_findings(doc, table, pads, "fab")
     found = _found(doc)
     stored_only: list = []
     refill_only: list = []
+    loose: list = []
+    kept = None
     if refilled is not None:
+        kept = K.kept_ids(tree)
         fab_refilled, guessed_refilled = K.fab_findings(refilled, table, pads, "fab")
-        fab_found, stored_only, refill_only = _over_both(fab_found, fab_refilled)
+        fab_found, stored_only, refill_only, loose = _over_both(
+            fab_found, fab_refilled, kept)
         guessed = max(guessed, guessed_refilled)
-        found = _over_both(found, _found(refilled))[0]
+        found = _over_both(found, _found(refilled), kept)[0]
     # A finding of a type the project ignores, raised for this run and not the
     # fab's (silk on silk, when the project ignores silk_overlap), is no finding
     # pcb.drc sees: it runs under the project's own severities. Said apart, never
     # called pcb.drc's. (What slipped through, in review: it was.)
-    counted = {_finding_key(v) for v in fab_found}
-    rest = [v for v in found if _finding_key(v) not in counted]
+    counted = {_finding_key(v, kept) for v in fab_found}
+    rest = [v for v in found if _finding_key(v, kept) not in counted]
     waived = Counter(v.get("type", "?") for v in rest if v.get("type") in raised)
     others = len(rest) - sum(waived.values())
     # Grouped by type with the fab rule's name, never the first descriptions: on a
@@ -2876,7 +2970,7 @@ def fab_rules(ctx: GateContext) -> Verdict:
     detail = _line(f"{who} {service['name']} ({table['name']}{oz_note}, read "
                    f"{fab.get('read', '?')}): ", *found_parts,
                    (_fill_note(len(fab_found), stored_only, refill_only, how,
-                               refilled is not None), 7),
+                               refilled is not None), 7), (_loose_note(len(fab_found), loose), 0),
                    (guessed_note, 2), (others_note, 1), (waived_note, 3), (excluded_note, 5),
                    (_libraries_note(libraries), 4), f"; {_release(ctx, doc)}",
                    f"; the board: {', '.join(built)}")
