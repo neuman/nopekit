@@ -45,7 +45,10 @@ A job that uses a JavaScript action (`actions/upload-artifact`, `actions/cache`)
 needs `node` in its image. espressif/idf and zmk-build-arm have none, so such a step
 fails under act. A step after the build is named in the detail and not judged; a step
 before it fails the replay as errored. act fetches each action once into
-`~/.cache/nopekit/firmware-ci/actions` and reuses it after (`--action-offline-mode`).
+`.cache/nopekit/firmware-ci/actions` under your home directory, as the user
+database gives it for your uid (not `$HOME`), and reuses it after
+(`--action-offline-mode`). Where your uid has no home there, each replay fetches
+its actions again.
 
 ## 3. A smoke test
 

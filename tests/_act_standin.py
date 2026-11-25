@@ -13,7 +13,10 @@ What it does is set by ``mode.json`` beside it, which the test writes:
   ``act --version`` writes a loader error and exits 127.
 - ``log``: a JSONL file printed as act's stdout, with ``copy_in_log`` (the copy
   path the excerpt was recorded under) replaced by the real copy; ``stderr``,
-  ``exit`` and ``sleep`` (seconds before anything is written).
+  ``exit`` and ``sleep`` (seconds before anything is written); ``stall``:
+  ``{"lines": n, "seconds": s}``, the log's first ``n`` lines and the stderr
+  written and flushed, then ``s`` seconds before the rest (a job a timeout stops
+  midway).
 - ``containers``: the ids ``docker ps`` prints (a job container a replay left);
   ``rm_fails``: ``docker rm`` exits 1.
 - ``write``: ``{rel: {"size": n, "head": "<hex>"}}``, files the "job" writes into the
@@ -112,6 +115,15 @@ if MODE.get("log"):
         text = fh.read()
     if MODE.get("copy_in_log"):
         text = text.replace(MODE["copy_in_log"], copy)
+    stall = MODE.get("stall")
+    if stall:
+        lines = text.splitlines(keepends=True)
+        sys.stdout.write("".join(lines[:stall["lines"]]))
+        sys.stderr.write(MODE.pop("stderr", ""))
+        sys.stdout.flush()
+        sys.stderr.flush()
+        time.sleep(stall["seconds"])
+        text = "".join(lines[stall["lines"]:])
     sys.stdout.write(text)
 sys.stderr.write(MODE.get("stderr", ""))
 sys.exit(int(MODE.get("exit", 0)))

@@ -108,3 +108,18 @@ Four real firmware repositories, replayed by people who had not written the pack
   warn "one number in two places". The gate now reports the `flash-fit` claim's
   limit.
 - An arduino-cli template that never made its `BINDIR` and was never replayed.
+
+## What the review of those fixes found
+
+- A timeout that wrote an empty log. The replay returned before it read act's
+  output. The log now holds what act wrote up to the stop, and the error names the
+  step that was still running.
+- A pass that named the matrix entry the project asked for, not the one act ran.
+  act ignores a `--matrix` key the job's matrix does not have. Such a key is now
+  errored, and the pass names the entry act logged.
+- Two `flash-fit` claims with different limits, which errored the gate with the
+  spine's advice to a gate's author. The error now says first to keep the tag on
+  the headroom claim.
+- A replay that read `HOME` through `os.path.expanduser`, where its docstring said
+  it read no environment variable. The action cache and the fallback lock are now
+  under the uid's home in the user database.

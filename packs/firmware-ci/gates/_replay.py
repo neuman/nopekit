@@ -27,7 +27,9 @@ for it with the same loader (:func:`loader`), and the replay asks nothing of a
 path that moves between two gates (:func:`_open_lock`), so the sweep's memo
 serves the first gate's replay to the rest. It reads no environment variable in
 Python: act and git get this process's environment through ``env(1)``
-(:func:`with_env`), with the few values the replay sets over it.
+(:func:`with_env`), with the few values the replay sets over it, and the home
+that holds act's action cache and the fallback lock is the uid's in the user
+database (:func:`user_home`), never ``HOME``.
 """
 from __future__ import annotations
 
@@ -452,9 +454,7 @@ def replay(path: str, job: str, *, keep: tuple = (), matrix: dict | None = None,
         argv = ["act", "push", "-W", rel, "-C", copy, "-j", job, "--bind", "--json",
                 "--concurrent-jobs", "1", "--pull=false", "--action-offline-mode",
                 "--no-cache-server", "--container-daemon-socket", "-", "--rm",
-                "--action-cache-path",
-                os.path.join(os.path.expanduser("~"), ".cache", "nopekit", "firmware-ci",
-                             "actions"),
+                *action_cache(),
                 "--secret-file", os.devnull, "--var-file", os.devnull,
                 "--env-file", os.devnull, "--input-file", os.devnull, "-e", event]
         for label, ref in RUNNER_IMAGES.items():
@@ -463,22 +463,32 @@ def replay(path: str, job: str, *, keep: tuple = (), matrix: dict | None = None,
             argv += ["--matrix", f"{key}:{matrix_word(value)}"]
         argv = with_env({"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"),
                          "ACT_DISABLE_VERSION_CHECK": "1"}, argv)
+        proc = None
         with _one_replay_at_a_time():
             try:
                 proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, text=True, errors="replace",
                                       timeout=limit)
-            except subprocess.TimeoutExpired:
+                out, err = proc.stdout, proc.stderr
+            except subprocess.TimeoutExpired as exc:
+                # act's output up to the stop, parsed as any other run's: the
+                # step that was still running is in it. What slipped through
+                # returning here with nothing (review of the holdout fixes): a
+                # timeout, the error with the least to go on, wrote an empty
+                # log.txt. On POSIX ``subprocess.run`` puts what it had read
+                # into the exception, as bytes even under ``text=True``.
                 result["timeout"] = True
-                return result
+                out, err = _decoded(exc.stdout), _decoded(exc.stderr)
             finally:
                 # Inside the lock, on every outcome: the next replay of this
                 # user's must not meet this one's job container.
                 left = _remove_containers(copy)
-        result["rc"] = proc.returncode
         scrub = functools.partial(_scrub, copy=copy, tmp=tmp)
-        result["entries"], act_lines = parse(proc.stdout, scrub)
-        result["act"] = act_lines + [scrub(ln) for ln in proc.stderr.splitlines() if ln.strip()]
+        result["entries"], act_lines = parse(out, scrub)
+        result["act"] = act_lines + [scrub(ln) for ln in err.splitlines() if ln.strip()]
+        if proc is None:
+            return result
+        result["rc"] = proc.returncode
         result["toolchain"] = _toolchain(image or RUNNER_IMAGES["ubuntu-latest"])
         (result["files"], result["configs"], result["images"],
          result["oversize"]) = _collect(copy, before, keep)
@@ -511,6 +521,46 @@ def with_env(overrides: dict, argv: list) -> list:
     on); ``os.get_exec_path()`` for ``PATH`` alone (an environment read the
     doctor's scan does not see, which is worse than one it does)."""
     return ["env", *(f"{key}={value}" for key, value in overrides.items()), *argv]
+
+
+def user_home() -> str:
+    """This user's home directory as the user database gives it for the uid
+    (``pwd``), or ``""`` where the uid has no entry or the host no ``pwd``.
+
+    Never ``HOME``. What slipped through ``os.path.expanduser("~")`` here
+    (review of the holdout fixes): it reads ``HOME`` inside ``posixpath``, so a
+    replay that the module's docstring said read no environment variable read
+    one (measured: ``env:HOME`` among a traced ``fw.build``'s opaque channels),
+    and the doctor's scan, which looks for ``environ`` and ``getenv`` by name,
+    did not see it. The uid is what the replay lock is keyed by
+    (:func:`lock_path`), so the action cache and the fallback lock are the
+    user's, whatever ``HOME`` says, as the lock is. *Rejected:* ``HOME`` (above);
+    ``$HOME`` expanded by a shell between the replay and act (a third process
+    for one path, and the read moves out of sight, not away)."""
+    try:
+        import pwd
+    except ImportError:                                      # not a POSIX host
+        return ""
+    try:
+        return pwd.getpwuid(os.getuid()).pw_dir or ""
+    except KeyError:                                         # a uid with no entry
+        return ""
+
+
+#: Where act keeps the actions it fetched, under :func:`user_home`: once
+#: fetched, reused offline (``--action-offline-mode``). Where the uid has no
+#: home in the user database, act gets no ``--action-cache-path`` and caches
+#: under the HOME the replay gives it, which is removed with the copy: each
+#: replay fetches its actions again. *Rejected:* the lock's directory under
+#: ``/tmp`` (a boot clears it, and a directory there that another user made
+#: first would hand act the actions it runs).
+ACTION_CACHE = (".cache", "nopekit", "firmware-ci", "actions")
+
+
+def action_cache() -> list:
+    """act's ``--action-cache-path`` and its value, or ``[]`` (:data:`ACTION_CACHE`)."""
+    home = user_home()
+    return ["--action-cache-path", os.path.join(home, *ACTION_CACHE)] if home else []
 
 
 def _ran_in(runs_on: str) -> str:
@@ -550,13 +600,15 @@ def _ran_in(runs_on: str) -> str:
 #: ``0700`` and used only while it is a directory this uid owns, never a link:
 #: ``/tmp`` is everyone's, and a path another user made first is not a lock of
 #: ours. Then, or where the temp root cannot be written, the lock falls back to
-#: ``HOME_LOCK``, the old place. The limits: there, and between two users of one
+#: ``HOME_LOCK`` under :func:`user_home`, the old place, now read by the uid too;
+#: where the uid has no home there either, the replay is errored and names both
+#: places. The limits: there, and between two users of one
 #: Docker daemon, two replays can still collide, and the collision reads errored
 #: by the signal rule in ``judge``, never as a verdict. The lock waits as long as
 #: the replay ahead of it runs; each replay's own ``TIMEOUT_S`` bounds that.
 LOCK_ROOT = "/tmp"
 LOCK_NAME = "firmware-ci-replay.lock"
-HOME_LOCK = os.path.join("~", ".cache", "nopekit", "firmware-ci", "replay.lock")
+HOME_LOCK = (".cache", "nopekit", "firmware-ci", "replay.lock")
 
 
 def lock_path(root: str | None = None) -> str:
@@ -567,7 +619,8 @@ def lock_path(root: str | None = None) -> str:
 
 def _open_lock() -> int:
     """A descriptor on the lock file: the user's own (:func:`lock_path`) when its
-    directory is a directory this uid owns, else :data:`HOME_LOCK`.
+    directory is a directory this uid owns, else :data:`HOME_LOCK` under
+    :func:`user_home`; :class:`ToolFault` where the uid has no home.
 
     **It asks nothing of a path by name.** Every ``os.stat`` and ``os.lstat`` a
     replay makes is a path the sweep's memo signs, and a hit needs each to stat
@@ -590,7 +643,12 @@ def _open_lock() -> int:
             return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
     except OSError:
         pass
-    path = os.path.expanduser(HOME_LOCK)
+    home = user_home()
+    if not home:
+        raise ToolFault(f"the replay lock has no place: {os.path.dirname(path)} is not a "
+                        f"directory this user owns, and uid {os.getuid()} has no home in the "
+                        f"user database")
+    path = os.path.join(home, *HOME_LOCK)
     _make_dirs(os.path.dirname(path))
     return os.open(path, flags, 0o600)
 
@@ -795,6 +853,17 @@ def _scrub(text: str, *, copy: str, tmp: str) -> str:
     tests/test_determinism wants the same bytes from two directories."""
     text = text.replace(copy, "<repo>").replace(tmp, "<tmp>")
     return _CMAKE_DURATION.sub(r"\1", _DURATION.sub("", text))
+
+
+def _decoded(output) -> str:
+    """What a stopped process wrote, as text: ``subprocess.TimeoutExpired``
+    carries bytes (or ``None``) whatever ``text=`` said, and a line cut by the
+    stop may end inside a UTF-8 sequence."""
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", "replace")
+    return str(output)
 
 
 def parse(stdout: str, scrub=lambda s: s) -> tuple[list, list]:
@@ -1004,6 +1073,17 @@ def image_names(result: dict) -> list[str]:
     return sorted(str(row["name"]) for row in result["images"])
 
 
+def _running(result: dict, job) -> str:
+    """``"; step 'X' (entry) was still running ..."`` for each step of ``job`` that
+    act started and logged no result for before a timeout stopped it, or ``""``."""
+    said = [f"{s['name']!r}{_label(e)}" for e in result["entries"] if e["job"] == job.job
+            for s in e["steps"] if s["stage"] == "Main" and s["result"] is None]
+    if not said:
+        return ""
+    words = "step {} was" if len(said) == 1 else "steps {} were"
+    return f"; {words.format(', '.join(said))} still running (log.txt holds the output so far)"
+
+
 def judge(result: dict, job, image_glob: str | None = None,
           tolerated: frozenset = frozenset()) -> tuple[bool, str]:
     """``(passed, detail)`` for the build job ``job`` (a ``_ci.Job``) in one replay,
@@ -1011,7 +1091,8 @@ def judge(result: dict, job, image_glob: str | None = None,
     that carry ``continue-on-error: true``: their failure stops nothing on GitHub."""
     if result["timeout"]:
         raise ToolFault(f"act did not finish in {result.get('timeout_s') or TIMEOUT_S:g} s "
-                        f"(firmware_ci_timeout_s); the job's containers were removed")
+                        f"(firmware_ci_timeout_s); the job's containers were removed"
+                        f"{_running(result, job)}")
     entries = [e for e in result["entries"] if e["job"] == job.job]
     chosen = result.get("matrix") or {}
     if not entries:
@@ -1022,6 +1103,27 @@ def judge(result: dict, job, image_glob: str | None = None,
     if chosen and len(entries) != 1:
         raise ToolFault(f"firmware_ci_matrix {_said(chosen)} selects {len(entries)} entries of "
                         f"job {job.job}'s matrix: give a value for each key, so one runs")
+    # The entry act ran is the one it logged (``entries[0]["matrix"]``), and
+    # every key firmware_ci_matrix names must be in it with that value. What
+    # slipped through comparing the count alone (review of the holdout fixes,
+    # measured with act 0.2.97 in dry-run mode): act ignores a ``--matrix`` key
+    # the job's matrix does not have, so ``device:x`` ran a job with no matrix
+    # once (matrix ``{}``) and a job whose matrix is ``{side: [l]}`` as ``{side:
+    # l}``, and the pass named ``matrix entry {device: x}``, an entry that was
+    # never replayed. *Rejected:* naming the logged entry and passing (a key the
+    # project typed that selected nothing is its mistake to see, not ours to
+    # read past).
+    ran = entries[0].get("matrix") or {}
+    if chosen and not ran:
+        raise ToolFault(f"firmware_ci_matrix {_said(chosen)} names a matrix entry, and job "
+                        f"{job.job} has no matrix: act ran it once; leave "
+                        f"firmware_ci_matrix out")
+    unheld = [k for k in sorted(chosen)
+              if k not in ran or matrix_word(ran[k]) != matrix_word(chosen[k])]
+    if unheld:
+        raise ToolFault(f"firmware_ci_matrix {_said(chosen)} is not the entry act ran "
+                        f"({_said(ran)}): act ignores a key the job's matrix does not have "
+                        f"({', '.join(unheld)}); name each key as the matrix does")
     if result["oversize"]:
         raise ToolFault(f"the files read back whole (firmware_image, firmware_elf and the "
                         f"configuration) total {result['oversize']} B, past the {OUTPUT_CAP} B "
@@ -1102,7 +1204,7 @@ def judge(result: dict, job, image_glob: str | None = None,
         later.append(f"{step['name']} ({step['result'] or 'not run'})")
     where = f" in {_short(job.image)}" if job.image else ""
     many = f", {len(entries)} matrix entries" if len(entries) > 1 else ""
-    one = f", matrix entry {_said(chosen)}" if chosen else ""
+    one = f", matrix entry {_said(ran)}" if len(entries) == 1 and ran else ""
     said = (f"job {job.job}{many}{one}: step {job.name!r} ({job.command}) passed{where}; "
             f"wrote {', '.join(images) or 'no image'}")
     if later:
@@ -1172,9 +1274,12 @@ def evidence(result: dict, job, out_path) -> list[str]:
     through writing it on a judged build alone (holdout review, three projects):
     an errored replay kept no log, its reason quoted act's last line (``Job
     failed``), and each person had to replay the failure by hand to find a
-    CMake error or apt's ``Unable to locate package`` many lines above it."""
+    CMake error or apt's ``Unable to locate package`` many lines above it. A
+    timeout writes what act had logged when it was stopped, the step it was in
+    marked as stopped, and says so at the end."""
     paths = []
     entries = [e for e in result["entries"] if e["job"] == job.job]
+    open_step = "stopped at the timeout" if result.get("timeout") else "not run"
     log = out_path("firmware-ci", "build", "log.txt")
     with open(log, "w", encoding="utf-8") as fh:
         for entry in entries:
@@ -1183,7 +1288,7 @@ def evidence(result: dict, job, out_path) -> list[str]:
                     continue
                 mark = " (the build step)" if step["id"][:1] == [job.act_id(job.index)] else ""
                 fh.write(f"== job {entry['job']}{_label(entry)}, step {step['name']!r}{mark}: "
-                         f"{step['result'] or 'not run'}\n")
+                         f"{step['result'] or open_step}\n")
                 text = step.get("log", "")
                 fh.write(text if not text or text.endswith("\n") else text + "\n")
                 for line in step.get("act", []):
@@ -1193,6 +1298,9 @@ def evidence(result: dict, job, out_path) -> list[str]:
                 fh.write("".join(f"{line}\n" for line in entry["act"]))
         if result.get("act"):
             fh.write("== act\n" + "".join(f"{line}\n" for line in result["act"]))
+        if result.get("timeout"):
+            fh.write(f"== act was stopped at {result.get('timeout_s') or TIMEOUT_S:g} s "
+                     f"(firmware_ci_timeout_s): the log ends where it stopped\n")
     paths.append(log)
     images = out_path("firmware-ci", "build", "images.json")
     with open(images, "w", encoding="utf-8") as fh:

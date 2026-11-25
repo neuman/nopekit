@@ -24,7 +24,8 @@ Rules each template keeps, and why:
   update fails in a replay with `E: Unable to locate package`, and works on GitHub.
 - **One entry of a matrix.** Set `firmware_ci_matrix` (`{key: value}`, a value for
   each key) to replay one entry. Without it the entries share one workspace in
-  turn, and the readers error.
+  turn, and the readers error. act ignores a key the job's matrix does not have,
+  so the replay is errored on one, and on a job with no matrix.
 
 Each template says whether this pack has replayed it. A template that says **Not
 replayed** passes `fw.ci_job` (a test holds each one to it), and nothing more is

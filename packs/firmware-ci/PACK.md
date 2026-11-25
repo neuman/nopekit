@@ -66,7 +66,8 @@ A gate whose prerequisite did not pass reads Skipped.
   does not hold) is errored, before the image is looked for. Its evidence,
   `log.txt`, holds each step's own output on every outcome the replay reached, an
   errored one too, and an errored reason quotes the failing step's first cause line
-  (`CMake Error`, apt's `E:`, `error:`).
+  (`CMake Error`, apt's `E:`, `error:`). On a timeout it holds act's output up to
+  the stop, and the reason names the step that was still running.
 - **`fw.image_fits`** compares the bytes the image writes with a region from a cited
   record. It reports flash use in %, rounded up to 0.1 %. Its limit is the headroom
   the `flash-fit` claim states (`flash use <= 85 %`), else 100, the region's own
@@ -130,7 +131,7 @@ of its own: the workflow chooses the build, and the claim holds the limit.
 | `firmware_ci_workflow` | the workflow that builds the firmware, from the project root; every gate skips without it |
 | `firmware_ci_job` | the job id (optional) |
 | `firmware_ci_step` | the build step, when its command is not on the list (optional): its name, its `id:`, or, for a step with neither, its run's first line (the name act logs for it) |
-| `firmware_ci_matrix` | one entry of a matrix job, `{key: value}` with a value for each key (optional): act's `--matrix key:value`; the replay is errored unless exactly one entry runs |
+| `firmware_ci_matrix` | one entry of a matrix job, `{key: value}` with a value for each key (optional): act's `--matrix key:value`; the replay is errored unless exactly one entry runs and it holds each key, since act ignores a key the matrix does not have |
 | `firmware_ci_timeout_s` | the replay's wall clock in s (optional, default 1800) |
 | `firmware_image` | the file the device receives, a glob in the job's workspace (`build/*.bin`: `*` stays inside one directory, `**/` crosses any number) |
 | `firmware_elf` | the ELF in the job's workspace, a glob |
@@ -162,9 +163,11 @@ reaches flash through the cache, so it takes the ESP or slot shape only.
 - `ci-build`: the CI job can be replayed, and no masking hides a failed build (the
   guard alone).
 - `flash-fit`, with `{"quantity": "flash use", "comparator": "<=", "limit": 85,
-  "units": "%"}`: `fw.image_fits` reports this limit. State the headroom here, once;
-  `memory-fit` and `ota-slot` claims are covered and cross-checked, and their limits
-  are not read.
+  "units": "%"}`: `fw.image_fits` reports this limit. State the headroom here, once:
+  two `flash-fit` claims with different limits error the gate, and it names both.
+  Keep the tag on the headroom claim. A byte past the region fails whatever it says,
+  so a second claim at 100 % adds nothing this gate can show. `memory-fit` and
+  `ota-slot` claims are covered and cross-checked, and their limits are not read.
 - `deep-sleep`, `wakeup-source`: the image arms a deep-sleep wake. A wake on real
   hardware is a physical claim.
 - `ble-tx-power`, with `{"quantity": "bluetooth le transmit power setting",

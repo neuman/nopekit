@@ -680,6 +680,35 @@ class TheBuildIsJudgedOnItsOwnLines(unittest.TestCase):
         result["entries"] = []
         self._raises(result, "firmware_ci_matrix {side: l} may name no entry")
 
+    def test_the_pass_names_the_entry_act_ran(self):
+        """Review of the holdout fixes, measured with act 0.2.97 in dry-run mode:
+        act ignores a ``--matrix`` key the job's matrix does not have, so
+        ``device:x`` ran a job with no matrix once (matrix ``{}``) and a job whose
+        matrix is ``{side: [l]}`` as ``{side: l}``. The pass named ``matrix entry
+        {device: x}``, an entry that was never replayed. Each is errored now, and a
+        pass names the entry act logged."""
+        result = _step_result("", "success", files=BIN)
+        result["matrix"] = {"device": "x"}
+        self._raises(result, "firmware_ci_matrix {device: x} names a matrix entry, and job "
+                             "build has no matrix: act ran it once")
+        result["entries"][0]["matrix"] = {"side": "l"}
+        self._raises(result, "firmware_ci_matrix {device: x} is not the entry act ran "
+                             "({side: l}): act ignores a key the job's matrix does not have "
+                             "(device)")
+        result["matrix"] = {"side": "l", "n": 2}
+        result["entries"][0]["matrix"] = {"side": "l", "n": 3}
+        self._raises(result, "is not the entry act ran ({n: 3, side: l})")
+        result["matrix"] = {"side": "l", "n": 2, "lto": True}
+        result["entries"][0]["matrix"] = {"side": "l", "n": 2, "lto": True, "shield": "s"}
+        passed, detail = R.judge(result, _job(matrix=True))
+        self.assertTrue(passed, detail)
+        self.assertIn("matrix entry {lto: true, n: 2, shield: s, side: l}", detail,
+                      "the entry act logged, with a key the include added")
+        result["matrix"] = {}
+        result["entries"][0]["matrix"] = {"side": "l"}
+        passed, detail = R.judge(result, _job(matrix=True))
+        self.assertIn("matrix entry {side: l}", detail, "a one-entry matrix act ran whole")
+
     def test_a_step_before_the_build_is_the_tools_unless_ci_tolerates_it(self):
         self._raises(_step_result("", "success", before="failure"),
                      "step 'Checkout' before the build failed")
@@ -886,9 +915,11 @@ class TheCopyIsWhatTheNextCommitHolds(unittest.TestCase):
 class _StandIn(unittest.TestCase):
     """A bin directory with ``act`` and ``docker`` stand-ins first on PATH, a HOME
     of the test's own, and the replay lock's root in the test's own directory, so
-    the replay's lock and caches land nowhere real. (The real lock is every
-    process's of this user, whatever HOME says: a stand-in act starts no
-    container, and a test of it never waits on a person's replay.)"""
+    the replay's lock lands nowhere real. (The real lock is every process's of
+    this user, whatever HOME says: a stand-in act starts no container, and a test
+    of it never waits on a person's replay. act's action cache is this user's
+    too, under the home the user database gives: its path reaches the stand-in,
+    which writes nothing there.)"""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="fw-standin-")
@@ -1039,6 +1070,35 @@ class TheReplayRunsActAsDesigned(_StandIn):
                             for a in docker), docker)
         with self.assertRaises(R.ToolFault):
             R.judge(result, _job())
+
+    def test_the_replay_reads_no_environment_variable(self):
+        """Review of the holdout fixes: the module's docstring said the replay
+        reads no environment variable in Python, and ``os.path.expanduser("~")``
+        for act's action cache read ``HOME`` (measured: ``env:HOME`` among a
+        traced replay's opaque channels; the doctor's scan, which looks for
+        ``environ`` and ``getenv`` by name, did not see it). The cache is under
+        the uid's home in the user database, whatever ``HOME`` says."""
+        self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
+                   "copy_in_log": RECORDED_COPY})
+        app, trace = self.app(), verdicts_mod.GateTrace()
+        with verdicts_mod.tracing(trace):
+            self.replay(app)
+        self.assertEqual(sorted(c for c in trace.opaque if c.startswith("env:")), [],
+                         sorted(trace.opaque))
+        paths = set()
+        for home in ("home-a", "home-b"):
+            self.env["HOME"] = os.path.join(self.tmp, home)
+            os.makedirs(self.env["HOME"])
+            self.replay(app)
+            argv = [c["argv"] for c in self.calls() if c["tool"] == "act"][-1]
+            paths.add(argv[argv.index("--action-cache-path") + 1])
+        self.assertEqual(paths, {os.path.join(R.user_home(), ".cache", "nopekit",
+                                              "firmware-ci", "actions")})
+        with mock.patch.object(R, "user_home", lambda: ""):
+            self.replay(app)
+        argv = [c["argv"] for c in self.calls() if c["tool"] == "act"][-1]
+        self.assertNotIn("--action-cache-path", argv,
+                         "with no home in the user database, act caches in the replay's own")
 
 
 class TheActVersionCheckNeedsNothingElse(_StandIn):
@@ -1255,6 +1315,32 @@ class AnErroredReplayKeepsItsLog(_StandIn):
         self.assertEqual(verdict.outcome, "error", verdict.render())
         self.assertIn("act did not finish in 1 s (firmware_ci_timeout_s)", verdict.error)
 
+    def test_a_timeout_keeps_what_act_logged_before_it(self):
+        """Review of the holdout fixes: on a timeout the replay returned before it
+        read act's output, so ``log.txt`` was empty, and the error with the least
+        to go on named no step. ``subprocess.TimeoutExpired`` carries what act
+        wrote up to the stop (bytes, whatever ``text=`` said)."""
+        self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
+                   "copy_in_log": RECORDED_COPY, "stderr": "act: stand-in stderr line\n",
+                   "stall": {"lines": 36, "seconds": 60}})
+        verdict = self._build({"firmware_ci_workflow": self.app(),
+                               "firmware_ci_timeout_s": 2})
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("act did not finish in 2 s (firmware_ci_timeout_s); the job's containers "
+                      "were removed; step 'Build' was still running", verdict.error)
+        logs = [p for p in verdict.evidence if os.path.basename(p) == "log.txt"]
+        self.assertEqual(len(logs), 1, verdict.evidence)
+        with open(logs[0], encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("step 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683': "
+                      "success\n", text)
+        self.assertIn("step 'Build' (the build step): stopped at the timeout\n", text)
+        self.assertIn("-- ccache will be used for faster recompilation\n", text)
+        self.assertIn("act: stand-in stderr line\n", text)
+        self.assertTrue(text.endswith("== act was stopped at 2 s (firmware_ci_timeout_s): the "
+                                      "log ends where it stopped\n"), text[-200:])
+        self.assertNotIn(self.tmp, text, "the log names no temporary directory")
+
     def test_a_matrix_entry_goes_to_act(self):
         self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
                    "copy_in_log": RECORDED_COPY})
@@ -1328,20 +1414,31 @@ class TheReplayLockIsTheUsers(unittest.TestCase):
 
     def test_a_directory_that_is_not_this_users_is_never_the_lock(self):
         """/tmp is everyone's: a link where the directory goes (or a directory
-        another user made) is not a lock of ours, and the lock falls back to
-        HOME's, the old place."""
+        another user made) is not a lock of ours, and the lock falls back to the
+        old place, under the uid's home in the user database (``user_home``,
+        stood in for here), never under ``HOME`` (review of the holdout fixes:
+        ``os.path.expanduser`` read it). With no home there, it is errored."""
         elsewhere = os.path.join(self.tmp, "elsewhere")
         home = os.path.join(self.tmp, "home")
-        os.makedirs(elsewhere)
-        os.makedirs(home)
+        env_home = os.path.join(self.tmp, "env-home")
+        for path in (elsewhere, home, env_home):
+            os.makedirs(path)
         os.symlink(elsewhere, os.path.join(self.tmp, f"nopekit-{os.getuid()}"))
         with mock.patch.object(R, "LOCK_ROOT", self.tmp), \
-                mock.patch.dict(os.environ, {"HOME": home}):
+                mock.patch.object(R, "user_home", lambda: home), \
+                mock.patch.dict(os.environ, {"HOME": env_home}):
             with R._one_replay_at_a_time():
                 pass
         self.assertEqual(os.listdir(elsewhere), [])
+        self.assertEqual(os.listdir(env_home), [], "HOME is not read")
         self.assertTrue(os.path.isfile(os.path.join(home, ".cache", "nopekit", "firmware-ci",
                                                     "replay.lock")))
+        with mock.patch.object(R, "LOCK_ROOT", self.tmp), \
+                mock.patch.object(R, "user_home", lambda: ""):
+            with self.assertRaises(R.ToolFault) as caught:
+                with R._one_replay_at_a_time():
+                    pass
+        self.assertIn("the replay lock has no place", str(caught.exception))
 
 
 # --------------------------------------------------------------------------- #
@@ -2156,6 +2253,8 @@ class TheGatesReadOneReplay(unittest.TestCase):
                         True)
         result = _recorded("act_esp_short_ota_slot.jsonl", self._files())
         result["matrix"] = {"side": "l"}
+        for entry in result["entries"]:
+            entry["matrix"] = {"side": "l"}             # act logs the entry it ran
         v = self._run("fw.image_fits", self._files(), {"firmware_ci_workflow": wf,
                                                       "firmware_ci_matrix": {"side": "l"}},
                       result=result)
@@ -2222,6 +2321,34 @@ class TheGatesReadOneReplay(unittest.TestCase):
         v = self._run("fw.image_fits", self._files(), claims=fit(None), through_spine=True)
         self.assertEqual((v.outcome, v.limit), ("pass", 100.0),
                          "a flash-fit claim with no limit leaves the region's own bound")
+
+    def test_two_flash_fit_claims_name_the_one_to_keep(self):
+        """Review of the holdout fixes: a claim at the region's bound beside a
+        headroom claim, both tagged flash-fit, errored the gate with the spine's
+        advice to a gate's author ("read one claim by its id"), which a project
+        cannot follow: the tag is the pack's. The gate still errors (one goalpost
+        per tag), and says what the project does, first, inside the 200
+        characters an error keeps."""
+        def claim(cid, limit):
+            return {"id": cid, "statement": f"flash use at most {limit} %",
+                    "kind": "measurable", "tags": ["flash-fit"],
+                    "acceptance": {"quantity": "flash use", "comparator": "<=",
+                                   "limit": limit, "units": "%"}}
+
+        two = packs_mod.baseline_claims({"_claims": [claim("FW-FIT", 100),
+                                                     claim("FW-HEAD", 85)]})
+        v = self._run("fw.image_fits", self._files(), claims=two, through_spine=True)
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertTrue(v.error.startswith("keep the flash-fit tag on one claim, the one that "
+                                           "states the headroom, and take it off the rest: "),
+                        v.error)
+        self.assertIn("FW-FIT (flash use <= 100 %) and FW-HEAD (flash use <= 85 %)", v.error)
+        self.assertNotIn("read one claim by its id", v.error)
+        same = packs_mod.baseline_claims({"_claims": [claim("FW-FIT", 85),
+                                                      claim("FW-HEAD", 85)]})
+        v = self._run("fw.image_fits", self._files(), claims=same, through_spine=True)
+        self.assertEqual((v.outcome, v.limit), ("pass", 85.0),
+                         "two claims that state one condition are one goalpost")
 
     def test_missing_inputs_skip(self):
         for gid, key in (("fw.image_fits", "app_memory_map"), ("fw.image_fits", "firmware_image"),

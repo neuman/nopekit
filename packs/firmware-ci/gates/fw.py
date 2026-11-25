@@ -297,6 +297,23 @@ FIT_COMPARATORS = ("<=", "<")
 #: spine's wording change, the gate errors where it fell back: loud, never a
 #: pass against a guess.
 _ABSENT = ("no claim is named or tagged", "has no limit to judge against")
+#: The spine's words for two conditions under the tag (``verdicts.acceptance_of``:
+#: ``'flash-fit' names A (...) and B (...): read one claim by its id``). The gate
+#: still errors, as the spine's contract says (one goalpost per tag), and says
+#: what the project does: the tag is the pack's, so "read one claim by its id",
+#: the spine's advice to a gate's author, is not the project's to follow. What
+#: slipped through quoting the spine alone (review of the holdout fixes): a
+#: project with a claim at the region's bound (flash use <= 100 %) and a
+#: headroom claim (<= 85 %), both tagged ``flash-fit``, read an error it could not
+#: act on, where a gate that always said 100 had passed them. *Rejected:* the
+#: strictest limit (the looser claim then reads Failing between the two limits,
+#: and the spine warns "one number in two places" on its limit); the region's
+#: bound, as before (that warning comes back on the headroom claim, the one this
+#: gate's reading of the claim removed); advising ``memory-fit`` or ``ota-slot``
+#: for the other claim (the gate covers both tags, so its verdict at the headroom
+#: is that claim's too, with the same warning). Should the spine's wording
+#: change, the spine's own words reach the project: loud, never a pass.
+_TWO = ": read one claim by its id"
 
 _NO_MAP = ("no app_memory_map: the region the bootloader or partition table gives the "
            "app, from a cited record ({flash, app, ram?, other?}, {app: {size}} or "
@@ -396,13 +413,21 @@ def image_fits(ctx: GateContext) -> Verdict:
 def _fit_limit(ctx: GateContext):
     """The ``flash-fit`` claim's condition when one states a limit (``FIT_TAG``),
     else ``None``: the region's own bound. :class:`R.ToolFault` when the claim
-    states it in a form this gate does not compute: flash use in %, held as at
-    most."""
+    states it in a form this gate does not compute (flash use in %, held as at
+    most), and when two claims under the tag state different conditions
+    (``_TWO``)."""
     try:
         acc = ctx.acceptance(FIT_TAG)
     except NopekitError as exc:
-        if any(words in str(exc) for words in _ABSENT):
+        said = str(exc)
+        if any(words in said for words in _ABSENT):
             return None
+        if said.endswith(_TWO):
+            # The advice first: a verdict's error is cut at 200 characters
+            # (``gates._one_line``), and claim ids can be long.
+            raise R.ToolFault(f"keep the {FIT_TAG} tag on one claim, the one that states the "
+                              f"headroom, and take it off the rest: "
+                              f"{said[:-len(_TWO)]}") from exc
         raise
     # The quantity as the spine's cross-check matches it (``claims._quantity``:
     # casefolded, ``-`` and ``_`` read as spaces), so the gate reads exactly the
