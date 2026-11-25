@@ -942,22 +942,25 @@ class AProbeIsWrittenForEveryRuleAndProperty(unittest.TestCase):
     """The probes ``pcb.drc`` appends to a project's rules file."""
 
     def test_b_is_probed_as_a_and_a_function_only_through_its_rule(self):
+        # A rule of this test's own: an A-only term beside an OR that reads B.
+        # (Z1: the rule here was the parent device's own rule file line, word
+        # for word under another name; docs/ORIGINS.md is its one home.)
         rules = K.dru_rules("(version 1)\n# a comment (with a paren\n"
-                            "(rule edge (layer outer) (condition \"A.NetName == 'GND' && "
-                            "(A.Type == 'Pad' || B.Type == 'Pad')\") "
-                            "(constraint edge_clearance (min 0.05mm)))\n"
+                            "(rule edge (layer outer) (condition \"A.NetClass == 'Power' && "
+                            "(A.Type == 'Via' || B.Type == 'Via')\") "
+                            "(constraint edge_clearance (min 0.5mm)))\n"
                             "(rule plated (condition \"A.isPlated()\") "
                             "(constraint hole_size (min 0.3mm)))\n"
                             "(rule open (constraint track_width (min 0.1mm)))\n")
         probes = K.probe_rules(rules)
         self.assertEqual([(p["kind"], p["what"], p["reads_b"]) for p in probes],
                          [("rule", "edge", False), ("rule", "plated", False),
-                          ("rule", "open", False), ("property", "NetName", False),
+                          ("rule", "open", False), ("property", "NetClass", False),
                           ("property", "Type", False)])
         self.assertIn("(layer outer)", probes[0]["text"])
         # A rule that reads B is probed on the terms that read A alone.
-        self.assertEqual(probes[0]["a_side"], "A.NetName == 'GND'")
-        self.assertIn("(condition \"A.NetName == 'GND'\")", probes[0]["text"])
+        self.assertEqual(probes[0]["a_side"], "A.NetClass == 'Power'")
+        self.assertIn("(condition \"A.NetClass == 'Power'\")", probes[0]["text"])
         self.assertIn("(constraint assertion \"false\")", probes[1]["text"])
         self.assertNotIn("condition", probes[2]["text"])
         self.assertIn("A.Type == A.Type", probes[4]["text"])

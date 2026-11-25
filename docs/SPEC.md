@@ -2411,6 +2411,105 @@ are kept outside the repository with the branch's history.
   interference); grouping boards by path string (`./` split a group, and an
   overlap passed). Known wrong FAIL, stated: mated board-to-board connectors whose
   vendor models overlap by design.
+- **X1, built: five fixes found in the merge, and every example of a rejection is
+  the bracket's.** The power board has its schematic now
+  (`make_power_schematic.py`, from `make_power_board.py`'s own parts and nets), so
+  `pcb.charge_temperature`'s defeat check reads a schematic its own run wrote, and
+  its qualification is current: before, a control copied the board alone and the
+  gate asked about a path under its out directory that nothing wrote
+  (`test_cache.OutDirReads`). A fixture that swaps a part copies the schematic
+  with the part swapped; one that moves a net writes none. The P7 tests' STEP
+  writer runs through `_env.run`. firmware-ci's replay lock is the user's
+  (`/tmp/nopekit-<uid>/`, used only while that directory is this uid's own), not
+  the home's: a test's temporary home took a second lock, and act removed one
+  replay's container in the middle of its build. `nopekit model --help` prints
+  (argparse read "-10% and +10%" as a format), and every command's `--help` is
+  tested. `decide`'s refusals and help, the spine's docstrings and METHOD.md's
+  rule 3 give the bracket's loser ("4.0 mm|it deflected 3.75 mm, 7.5x the
+  limit") and PLA that creeps, which closes P1's "left for later";
+  `test_rejections.TheExamplesAreTheBracketsOwn` holds them, a wrapped phrase
+  included. The spine edits are docstrings and comments, so the bracket cache
+  stands. *Rejected:* `$XDG_RUNTIME_DIR` for the lock (a process started outside
+  a login session, from cron, a system service or `env -i`, has none, so two
+  processes of one uid can take two locks); a schematic beside a fixture that
+  moved a net (one that its board no longer matches).
+- **P8, built: `pcb.antenna_keepout`** (tier 1, sourced, tags `antenna-keepout`
+  and `rf-layout`; pcb-kicad, 18 gates). `pcb.drc` holds a footprint's rule area
+  only on the layers the footprint names, and in KiCad 9.0.9 ten of the 31
+  RF_Module footprints with a rule area name fewer than every copper layer (the
+  stock ESP32-S3-WROOM-1 and ESP32-WROOM-32 areas cover F.Cu, In1.Cu and B.Cu, so
+  a pour on In2.Cu ran under the antenna with DRC clean); kicad-cli 9 also judges
+  a pour by its stored fill, with no refill. The gate copies each module's own
+  area to every copper layer, every kind of copper forbidden, and runs KiCad's DRC
+  on two staged copies: the board as stored, and the board after pcbnew's own
+  zone filler, run in a child. A `pcb_antennas` record adds a vendor drawing
+  registered by three or more numbered pads (P4's `pair_by="number"`), a rule
+  area the designer drew, or `none` for an antenna off the board; a module with
+  no keep-out and no record skips by name, and a fail counts beside it. Each
+  other keep-out is taken out of the judged copies (DRC reports an item once,
+  against the first area it lies in), the area is added after the refill (one
+  present during it knocks the pour out), and each stored outline grows to hold
+  its fill (KiCad does not judge a fill outside its outline). In review: a rule
+  area's cutout stays a cutout (KiCad saves it as a further polygon of the same
+  zone, and the gate had made it solid keep-out); a non-plated hole that KiCad
+  flashes on no copper layer is listed apart and not counted; the pass names
+  tracks, vias, other parts' pads and zone fills, and says that copper drawings
+  and text are not judged. *Rejected:* a `needs` edge on the guard (the boards
+  are the records', which the guard never reads, so the gate makes the guard's
+  checks itself); counting a bare hole (the rule is copper); finding copper
+  drawings with this pack's own geometry (a second reading of KiCad's shapes,
+  with the text extents unknown).
+- **P9, built: the proposers.** `pcb.schematic_from_board` places every unit of
+  a multi-unit part, each in its own cell under the part's one ref, the pins all
+  units share on each unit: it refused every such part, so the power board's
+  two-unit Q1 had no schematic and `pcb.erc` and `pcb.parity` skipped there. A
+  one-unit part keeps its ids, so a board with none writes the bytes it wrote
+  before. It finds KiCad's symbols through `KICAD10_SYMBOL_DIR`,
+  `KICAD9_SYMBOL_DIR`, `KICAD_SYMBOL_DIR` and the Linux, macOS and Windows install
+  paths, and names each library by the variable it came through. The new
+  `pcb.battery_record_draft` (model-only) drafts `pcb_batteries`,
+  `pcb_protectors`, `pcb_conductors`, `pcb_matings`, `pcb_usbc` and `pcb_rails`
+  from the boards it is given: refs, values and the pads that pin names or copper
+  show. Every datasheet number, flag, choice, kind and source is a `FILL:` value,
+  so every power rule refuses the draft as written; with each FILL taken from the
+  baseline's own records, all six rules read as the baseline does. In review: a
+  drafted source was a string, and `_power.source` takes any string that says
+  something, so a filled draft passed every power rule with the proposer's words
+  as its source; a drafted source is now a list holding one FILL, which every
+  rule refuses. Two boards of one file name keep their own ids (the folders above
+  the name, nearest first); a netless pad carries nothing; a cell's return drives
+  nothing; a rail's output or input may span pins on one net, and every rail
+  drafted is listed under `keep_or_delete`. *Rejected:* a protector's kind from
+  its pin names (five of the eight stock parts with a cutoff pair are a gauge, a
+  FET driver or monitors, and `kind == "charger"` excuses a charger's acts); a
+  source that says DRAFT in words (any non-empty string passes the reader).
+- **Z1, built: README and the last ORIGINS sweep.** README's pack table is the
+  branch's: thirteen packs; firmware-ci (5 gates) where firmware-zmk was;
+  hand-ergonomics (2 gates); thermal-analytic at 11 gates; pcb-kicad at 18 gates
+  (6 established, 9 sourced, 3 model-only), its words no longer about one kind
+  of cell; and the proposers `pcb.battery_record_draft` and
+  `ergo.reach_envelope`. Three pictures are drawn from the packs' own baselines
+  by scripts committed beside them in `docs/img/packs/`: pcb-kicad's ESD board by
+  `kicad-cli pcb render`, the same board with its tracks removed and routed again
+  by `pcb.autoroute`, and cad-solid's enclosure with its cover lifted. The two
+  pictures they replace were renders of the parent device; every other picture
+  under `docs/img/` was compared by eye with the parent's renders and shows none
+  of its geometry. The sweep set the parent's identifiers, part, net and rule
+  names, dimensions and rare words against the tree. One hit was unique: a
+  pcb-kicad test kept the parent's DRC rule body word for word under a new name,
+  and it now probes a rule of its own. A ZMK board name in `tests/fw_logs/`
+  stays: it is ZMK's stock board, and the logs are upstream's own build of a
+  stock shield. `FORBIDDEN` gains six strings that only the parent spells (a
+  firmware board name a test copied, a driver module, a radio grant id, two CAD
+  part names and a DRC rule name), each confirmed absent first, and a test plants
+  every entry and finds it. *Rejected:* common parts (every reference design
+  names them); the grant id's prefix alone (the module maker's, on every module
+  it certifies); the rule's condition as a forbidden phrase (a natural rule for
+  any ground pad); hashes in place of the words (the scan matches a substring
+  anywhere, and a hash matches only a token whose edges are known); a cad-solid
+  picture with every part lifted (the carriage then floats over an empty housing,
+  and the fit the gates judge is gone); `--quality high` for the routed board's
+  top view (its shading draws a shadow of the headers past the board's edge).
 
 ## 9. Retired
 
