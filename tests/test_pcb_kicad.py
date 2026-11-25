@@ -9391,18 +9391,21 @@ class AStoredFillIsJudgedBesideKiCadsRefill(_StandIn):
                               flag=("exit_refilled", "3"), gid=gid)
 
     def test_a_kicad_cli_that_does_not_launch_for_the_refill_keeps_the_stored_fail(self):
-        import subprocess
         import types
+        globs = self.registry.get("pcb.drc")[1].__globals__
+        # The gate's own module object, wrapped: this test spawns nothing itself
+        # (test_meta.NoSubprocessOutsideRun), it only stands between the gate
+        # and the module the gate already holds.
+        gate_proc = globs["subprocess"]
         fake = types.ModuleType("subprocess")
-        fake.__dict__.update(subprocess.__dict__)
+        fake.__dict__.update(vars(gate_proc))
 
         def run(argv, *args, **kwargs):
             if "--refill-zones" in argv or any(str(a).endswith("drc_refilled.json")
                                                for a in argv):
                 raise FileNotFoundError(2, "No such file or directory", "kicad-cli")
-            return subprocess.run(argv, *args, **kwargs)
+            return gate_proc.run(argv, *args, **kwargs)
         fake.run = run
-        globs = self.registry.get("pcb.drc")[1].__globals__
         with mock.patch.dict(globs, {"subprocess": fake}):
             self.refill_skips("10.0.8", "could not launch kicad-cli for the zone refill: "
                                         "[Errno 2] No such file or directory: 'kicad-cli'")

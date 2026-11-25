@@ -1486,14 +1486,19 @@ class TheReplayRunsActAsDesigned(_StandIn):
             self.replay(app)
         self.assertEqual(sorted(c for c in trace.opaque if c.startswith("env:")), [],
                          sorted(trace.opaque))
+        # The user database's home is pinned here: a container whose uid has no
+        # passwd entry (CI-like runs in Docker) gives none, and then act gets no
+        # cache path at all, which the last block below checks.
+        db_home = os.path.join(self.tmp, "db-home")
         paths = set()
-        for home in ("home-a", "home-b"):
-            self.env["HOME"] = os.path.join(self.tmp, home)
-            os.makedirs(self.env["HOME"])
-            self.replay(app)
-            argv = [c["argv"] for c in self.calls() if c["tool"] == "act"][-1]
-            paths.add(argv[argv.index("--action-cache-path") + 1])
-        self.assertEqual(paths, {os.path.join(R.user_home(), ".cache", "nopekit",
+        with mock.patch.object(R, "user_home", lambda: db_home):
+            for home in ("home-a", "home-b"):
+                self.env["HOME"] = os.path.join(self.tmp, home)
+                os.makedirs(self.env["HOME"])
+                self.replay(app)
+                argv = [c["argv"] for c in self.calls() if c["tool"] == "act"][-1]
+                paths.add(argv[argv.index("--action-cache-path") + 1])
+        self.assertEqual(paths, {os.path.join(db_home, ".cache", "nopekit",
                                               "firmware-ci", "actions")})
         with mock.patch.object(R, "user_home", lambda: ""):
             self.replay(app)
