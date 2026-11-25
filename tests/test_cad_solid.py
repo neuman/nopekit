@@ -187,7 +187,16 @@ class ATaperedRibIsStillAWall(_Case):
             self.skipTest("manifold3d absent: cannot build the rib/block union")
         # The confirmed false pass: the 0.2-1.2 mm rib's two flanks have normals
         # outside the old 30-degree filter, which returned the 5 mm block alone.
-        for draft in (16.0, 20.0):
+        # In review of holdout round 3 the along-a-face rule did the same at 31 and
+        # 35 deg per side (GRAZE_DEG at 30 deg): the gate passed at the block's
+        # 5.000 mm, and this test tried 16 and 20 deg only. Each draft is run at the
+        # subdivisions where a flank's normal ray reaches the other flank at all: at
+        # 35 deg only from the rib's top fifth, so the two face centres of a flank
+        # not subdivided (a third and two thirds up) send their rays into the block,
+        # and at 38 deg only from its top tenth. That is the sampler's limit, the
+        # same before the edge rules as after them.
+        for draft, levels in ((16.0, (0, 1, 2)), (20.0, (0, 1, 2)), (31.0, (0, 1, 2)),
+                              (35.0, (1, 2)), (38.0, (2, 3))):
             with self.subTest(draft=draft):
                 h = (1.2 - 0.2) / 2 / math.tan(math.radians(draft))
                 xz = [(-0.6, 0), (0.6, 0), (0.1, h), (-0.1, h)]
@@ -195,14 +204,15 @@ class ATaperedRibIsStillAWall(_Case):
                 rib = trimesh.convex.convex_hull(np.array(vertices))
                 block = _box((20.0, 30.0, 5.0), (0.0, 0.0, 2.5))
                 mesh = trimesh.boolean.union([block, rib], engine="manifold")
-                for subdivisions in range(3):
-                    with self.subTest(subdivisions=subdivisions):
-                        self.assertTrue(mesh.is_volume)
-                        v = self._run(self.GATE, {"ribbed": mesh},
-                                      {"process_min_wall_mm": 1.0})
-                        self.assertEqual(v.outcome, "fail", v.render())
-                        self.assertLess(v.measured, 1.0)
-                        self.assertTrue(v.locators)
+                for subdivisions in range(max(levels) + 1):
+                    if subdivisions in levels:
+                        with self.subTest(subdivisions=subdivisions):
+                            self.assertTrue(mesh.is_volume)
+                            v = self._run(self.GATE, {"ribbed": mesh},
+                                          {"process_min_wall_mm": 1.0})
+                            self.assertEqual(v.outcome, "fail", v.render())
+                            self.assertLess(v.measured, 1.0)
+                            self.assertTrue(v.locators)
                     mesh = mesh.subdivide()
 
 
@@ -790,16 +800,380 @@ class ASliverFaceIsNotCast(_Case):
 
     def test_a_well_shaped_face_of_the_same_tilt_is_still_cast(self):
         """The floor is the altitude, never the tilt: at 0.05 mm the same face is
-        a real one, and its 0.115 mm reading stands."""
+        cast. Until round 3 its 0.125 mm reading stood and failed the cube. That ray
+        crosses the cube's corner: the top face is 0.046 mm from its midpoint, the
+        two faces it joins 0.054 and 0.063 mm, so it is a ray past an edge
+        (AChamferedEdgeIsNotAWall). It is counted there and not as a sliver, which
+        is what says the face was cast, and the cube reads its 10 mm less the
+        0.013 mm the dimple tilts the top beside it."""
         if self._skipped_here():
             return
         v = self._run(self.GATE, {"box": _sliver_box(h=0.05)}, {"process_min_wall_mm": 1.0})
-        self.assertEqual(v.outcome, "fail", v.render())
-        self.assertLess(v.measured, 0.2)
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertAlmostEqual(v.measured, 9.987, places=3)
+        evidence = self._evidence(v)
+        self.assertEqual(evidence["sliver_faces_not_cast"], 0)
+        self.assertEqual(evidence["edge_rays_not_counted"], 1)
 
     def _evidence(self, v) -> dict:
         with open(v.evidence[0], encoding="utf-8") as fh:
             return json.load(fh)
+
+
+# --------------------------------------------------------------------------- #
+# holdout round 3: a land between two faces, a lip, a groove, a ray along a face
+# --------------------------------------------------------------------------- #
+def _prism(profile, apex: int | None = None, length: float = 10.0):
+    """The closed solid of a polygon in the (x, z) plane run ``length`` mm along y.
+
+    Each side of the polygon is one strip of two triangles the length of the
+    solid, as a CAD tessellator writes a flat face, so a narrow side puts face
+    centres where the published meshes had them. Each end is a fan from vertex
+    ``apex``, which must see every other vertex inside the polygon, or with no
+    apex the ear clipping fdm-print's baseline uses (the polygon counter-clockwise)."""
+    import numpy as np                              # noqa: PLC0415 - tools present only
+    import trimesh                                  # noqa: PLC0415
+    from nopekit.modelio import load_path           # noqa: PLC0415
+
+    n = len(profile)
+    verts = [(x, 0.0, z) for x, z in profile] + [(x, length, z) for x, z in profile]
+    faces = []
+    for i in range(n):
+        j = (i + 1) % n
+        faces += [(i, j, n + j), (i, n + j, n + i)]
+    if apex is None:
+        earclip = load_path(os.path.join(REPO, "packs", "fdm-print", "selftest",
+                                         "baseline_mesh.py"))._earclip
+        ends = earclip(list(profile))
+    else:
+        ends = [(apex, i, (i + 1) % n) for i in range(n) if apex not in (i, (i + 1) % n)]
+    for a, b, c in ends:
+        faces += [(a, c, b), (n + a, n + b, n + c)]
+    mesh = trimesh.Trimesh(vertices=np.asarray(verts, dtype=float),
+                           faces=np.asarray(faces), process=False)
+    if mesh.volume < 0:
+        mesh.invert()
+    return mesh
+
+
+def _land_plate():
+    """A 1.4 mm plate whose edge is a 0.6 mm vertical land under a 45 deg chamfer,
+    with a strip of the underside 0.015 mm wide along the land: its two face centres
+    sit 0.005 and 0.01 mm from it, as a published bottom plate's did."""
+    return _prism([(-20.0, 0.0), (-0.015, 0.0), (0.0, 0.0), (0.0, 0.6), (-0.8, 1.4),
+                   (-20.0, 1.4)], apex=3)
+
+
+def _land_rim():
+    """A 1.0 mm wall standing on a 0.5 mm land, an inside 45 deg chamfer from the
+    land up to the wall, and a strip of the outside face 0.3 mm tall above the land,
+    as a published housing's rim."""
+    return _prism([(-0.5, 0.0), (0.0, 0.0), (0.0, 0.3), (0.0, 5.0), (-1.0, 5.0),
+                   (-1.0, 0.5)], apex=3)
+
+
+def _chamfered_lip():
+    """A lip 0.712 mm deep and 0.75 mm thick off a 0.888 mm wall, its tip a 0.25 mm
+    land under a 45 deg chamfer, its underside one strip from the land to the wall,
+    as a printed top's: the strip's face centres sit 0.237 and 0.475 mm from the
+    land and read 0.487 and 0.725 mm."""
+    return _prism([(0.0, 0.0), (0.712, 0.0), (0.712, -3.0), (1.6, -3.0), (1.6, 0.75),
+                   (0.5, 0.75), (0.0, 0.25)], apex=4)
+
+
+def _grooved_wall():
+    """A 1.5 mm wall with a 90 deg V-groove in its inner face, 0.475 mm of wall left
+    at the root, and strips of the outer face 0.2 mm tall either side of the root:
+    their rays hit a flank just past the root and read 0.542 mm."""
+    return _prism([(0.0, -5.0), (0.0, -0.2), (0.0, 0.0), (0.0, 0.2), (0.0, 5.0),
+                   (-1.5, 5.0), (-1.5, 1.025), (-0.475, 0.0), (-1.5, -1.025),
+                   (-1.5, -5.0)], apex=2)
+
+
+def _leaning_block():
+    """A 10 mm block whose top leans 4 deg, a 0.02 mm chamfer between the top and the
+    left face (so they share no edge), and a strip of the top 0.08 mm wide beside the
+    chamfer. A ray from that strip leans toward the left face and meets it 4 deg from
+    grazing, 0.67 and 1.05 mm down, as a ray from a published housing's top did."""
+    import math                                     # noqa: PLC0415
+
+    def top(x):
+        return 10.0 - x * math.tan(math.radians(4.0))
+
+    return _prism([(0.0, 0.0), (10.0, 0.0), (10.0, top(10.0)), (0.1, top(0.1)),
+                   (0.02, top(0.02)), (0.0, top(0.02) - 0.02)], apex=1)
+
+
+def _lapped_web():
+    """A Z section: a block 1.7 mm thick and a block 1.0 mm thick joined by a web
+    0.4 mm thick and 1.7 mm across. The web's top is the first block's top face and
+    its underside the second block's underside, two faces that each run on past it
+    as one strip, so no face centre lies over the web, as on a published housing."""
+    return _prism([(-10.0, 0.0), (0.0, 0.0), (0.0, 1.3), (10.0, 1.3), (10.0, 2.3),
+                   (1.7, 2.3), (1.7, 1.7), (-10.0, 1.7)])
+
+
+#: The box over the web, in mm. It holds one face centre, on the underside 1.6 mm
+#: past the web, whose ray reads the second block's 1.0 mm.
+WEB_BOX = [[-0.2, 1.0, 1.2], [4.0, 9.0, 1.8]]
+
+
+def _web_rule(min_mm: float) -> dict:
+    return {"process_min_wall_mm": 0.8,
+            "wall_exceptions": [{"part": "lap", "box_mm": WEB_BOX, "min_mm": min_mm,
+                                 "reason": "web between the two blocks, thin on purpose"}]}
+
+
+def _drafted_fin(land: float = 0.3, base: float = 1.2, tall: float = 1.0,
+                 step: float = 0.025):
+    """A fin on a 1 mm plate, ``land`` mm across its flat top and ``base`` mm at the
+    plate, ``tall`` mm high (0.3, 1.2 and 1.0: 24 deg per side), each flank cut into
+    strips ``step`` mm tall, as a fine tessellation puts face centres near the top."""
+    cuts = [round(step * k, 6) for k in range(1, int(round(tall / step)))]
+    right = [(land / 2 + (base - land) / 2 * d / tall, 1.0 + tall - d) for d in cuts]
+    left = [(-x, z) for x, z in right]
+    return _prism([(-10.0, 0.0), (10.0, 0.0), (10.0, 1.0), (base / 2, 1.0)] + right[::-1]
+                  + [(land / 2, 1.0 + tall), (-land / 2, 1.0 + tall)] + left
+                  + [(-base / 2, 1.0), (-10.0, 1.0)])
+
+
+class ABoxIsMeasuredWhereNoFaceCentreLies(_WallCase):
+    """Round 2 of the held-out designs: a housing's box held a 0.4 mm web, and its
+    27 rays, each from a face centre that lay past the web, read 1.0 mm. A web under
+    the box's 0.36 mm minimum would have passed. In a box, rays also leave from a
+    grid at half its minimum (``BOX_SPACING_OF_MIN``)."""
+
+    def test_a_web_under_its_box_minimum_fails(self):
+        if self._skipped_here():
+            return
+        lap = _lapped_web()
+        self.assertTrue(lap.is_watertight and lap.is_volume)
+        v = self._run(self.GATE, {"lap": lap}, _web_rule(0.5))
+        self.assertEqual((v.outcome, v.limit), ("fail", 0.5), v.render())
+        self.assertAlmostEqual(v.measured, 0.4, places=3)
+        self.assertIn("more in wall_exceptions boxes", v.detail)
+
+    def test_the_box_reports_the_web_it_holds(self):
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, {"lap": _lapped_web()}, _web_rule(0.35))
+        self.assertEqual(v.outcome, "pass", v.render())
+        box = self._evidence(v)["boxes"][0]
+        self.assertAlmostEqual(box["thinnest_mm"], 0.4, places=3)
+        self.assertEqual(box["spacing_mm"], 0.175)
+        self.assertGreater(box["rays"], 1)
+
+    def test_a_box_too_large_to_sample_is_refused(self):
+        """A box around the whole door at 0.02 mm would take millions of rays: it
+        lowers the door's minimum everywhere, and is refused, named."""
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, {"door": _door(hinge=0.45)},
+                      dict(MIN_WALL, wall_exceptions=[_hinge(
+                          box_mm=[[-11.0, -11.0, -2.0], [33.0, 11.0, 2.0]], min_mm=0.02)]))
+        self.assertRefused(v, "holds too much of 'door' to sample")
+
+    def test_a_box_is_counted_on_the_rays_it_casts(self):
+        """Review of round 3: the budget counted the cells of each piece's bounding
+        rectangle, and a triangle's piece casts from about half of them. A box over
+        441 mm^2 of a plate at a 0.4 mm minimum casts about 11,000 rays and was
+        refused as more than 20,000. It is sampled now; one over 900 mm^2 is not."""
+        if self._skipped_here():
+            return
+        plate = _box((40.0, 40.0, 1.0), (0.0, 0.0, 0.0))
+
+        def rule(half: float) -> dict:
+            return {"process_min_wall_mm": 0.8, "wall_exceptions": [{
+                "part": "plate", "box_mm": [[-half, -half, 0.4], [half, half, 0.6]],
+                "min_mm": 0.4, "reason": "a region of the top, sampled at 0.2 mm"}]}
+
+        v = self._run(self.GATE, {"plate": plate}, rule(10.5))
+        self.assertEqual(v.outcome, "pass", v.render())
+        box = self._evidence(v)["boxes"][0]
+        self.assertGreater(box["rays"], 10_000)
+        self.assertLess(box["rays"], 20_000)
+        self.assertRefused(self._run(self.GATE, {"plate": plate}, rule(15.0)),
+                           "holds too much of 'plate' to sample")
+
+    def test_a_vertex_on_a_box_plane_keeps_its_piece(self):
+        """Review of round 3: a face whose first vertex lay on a box's plane, its
+        second outside, came out of the clip with that vertex twice, so the grid's
+        first side had no length and the piece cast no ray. 12.5 mm^2 inside the box
+        read nothing in one vertex order and 225 points in another. A box drawn at a
+        feature's coordinates puts its planes through the mesh's vertices."""
+        if self._skipped_here():
+            return
+        import numpy as np                          # noqa: PLC0415 - tools present only
+        import trimesh                              # noqa: PLC0415
+
+        box_points = self.registry.get(self.GATE)[1].__globals__["_box_points"]
+        corners = np.array([(0.0, 0.0, 0.0), (-5.0, 5.0, 0.0), (5.0, 5.0, 0.0)])
+        lo, hi = np.array([0.0, -1.0, -1.0]), np.array([10.0, 10.0, 1.0])
+        counts = []
+        for order in ([0, 1, 2], [1, 2, 0], [2, 0, 1]):
+            face = trimesh.Trimesh(vertices=corners, faces=[order], process=False)
+            points, faces, count = box_points(face, lo, hi, 0.25, 10_000)
+            self.assertEqual(len(points), count)
+            counts.append(count)
+        self.assertGreater(counts[0], 0)
+        self.assertEqual(len(set(counts)), 1, counts)
+
+
+class AChamferedEdgeIsNotAWall(_Case):
+    """Round 2 of the held-out designs: a bottom plate 1.35-1.4 mm thick read 0.605
+    mm, a ray from its underside 0.005 mm in from a 0.6 mm land that ran up beside
+    the land and hit the chamfer over it, and a housing's 1.0 mm wall read 0.699 mm
+    across the land under it. The land kept the two faces from sharing an edge, so
+    the acute-edge rule did not see the corner. A third surface nearer the ray's
+    midpoint than the two it joins makes it a ray past an edge (``_edge_rays``)."""
+
+    GATE = "cad.wall_thickness"
+
+    def test_a_plate_edge_over_a_land_reads_the_plate(self):
+        if self._skipped_here():
+            return
+        plate = _land_plate()
+        self.assertTrue(plate.is_watertight and plate.is_volume)
+        v = self._run(self.GATE, {"plate": plate}, {"process_min_wall_mm": 0.84})
+        self.assertEqual(v.outcome, "pass", v.render())
+        # The chamfer's ray to the underside, 1.226 mm: the land is 0.7 mm from its
+        # midpoint and the underside 0.433 mm, so it is a wall. The underside's two
+        # rays beside the land read 0.605 and 0.610 mm, the land 0.005 and 0.01 mm
+        # from their midpoints and the faces they join 0.298 and 0.295 mm.
+        self.assertAlmostEqual(v.measured, 1.226, places=3)
+        self.assertIn("ray(s) past an edge or along a face not counted", v.detail)
+
+    def test_a_rim_over_a_land_reads_the_wall(self):
+        if self._skipped_here():
+            return
+        rim = _land_rim()
+        self.assertTrue(rim.is_watertight and rim.is_volume)
+        v = self._run(self.GATE, {"rim": rim}, {"process_min_wall_mm": 0.84})
+        self.assertEqual(v.outcome, "pass", v.render())
+        # The chamfer's ray to the outside face, 0.943 mm. The outside face's rays
+        # read 0.6 and 0.7 mm across the land, the land 0.1 and 0.2 mm from their
+        # midpoints and the chamfer 0.224 and 0.247 mm.
+        self.assertAlmostEqual(v.measured, 0.943, places=3)
+
+    def test_a_thin_plate_with_the_same_edge_still_fails(self):
+        """The rule removes the edge, never the plate: 0.5 mm thick, a 0.2 mm land,
+        fails. What it reports is the chamfer's ray to the underside, 0.424 mm: the
+        underside is the nearest surface to its midpoint (0.15 mm, the land
+        0.25 mm), so it is a wall, and thinner than the plate's own 0.5 mm."""
+        if self._skipped_here():
+            return
+        thin = _prism([(-20.0, 0.0), (-0.015, 0.0), (0.0, 0.0), (0.0, 0.2), (-0.3, 0.5),
+                       (-20.0, 0.5)], apex=3)
+        v = self._run(self.GATE, {"plate": thin}, {"process_min_wall_mm": 0.84})
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertAlmostEqual(v.measured, 0.424, places=3)
+
+
+class AThinLipStillFails(_Case):
+    """What the edge rule keeps. A printed top's lip is thin all the way across: its
+    0.487 mm ray has the chamfer 0.172 mm from its midpoint and the land 0.237 mm,
+    and it fails a 1.2 mm minimum at 0.487 mm, as before. A groove's root is a point
+    of both its flanks, so the ray that hits one flank just past it ties with the
+    other flank, and a tie is a wall."""
+
+    GATE = "cad.wall_thickness"
+
+    def test_a_lip_with_a_chamfered_tip_fails_at_its_reading(self):
+        if self._skipped_here():
+            return
+        lip = _chamfered_lip()
+        self.assertTrue(lip.is_watertight and lip.is_volume)
+        v = self._run(self.GATE, {"top": lip}, {"process_min_wall_mm": 1.2})
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertAlmostEqual(v.measured, 0.487, places=3)
+
+    def test_a_groove_root_is_a_wall(self):
+        if self._skipped_here():
+            return
+        wall = _grooved_wall()
+        self.assertTrue(wall.is_watertight and wall.is_volume)
+        v = self._run(self.GATE, {"wall": wall}, {"process_min_wall_mm": 1.0})
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertAlmostEqual(v.measured, 0.542, places=3)
+
+
+class ARayAlongAFaceIsNotAWall(_Case):
+    """A published housing read 0.731 mm from a ray off a top face tilted 4 deg: it
+    ran down 0.017-0.05 mm beside a vertical face and met it 3.7 deg from grazing,
+    where the wall it ran beside goes on down past 1.6 mm. The face it hit was the
+    nearest surface to its midpoint, so the third-surface rule kept it. A face that
+    runs along the ray (``GRAZE_DEG``) makes it a ray past an edge."""
+
+    GATE = "cad.wall_thickness"
+
+    def test_a_ray_that_leans_into_a_face_reads_the_block(self):
+        if self._skipped_here():
+            return
+        block = _leaning_block()
+        self.assertTrue(block.is_watertight and block.is_volume)
+        v = self._run(self.GATE, {"block": block}, {"process_min_wall_mm": 1.0})
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertGreater(v.measured, 9.0)
+
+
+class ADraftedFinIsReadBelowItsLand(_Case):
+    """The cost of the edge rule, held so that it is a known case and moves only on
+    purpose. A fin drafted 15-30 deg per side loses the rays just under its top land:
+    the land is nearer their midpoints than the flank they hit, as a plate's land is
+    beside the ray that runs up past it. A 0.3 mm land on a 1.2 mm base, 1.0 mm tall,
+    is thinner than 0.45 mm for its top 0.17 mm, and the gate reads 0.495 mm, where
+    the code before the edge rule read 0.423 mm (review of round 3)."""
+
+    GATE = "cad.wall_thickness"
+
+    def test_a_minimum_under_the_reading_passes_a_thinner_top(self):
+        if self._skipped_here():
+            return
+        fin = _drafted_fin()
+        self.assertTrue(fin.is_watertight and fin.is_volume)
+        v = self._run(self.GATE, {"fin": fin}, {"process_min_wall_mm": 0.45})
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertAlmostEqual(v.measured, 0.495, places=3)
+        self.assertIn("ray(s) past an edge or along a face not counted", v.detail)
+
+    def test_a_minimum_over_the_reading_still_fails(self):
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, {"fin": _drafted_fin()}, {"process_min_wall_mm": 0.5})
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertAlmostEqual(v.measured, 0.495, places=3)
+
+
+class TheExemptPartsSurviveTheCap(_WallCase):
+    """Review of round 3: the box and edge counts came before the exempt parts, and
+    on an assembly with a box, a sliver, edge rays, a wall nearest its own minimum
+    and six exempt parts the detail reached the spine's 500 characters at "exempt,
+    not judge...". PACK.md says the detail names an exempt part so that a reader sees
+    the gap. The counts come last now, and are all in the evidence."""
+
+    def test_a_long_detail_still_names_the_exempt_parts(self):
+        if self._skipped_here():
+            return
+        exempt = ("battery", "board", "cover_glass", "display", "motor", "speaker")
+        meshes = {"lap": _lapped_web(), "edge": _land_plate(),
+                  "button": _box((20.0, 20.0, 0.48), (0.0, 40.0, 0.0)),
+                  "cube": _sliver_box()}
+        for name in exempt:
+            meshes[name] = _box((5.0, 5.0, 5.0), (0.0, -40.0, 0.0))
+        v = self._run(self.GATE, meshes, {
+            "process_min_wall_mm": 0.45,
+            "wall_exempt_parts": {name: "bought, its vendor sets it" for name in exempt},
+            "wall_exceptions": [{"part": "lap", "box_mm": WEB_BOX, "min_mm": 0.36,
+                                 "reason": "the web between the two blocks is thin on "
+                                           "purpose, so that the lap can flex"}]})
+        self.assertEqual(v.outcome, "pass", v.render())
+        evidence = self._evidence(v)
+        self.assertGreater(evidence["box_rays"], 0)
+        self.assertGreater(evidence["sliver_faces_not_cast"], 0)
+        self.assertGreater(evidence["edge_rays_not_counted"], 0)
+        self.assertIn("nearest its own minimum: 0.480 mm on button", v.detail)
+        self.assertIn("exempt, not judged: battery, board, cover_glass, display "
+                      "and 2 more", v.detail)
 
 
 def _stack(overlap: float) -> dict:
