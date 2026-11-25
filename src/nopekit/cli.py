@@ -1755,6 +1755,50 @@ def _limit_lines(view: Ledger, stale_gates: Iterable[str] = ()) -> list[str]:
     return out
 
 
+def _limits_left_out(view: Ledger, resolution: Any, registry: Any) -> str:
+    """`doctor`'s limits clause for what its row did not compare, or ``""``:
+    each covering evaluator whose value a claim with a limit compares
+    (`claims.compared_gates`), whose verdict states a limit of its own, and
+    which `claims.limit_disagreements` leaves out because it is in the
+    resolver's ``stale_gates`` — said as reading inputs nopekit cannot see
+    (`claims.unseen_gates`) or as stale — then the check run that compares
+    them (`report._tier_flag`). In claim order, each evaluator once.
+
+    What slipped through (holdout, general packs, round 2, D06, disputed): an
+    evaluator that reads inputs nopekit cannot see is in ``stale_gates`` after
+    every check run, so the row never compared it, and read "ok — every
+    compared evaluator judges against its claim's own limit" while `check`
+    warned that its limit parted from its claim's. It read true on one design
+    only because that evaluator came to report its claim's limit. *Rejected:*
+    comparing such an evaluator's last limit here (its seen inputs may have
+    moved too, as a limit edit moves a stale one's, and the row would blame it
+    for an old number: review of P2.4); a warning for each (the opaque-inputs
+    row already warns of the channel, and the row moves no status)."""
+    stale = frozenset(getattr(resolution, "stale_gates", None) or ())
+    if not stale:
+        return ""
+    unseen = claims.unseen_gates(resolution)
+    said = report.HUMAN["acceptance"]
+    named: dict[str, str] = {}
+    for claim in view.claims:
+        compared = set(claims.compared_gates(claim, view.verdicts))
+        for verdict in claims.covering_verdicts(claim, view.verdicts):
+            gid = verdict.gate
+            limit = verdict.limit
+            if gid in named or gid not in stale or gid not in compared:
+                continue
+            if isinstance(limit, bool) or not isinstance(limit, (int, float)) \
+                    or not math.isfinite(limit):
+                continue            # no limit of its own: nothing for the row to compare
+            key = "left_out_unseen" if gid in unseen else "left_out_stale"
+            named[gid] = said[key].format(gate=gid)
+    if not named:
+        return ""
+    return said["doctor_left_out"].format(
+        list=", ".join(named.values()), tier_flag=report._tier_flag(registry, named),
+        them="it" if len(named) == 1 else "them")
+
+
 def _controls_line(controls: Mapping[str, int]) -> str:
     """`controls: N run, N preserved, N re-qualified` (GLOSSARY §9): run —
     fixtures and gate ran; preserved — the records settled it; re-qualified —
@@ -8873,8 +8917,110 @@ def _cache_notes(root: str, resolution: verdicts.Resolution) -> dict[str, list[s
     return sorted_notes
 
 
+#: `verdicts.read_controls`' note for two control entries at one rho_control:
+#: the gate and the entries' names, read back to judge the pair
+#: (`_two_control_notes`). *Rejected:* a second read of every gate's controls
+#: grouped by rho here — two copies of the grouping rule, and a note the
+#: resolver wrote that this row then never classified.
+_TWO_CONTROLS = re.compile(r"^(\S+): two control outcomes recorded for identical inputs "
+                           r"\((.+)\)$")
+
+
+def _seen_reads_moved(control: Any, now: Any, *, have_model: bool) -> str:
+    """Why a run now could not read what ``control`` recorded, or ``""``:
+    `verdicts._control_moved` — the files and listings either half read, and
+    the host params a live-host fixture read — over what nopekit can see. An
+    opaque channel is dropped first: the admission never calls an opaque
+    control current, but what nopekit cannot see it cannot call moved, so it
+    is no reason to call a pair history. Host reads are dropped too when the
+    model did not load: then nothing here can say they moved."""
+    reads = {k: v for k, v in (control.reads or {}).items() if k != "opaque"}
+    if not have_model:
+        reads["host"] = []
+    good = control.good
+    if isinstance(good, Mapping) and isinstance(good.get("reads"), Mapping):
+        good = {**good, "reads": {k: v for k, v in good["reads"].items() if k != "opaque"}}
+    return verdicts._control_moved(dataclasses.replace(control, reads=reads, good=good), now)
+
+
+def _two_control_notes(found: list[str], root: str, registry: gates.Registry,
+                       resolution: verdicts.Resolution, projection: Any
+                       ) -> tuple[list[str], list[str]]:
+    """``(live, history)``: the two-controls notes split by whether a run at
+    the gate's current version and inputs could land on their rho_control.
+    rho_control keys the static part (`verdicts.control_static`: the spine, the
+    gate's code, its owner's `selftest/` walk, the control's fields) and what
+    both halves read, so a pair at another static part, or on a file, listing
+    or host param that reads otherwise now (`_seen_reads_moved`), is history: no
+    current run can serve it or write beside it, and entries are never
+    rewritten. Each history item says which. Everything else stays live, the
+    row's FAIL: a note this cannot read back, a pair whose entries it cannot
+    find, a static part it cannot compute, and a pair at the current version
+    whose only reads it cannot check (an opaque channel; a ledger key, which
+    the next check run settles by running the fixture). An evaluator not
+    registered here is history: nothing here runs it.
+
+    What slipped through (holdout, general packs, round 2): `check` wrote two
+    control outcomes for a pack's gate at one rho; the pack's fix moved its
+    code, and `check` qualified it "paired" at the new version — and `doctor`
+    stayed red, "the gate is not deterministic, and neither answer counts", on
+    the two old entries, for good: no command removes a cache entry. *Rejected:*
+    the admission's own pool (`verdicts._admission` keeps it to itself, and it
+    leaves out an opaque control, which would call a real conflict history);
+    the static part alone (a pair on a moved data file would stay red for good,
+    as the code fix did); warning on history (a row that is always there and
+    never actionable: git keeps the entries, and no admission at the current
+    version stands on them)."""
+    live: list[str] = []
+    history: list[str] = []
+    entries: dict[str, dict] = {}
+    statics: dict[str, str | None] = {}
+    now: list[Any] = []
+    for note in found:
+        match = _TWO_CONTROLS.match(note)
+        if match is None:
+            live.append(note)
+            continue
+        gate_id, names = match.group(1), match.group(2).split(", ")
+        shown = f"{gate_id}: two control outcomes ({', '.join(names)})"
+        pair = registry.get(gate_id)
+        if pair is None:
+            history.append(f"{shown} of an evaluator not registered here")
+            continue
+        if gate_id not in entries:
+            try:
+                entries[gate_id] = {c.name: c for c in verdicts.read_controls(root, gate_id)}
+            except NopekitError:
+                entries[gate_id] = {}
+        group = [entries[gate_id][n] for n in names if n in entries[gate_id]]
+        if gate_id not in statics:
+            try:
+                statics[gate_id] = verdicts.control_static(pair[0], pair[1], root,
+                                                           anchors=resolution.anchors)[0]
+            except (NopekitError, OSError):
+                statics[gate_id] = None
+        static = statics[gate_id]
+        if not group or static is None:
+            live.append(note)
+            continue
+        at_version = [c for c in group if c.static == static]
+        if not at_version:
+            history.append(f"{shown} at another version of the evaluator")
+            continue
+        if not now:
+            now.append(verdicts._Now(root, projection, None, anchors=resolution.anchors,
+                                     digests=FileDigests()))
+        moved = [_seen_reads_moved(c, now[0], have_model=projection is not None)
+                 for c in at_version]
+        if all(moved):
+            history.append(f"{shown} on inputs that moved since ({moved[0]})")
+        else:
+            live.append(note)
+    return live, history
+
+
 def _doctor_cache_rows(results: list[dict], root: str, registry: gates.Registry,
-                       resolution: verdicts.Resolution) -> None:
+                       resolution: verdicts.Resolution, projection: Any = None) -> None:
     """The rows for what the verdict cache knows and rho cannot key: one row each,
     `ok` when there is nothing to say, so a clean project shows it looked."""
     notes = _cache_notes(root, resolution)
@@ -8907,14 +9053,27 @@ def _doctor_cache_rows(results: list[dict], root: str, registry: gates.Registry,
     # `TWO_OUTCOMES_IS_ERROR` was staged, and is a failure since U25 flipped it
     # (spec §3.7, R-4: an error only once EntriesAreDeterministic had proven the
     # bundled corpus deterministic); read at call time, so the flip was one
-    # constant. A control's always was a failure: its gate is not admitted.
-    outcomes, controls = notes.get("two-outcomes", []), notes.get("two-controls", [])
+    # constant. A control's always was a failure: its gate is not admitted —
+    # while a current run could land on it; a pair no current run can reach is
+    # history, named after the failures and never one (`_two_control_notes`).
+    outcomes = notes.get("two-outcomes", [])
+    controls, history = _two_control_notes(notes.get("two-controls", []), root, registry,
+                                           resolution, projection)
     failing = bool(controls) or (bool(outcomes) and verdicts.TWO_OUTCOMES_IS_ERROR)
-    _check(results, "two-outcomes",
-           "FAIL" if failing else "warn" if outcomes else "ok",
-           _listed(controls + outcomes) + " — the same inputs gave two answers: the gate is "
-                                          "not deterministic, and neither answer counts"
-           if controls or outcomes else "no gate recorded two outcomes for identical inputs")
+    if controls or outcomes:
+        detail = (_listed(controls + outcomes) + " — the same inputs gave two answers: the "
+                  "gate is not deterministic, and neither answer counts")
+    elif history:
+        detail = ("no gate recorded two outcomes for identical inputs at its current version "
+                  "and inputs")
+    else:
+        detail = "no gate recorded two outcomes for identical inputs"
+    if history:
+        detail += ("; history, not a failure: " + _listed(history)
+                   + " — no run at the evaluator's current version and inputs can reach "
+                     "these entries")
+    _check(results, "two-outcomes", "FAIL" if failing else "warn" if outcomes else "ok",
+           detail)
 
     found = notes.get("code-digest", [])
     _check(results, "code-digest", "warn" if found else "ok",
@@ -10211,21 +10370,26 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                if v.gate in registered and v.outcome == "error"
                and not getattr(v, "unqualified", "")]
     results[crash_at:crash_at] = crashes
-    _doctor_cache_rows(results, root, registry, resolution)
+    _doctor_cache_rows(results, root, registry, resolution, projection)
     _doctor_qualification_rows(results, root, registry, resolution, projection=projection,
                                ledger=ledger)
     # P2.4-D13: an evaluator judging against a limit of its own that is not its
     # claim's — a warning, never a status (S-35) — over current verdicts only.
     # The row is always there (review of P2.4): it appeared only when it warned,
     # so a reader could not tell it had run, and the count of diagnostics moved
-    # with the outcome.
+    # with the outcome. Each covering evaluator it compared no limit of because
+    # its result is not current here is named, with why (`_limits_left_out`).
     parted = _limit_lines(view, resolution.stale_gates)
     said = report.HUMAN["acceptance"]
     if parted:
-        _check(results, "limits", "warn", said["doctor_warn"].format(
-            n=len(parted), list="; ".join(line.split(": ", 1)[1] for line in parted)))
+        detail = said["doctor_warn"].format(
+            n=len(parted), list="; ".join(line.split(": ", 1)[1] for line in parted))
     else:
-        _check(results, "limits", "ok", said["doctor_ok"])
+        detail = said["doctor_ok"]
+    left_out = _limits_left_out(view, resolution, registry)
+    if left_out:
+        detail += "; " + left_out
+    _check(results, "limits", "warn" if parted else "ok", detail)
     # SPEC decision 13: the evaluators claims' mechanisms name, against the
     # registry — always a row, never a FAIL: a cross-check is not an integrity
     # fault, and it moves no status.

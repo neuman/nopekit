@@ -1204,6 +1204,20 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "why_note": "acceptance: none — the test is its mechanism",
         "why_judgment": "acceptance: none — settled only by {authority}'s judgment",
         "doctor_warn": "{n} evaluator limit(s) part from their claim's: {list}",
+        # The limits row's clause for each covering evaluator it compared no
+        # limit of: its result is not current here (`cli._limits_left_out`).
+        # What slipped through (holdout, general packs, round 2, D06): the row
+        # read "ok" over an evaluator that reads inputs nopekit cannot see,
+        # which no reader after a check run calls current, so the row never
+        # compared it and said nothing of it. `check` compares it in its own
+        # run, and warns there.
+        # The command unquoted, as `unseen`'s "nopekit check{tier_flag}": a code
+        # span is a command `test_docs_commands` parses, and a template's
+        # placeholder in one reads as part of the subcommand.
+        "doctor_left_out": "not compared: {list} — nopekit check{tier_flag} compares {them}, "
+                           "and warns for each limit that parts",
+        "left_out_unseen": "{gate} (it reads inputs that nopekit cannot see)",
+        "left_out_stale": "{gate} (its result is stale)",
     }),
     # Who entered a physical result (GLOSSARY §1, *recorded by*): named, or the
     # unattributed form. What slipped through (review of P2.1): one template for
