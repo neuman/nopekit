@@ -81,3 +81,45 @@ is judged at the highest setting Kconfig offered the SoC.
 - A front-end module's literal capped at the SoC's options. With a module, NCS's
   level is antenna-referenced, and the SoC's options do not cap it.
   `sdc_default_tx_power_set(20)` read +8 dBm and passed a 10 dBm grant.
+
+## What the holdout projects found
+
+Four real firmware repositories, replayed by people who had not written the pack:
+
+- A read-back that took the bytes of every image the job wrote, against a cap sized
+  on the baseline. An NCS sysbuild wrote 284 MB of images, and a sound build read
+  errored. Now only the images the gates name come back whole.
+- An errored replay that kept no log, with a reason that quoted act's `Job
+  failed`. Each person replayed the failure by hand. The log is now kept on every
+  outcome, and the reason quotes the failing step's first cause line.
+- A failed job's container, left running after each failed replay. act now runs
+  with `--rm`, and the replay removes the copy's containers on every outcome.
+- Four replays in one check where the pack promised one. The replay's lock asked
+  whether `/tmp` exists, and `/tmp` moved between every two gates. The lock now
+  asks nothing of a path by name.
+- A matrix job that could not be replayed one entry at a time, an install over the
+  runner image's empty apt lists with no named cause, and a fixed 1800 s timeout.
+  `firmware_ci_matrix`, the named apt difference and `firmware_ci_timeout_s` answer
+  them.
+- A guard pass that said "no masking" over a build inside a Python script that
+  discards docker's status. The pass now says it read the step's own lines, and
+  names the script.
+- A fixed 100 % limit beside a claim that stated headroom, which made the spine
+  warn "one number in two places". The gate now reports the `flash-fit` claim's
+  limit.
+- An arduino-cli template that never made its `BINDIR` and was never replayed.
+
+## What the review of those fixes found
+
+- A timeout that wrote an empty log. The replay returned before it read act's
+  output. The log now holds what act wrote up to the stop, and the error names the
+  step that was still running.
+- A pass that named the matrix entry the project asked for, not the one act ran.
+  act ignores a `--matrix` key the job's matrix does not have. Such a key is now
+  errored, and the pass names the entry act logged.
+- Two `flash-fit` claims with different limits, which errored the gate with the
+  spine's advice to a gate's author. The error now says first to keep the tag on
+  the headroom claim.
+- A replay that read `HOME` through `os.path.expanduser`, where its docstring said
+  it read no environment variable. The action cache and the fallback lock are now
+  under the uid's home in the user database.

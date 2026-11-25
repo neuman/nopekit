@@ -16,8 +16,9 @@ The lists live in `gates/_replay.py` (`TOOL_FAULT_LINES`, `DESIGN_LINES`,
 |---|---|---|
 | the build step's process ended on a signal (`exitcode '137'`: 128 + 9) | errored | `act_esp_signal_137.jsonl`: a second replay of the same workflow removed this one's container mid-build |
 | act or docker stops before any step of the job | errored | `docker_125.log`: `docker: Error response from daemon: invalid mount config` |
-| a step before the build fails | errored, naming the step | (the pack cannot tell a manifest error from a network fault) |
-| the run passes its 1800 s timeout | errored; the job's containers are stopped | (none needed: the pack's own clock) |
+| a step before the build fails | errored, naming the step and quoting its first cause line | (the pack cannot tell a manifest error from a network fault) |
+| a step before the build fails on `E: Unable to locate package` in a pinned runner image, with no `apt-get update` before it | errored, naming the empty apt lists as the replay's difference from GitHub | `act_apt_empty_lists.jsonl`: `sudo apt-get install -y gcc-arm-none-eabi make` in act-24.04 |
+| the run passes its timeout (`firmware_ci_timeout_s`, default 1800 s) | errored; the job's containers are removed | (none needed: the pack's own clock) |
 
 ## Tool lines: errored, never a fail
 
@@ -28,7 +29,22 @@ The lists live in `gates/_replay.py` (`TOOL_FAULT_LINES`, `DESIGN_LINES`,
 
 A failed step whose output holds none of these lines and no design line is errored
 too. `docker_127.log` (`exec: "no-such-command": executable file not found`) is
-the excerpt for that case.
+the excerpt for that case. The reason quotes the step's first cause line, in this
+order of the log: `CMake Error`, apt's `E:`, `error:`, `FATAL ERROR`. A west
+configure failure ends with west's `FATAL ERROR`, and its cause is the `CMake
+Error` line above it.
+
+## Replay gaps in a step that read success: errored
+
+| Line | Excerpt |
+|---|---|
+| `failed to connect to the docker API`, `Cannot connect to the Docker daemon` | `act_script_docker.jsonl`: `python3 scripts/build.py`, which runs `docker build` with no status check, in act-24.04 (the replay mounts no docker socket into jobs) |
+| `python3: can't open file` | the same excerpt: the script runs a file the copy does not hold |
+| a shell's `docker: not found`, a shell's `No such file or directory` for a script | named, not measured |
+
+These are checked before the image the job wrote. A script that ignores its
+commands' status built nothing here, and the image it did not write is the
+replay's gap, never the design's fault.
 
 ## Design lines: a fail
 

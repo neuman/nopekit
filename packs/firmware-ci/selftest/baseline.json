@@ -15,6 +15,14 @@
       "acceptance": {"quantity": "bluetooth le transmit power setting", "comparator": "<=", "limit": 7.0, "units": "dBm"},
       "tags": ["ble-tx-power"],
       "rationale": "a calibration value for this pack's control, not any module's grant: 7 dBm sits between the ESP32-S3's +6 and +9 dBm steps, so the known-bad's default (+9 dBm) is the nearest step past it, and a gate that rounds the limit up to a step still fails it. A project's claim states the setting its radio's grant was tested at, from the test report or the integration manual, never the grant's listed output."
+    },
+    {
+      "id": "FIT",
+      "statement": "The firmware image leaves headroom in its smallest app slot: flash use at most 85 %",
+      "kind": "measurable",
+      "acceptance": {"quantity": "flash use", "comparator": "<=", "limit": 85.0, "units": "%"},
+      "tags": ["flash-fit"],
+      "rationale": "a calibration value for this pack's control, the headroom PACK.md's tag vocabulary shows: fw.image_fits reads its limit from the flash-fit claim, so the known-good (48.3 %) is judged on that route, and the known-bad (385.8 %, past the region itself) fails on its bytes whatever the claim says. A project's claim states the headroom its own update plan needs."
     }
   ],
 
@@ -24,7 +32,9 @@
     "firmware_image": "The file the device receives (.uf2, .hex, .bin or .elf), as a glob in the job's workspace. fw.build fails when the job writes no file it names; fw.image_fits needs it.",
     "firmware_elf": "The ELF in the job's workspace, as a glob. fw.sleep_wake reads its symbols and the .config and zephyr.dts beside it; fw.image_fits reads its RAM segments and machine beside a UF2 or HEX image.",
     "app_memory_map": "The region the bootloader or partition table leaves the app, from a cited record (the param record's source names the bootloader layout, the datasheet section or the partition table): {flash: {start, size}, app: {start, size, vector_at?}, ram?: [{start, size}], other?: [{name, start, size}]}, {app: {size}}, or {esp_partition_table: <csv path>, offset?}. Numbers are ints or \"0x…\" strings, in bytes. Never taken from the build.",
-    "firmware_ci_step": "Optional: the build step's name or id, when its command is not on the recognised list (a build inside ./build.sh).",
+    "firmware_ci_step": "Optional: the build step, when its command is not on the recognised list (a build inside ./build.sh): its name, its id, or, for a step with neither, its run's first line (the name act logs for it).",
+    "firmware_ci_matrix": "Optional: the one entry of a matrix job to replay, {key: value} with a value for each key of the matrix (act's --matrix key:value). Without it a matrix job replays every entry in one workspace, and the readers error.",
+    "firmware_ci_timeout_s": "Optional: the replay's wall clock in s (default 1800). A cold west update, or a job that installs a toolchain, can need more.",
     "deep_sleep_wakes_by_reset": "Optional: what resets the chip when reset is the intended wake, e.g. \"power button on EN\". It turns an ESP no-wake FAIL into a skip that asks for a physical claim. It never makes a pass."
   },
   "_aliases": {}

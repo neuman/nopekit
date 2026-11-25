@@ -15,7 +15,8 @@ ZMK, ESP-IDF, Arduino, PlatformIO, the Pico SDK, QMK and STM32 make builds take 
 same path. ``fw.ci_job`` is the replay's validity guard: each way it fails means a
 replay's green would not describe the build. ``fw.build`` needs it, and the three
 readers need ``fw.build``; a gate whose prerequisite did not pass reads Skipped.
-One replay per sweep: the four tier-1 gates share it through ``ctx.load_file``.
+One replay per sweep: the four tier-1 gates share it through ``ctx.load_file``
+(``_replay.loader``; measured in tests/test_firmware_ci, ``OneReplayPerSweep``).
 
 **What slipped through, and which gate it is for** (references/what-slipped-through.md):
 
@@ -49,6 +50,7 @@ import posixpath
 from nopekit.gates import gate, GateContext
 from nopekit.modelio import load_path as _load_path
 from nopekit.models import NegativeControl, Tier, Verdict
+from nopekit.util import NopekitError
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 C = _load_path(os.path.join(_HERE, "_ci.py"))
@@ -96,24 +98,58 @@ def _job(ctx: GateContext, path: str):
     return found, wf
 
 
+def _matrix(ctx: GateContext) -> dict:
+    """``firmware_ci_matrix``: the one entry of a matrix job to replay, ``{key:
+    value}`` (act's ``--matrix key:value``, one per key); ``{}`` when unset."""
+    raw = ctx.param("firmware_ci_matrix")
+    if raw is None or raw == {}:
+        return {}
+    if not isinstance(raw, dict) or not all(
+            isinstance(k, str) and k and ":" not in k
+            and isinstance(v, (str, int, float, bool)) for k, v in raw.items()):
+        raise R.ToolFault(f"firmware_ci_matrix is {raw!r}; it names one matrix entry as "
+                          f"{{key: value}}, a value for each key of the job's matrix")
+    return dict(raw)
+
+
+def _timeout(ctx: GateContext) -> float | None:
+    """``firmware_ci_timeout_s``: the replay's wall clock in s; ``None`` for the
+    pack's own (``_replay.TIMEOUT_S``)."""
+    raw = ctx.param("firmware_ci_timeout_s")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 < raw < 1e6:
+        raise R.ToolFault(f"firmware_ci_timeout_s is {raw!r}; it is the replay's wall clock "
+                          f"in s, more than 0")
+    return float(raw)
+
+
 def _replayed(ctx: GateContext, path: str):
-    """``(job, workflow, result)``: the sweep's one replay of the build job."""
+    """``(job, workflow, result)``: the sweep's one replay of the build job.
+
+    Every gate that reads the replay asks for it with the same loader: the job,
+    the images that come back whole (``firmware_image`` and ``firmware_elf``,
+    read by every such gate, so one replay serves them all), the matrix entry
+    and the timeout (``_replay.loader``)."""
     job, wf = _job(ctx, path)
-    return job, wf, ctx.load_file(path, loader=R.loader(job.job))
+    keep = tuple(g for g in (_opt(ctx, "firmware_image"), _opt(ctx, "firmware_elf")) if g)
+    return job, wf, ctx.load_file(path, loader=R.loader(job.job, keep, _matrix(ctx),
+                                                         _timeout(ctx)))
 
 
 def _built(ctx: GateContext, path: str):
     """``(job, result)`` of a replay whose build stands, judged again as fw.build
-    judges it; :class:`R.ToolFault` when it does not, and on a matrix job, whose
-    entries share one workspace in bind mode, so its files are the last entry's."""
+    judges it; :class:`R.ToolFault` when it does not, and on a matrix job replayed
+    whole, whose entries share one workspace in bind mode, so its files are the
+    last entry's (``firmware_ci_matrix`` names the one entry to replay)."""
     job, wf, result = _replayed(ctx, path)
     passed, detail = R.judge(result, job, _opt(ctx, "firmware_image"), R.tolerated(wf, job))
     if not passed:
         raise R.ToolFault(f"the build does not stand ({detail}); fw.build says why")
-    if job.matrix:
+    if job.matrix and not result.get("matrix"):
         raise R.ToolFault(f"job {job.job} has a matrix: in a replay its entries share one "
                           f"workspace in turn, so the files left are the last entry's; "
-                          f"give each image its own job")
+                          f"name one entry in firmware_ci_matrix")
     return job, result
 
 
@@ -164,7 +200,23 @@ def ci_job(ctx: GateContext) -> Verdict:
         return Verdict(gate=gid, passed=False, error=f"refused: {exc}")
     if isinstance(found, C.Fail):
         return Verdict(gate=gid, passed=False, detail=found.reason)
-    return Verdict(gate=gid, passed=True, detail=f"{_describe(found)}; no masking")
+    return Verdict(gate=gid, passed=True, detail=f"{_describe(found)}; {_read(found)}")
+
+
+def _read(job) -> str:
+    """What the guard's pass rests on: the step's own lines, and what it did not
+    read. What slipped through "no masking" (holdout review, a console's
+    upstream workflow): the build ran in a Python script that discards docker's
+    exit status, and the pass claimed what only the step's own lines showed."""
+    said = "no masking in the step's own lines"
+    if job.command.startswith("uses: "):
+        return f"{said}; the action's own steps are not read"
+    if job.unread:
+        verb = "is" if len(job.unread) == 1 else "are"
+        return f"{said}; {', '.join(job.unread)} {verb} not read"
+    if job.command == "the named step":
+        return f"{said}; what its command runs is not read"
+    return said
 
 
 # --------------------------------------------------------------------------- #
@@ -203,12 +255,18 @@ def build(ctx: GateContext) -> Verdict:
         return _skip(gid, _NO_WORKFLOW)
     try:
         job, wf, result = _replayed(ctx, path)
-        passed, detail = R.judge(result, job, _opt(ctx, "firmware_image"),
-                                 R.tolerated(wf, job))
     except R.WrongAct as exc:
         return _skip(gid, str(exc))
     except R.ToolFault as exc:
         return Verdict(gate=gid, passed=False, error=str(exc))
+    # The log is kept on every outcome the replay reached: an errored replay's
+    # cause sits in the failing step's own output (``_replay.evidence``).
+    try:
+        passed, detail = R.judge(result, job, _opt(ctx, "firmware_image"),
+                                 R.tolerated(wf, job))
+    except R.ToolFault as exc:
+        return Verdict(gate=gid, passed=False, error=str(exc),
+                       evidence=R.evidence(result, job, ctx.out_path))
     return Verdict(gate=gid, passed=passed, detail=detail,
                    evidence=R.evidence(result, job, ctx.out_path))
 
@@ -216,6 +274,47 @@ def build(ctx: GateContext) -> Verdict:
 # --------------------------------------------------------------------------- #
 # what the image shows
 # --------------------------------------------------------------------------- #
+#: The tag whose claim states flash-use headroom (PACK.md's tag vocabulary:
+#: ``{"quantity": "flash use", "comparator": "<=", "limit": 85, "units": "%"}``),
+#: and the one condition ``fw.image_fits`` reads. What slipped through a fixed
+#: limit of 100 (holdout review, two projects): a claim that stated the
+#: headroom PACK.md recommends made the spine warn "one number in two places"
+#: (``claims.limit_disagreements``: the verdict said 100, the claim 85), the
+#: warning the spine keeps for a limit copied into a gate. Now the gate reports
+#: the claim's limit, and judges the bytes against the region as before.
+#: *Rejected:* reading ``memory-fit`` and ``ota-slot`` too (a claim there may
+#: hold RAM use or another quantity, and a pass is held to every condition its
+#: run read, ``gates._held_to_acceptances``); no limit on the verdict (the spine
+#: compares a value only beside a limit, and the region's own bound is the
+#: limit when no claim states one).
+FIT_TAG = "flash-fit"
+FIT_QUANTITY = "flash use"
+FIT_COMPARATORS = ("<=", "<")
+#: The spine's words for a goalpost that is absent (``verdicts.acceptance_of``):
+#: no claim carries the tag, or its claim states no limit. Either leaves the
+#: region's own bound, 100 %, as the limit. Any other problem (two conditions
+#: under the tag, a limit that is not a number) errors the gate. Should the
+#: spine's wording change, the gate errors where it fell back: loud, never a
+#: pass against a guess.
+_ABSENT = ("no claim is named or tagged", "has no limit to judge against")
+#: The spine's words for two conditions under the tag (``verdicts.acceptance_of``:
+#: ``'flash-fit' names A (...) and B (...): read one claim by its id``). The gate
+#: still errors, as the spine's contract says (one goalpost per tag), and says
+#: what the project does: the tag is the pack's, so "read one claim by its id",
+#: the spine's advice to a gate's author, is not the project's to follow. What
+#: slipped through quoting the spine alone (review of the holdout fixes): a
+#: project with a claim at the region's bound (flash use <= 100 %) and a
+#: headroom claim (<= 85 %), both tagged ``flash-fit``, read an error it could not
+#: act on, where a gate that always said 100 had passed them. *Rejected:* the
+#: strictest limit (the looser claim then reads Failing between the two limits,
+#: and the spine warns "one number in two places" on its limit); the region's
+#: bound, as before (that warning comes back on the headroom claim, the one this
+#: gate's reading of the claim removed); advising ``memory-fit`` or ``ota-slot``
+#: for the other claim (the gate covers both tags, so its verdict at the headroom
+#: is that claim's too, with the same warning). Should the spine's wording
+#: change, the spine's own words reach the project: loud, never a pass.
+_TWO = ": read one claim by its id"
+
 _NO_MAP = ("no app_memory_map: the region the bootloader or partition table gives the "
            "app, from a cited record ({flash, app, ram?, other?}, {app: {size}} or "
            "{esp_partition_table: <csv>}); this pack never takes it from the linker "
@@ -248,11 +347,12 @@ def image_fits(ctx: GateContext) -> Verdict:
     """Flash use in % of the region, rounded up to 0.1 %: on the address route,
     the highest byte the image writes past the app's start; on the size routes,
     the file against the slot (an ESP partition table's smallest app partition,
-    read by ESP-IDF's own parser). Limit 100, the region's own bound, and the pass
-    is decided on bytes; a claim's headroom (``flash use <= 85 %``) is held by the
-    spine's cross-check. Fails with no limit: bytes in flash outside the app, a
-    vector table not where the bootloader jumps, a RAM segment past a stated bank
-    or in the Arm SRAM region outside every stated bank."""
+    read by ESP-IDF's own parser). The limit is the ``flash-fit`` claim's
+    headroom (``flash use <= 85 %``) where one states it, else 100, the region's
+    own bound. Either way one byte past the region fails: the bytes decide that,
+    not the rounded figure. Fails with no limit: bytes in flash outside the app,
+    a vector table not where the bootloader jumps, a RAM segment past a stated
+    bank or in the Arm SRAM region outside every stated bank."""
     gid = "fw.image_fits"
     path = _workflow(ctx)
     if path is None:
@@ -266,6 +366,7 @@ def image_fits(ctx: GateContext) -> Verdict:
                           ".bin or .elf), as a path in the job's workspace, e.g. "
                           "build/*.bin")
     try:
+        acc = _fit_limit(ctx)
         mm = I.parse_map(raw)
         _job_, result = _built(ctx, path)
         name, image = R.built_file(result, glob, "firmware_image")
@@ -289,16 +390,57 @@ def image_fits(ctx: GateContext) -> Verdict:
             fit = I.judge_address(image, name, mm, elf)
     except R.WrongAct as exc:
         return _skip(gid, str(exc))
-    except (R.ToolFault, I.ImageFault) as exc:
+    except (R.ToolFault, I.ImageFault, NopekitError) as exc:
         return Verdict(gate=gid, passed=False, error=str(exc))
     if fit.problems:
         return Verdict(gate=gid, passed=False, detail="; ".join(fit.problems))
-    # The pass is the bytes' (``fit.fits``), and the figure is rounded up, so the
-    # two agree: what slipped through a figure rounded to the nearest 0.1 % is in
-    # ``_image.percent_up``.
-    return Verdict(gate=gid, passed=fit.fits and fit.measured <= 100.0,
-                   measured=fit.measured, limit=100.0, comparator="<=", units="%",
-                   detail=fit.said)
+    # The region's bound is the bytes' (``fit.fits``), and the figure is rounded
+    # up, so the two agree: what slipped through a figure rounded to the nearest
+    # 0.1 % is in ``_image.percent_up``. A claim's headroom is judged on the
+    # same rounded-up figure, so it never passes a byte the claim rejects.
+    if acc is None:
+        return Verdict(gate=gid, passed=fit.fits and fit.measured <= 100.0,
+                       measured=fit.measured, limit=100.0, comparator="<=", units="%",
+                       detail=fit.said)
+    detail = f"{fit.said}; against {acc.comparator.value} {acc.limit:g} % ({FIT_TAG})"
+    if not fit.fits:
+        detail += "; past the region itself"
+    return Verdict(gate=gid, passed=fit.fits and acc.holds(fit.measured),
+                   measured=fit.measured, limit=acc.limit, comparator=acc.comparator.value,
+                   units="%", detail=detail)
+
+
+def _fit_limit(ctx: GateContext):
+    """The ``flash-fit`` claim's condition when one states a limit (``FIT_TAG``),
+    else ``None``: the region's own bound. :class:`R.ToolFault` when the claim
+    states it in a form this gate does not compute (flash use in %, held as at
+    most), and when two claims under the tag state different conditions
+    (``_TWO``)."""
+    try:
+        acc = ctx.acceptance(FIT_TAG)
+    except NopekitError as exc:
+        said = str(exc)
+        if any(words in said for words in _ABSENT):
+            return None
+        if said.endswith(_TWO):
+            # The advice first: a verdict's error is cut at 200 characters
+            # (``gates._one_line``), and claim ids can be long.
+            raise R.ToolFault(f"keep the {FIT_TAG} tag on one claim, the one that states the "
+                              f"headroom, and take it off the rest: "
+                              f"{said[:-len(_TWO)]}") from exc
+        raise
+    # The quantity as the spine's cross-check matches it (``claims._quantity``:
+    # casefolded, ``-`` and ``_`` read as spaces), so the gate reads exactly the
+    # claims the spine would compare its value with.
+    quantity = " ".join(str(acc.quantity or "").casefold().replace("-", " ")
+                        .replace("_", " ").split())
+    if (quantity != FIT_QUANTITY or str(acc.units or "").strip() != "%"
+            or acc.comparator.value not in FIT_COMPARATORS):
+        raise R.ToolFault(
+            f"the claim tagged {FIT_TAG} states {acc.quantity!r} {acc.comparator.value} "
+            f"{acc.limit:g} {acc.units!r}; this gate judges {FIT_QUANTITY!r} in '%', at most "
+            f"({' or '.join(FIT_COMPARATORS)}): state the headroom so")
+    return acc
 
 
 @gate(

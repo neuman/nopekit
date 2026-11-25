@@ -30,7 +30,9 @@ Run:  PYTHONPATH=src python3 -m unittest tests.test_firmware_ci -v
 """
 from __future__ import annotations
 
+import dataclasses
 import functools
+import hashlib
 import importlib.util
 import json
 import os
@@ -46,6 +48,7 @@ import unittest
 from unittest import mock
 
 import _env
+from nopekit import claims as claims_mod
 from nopekit import gates as gates_mod
 from nopekit import packs as packs_mod
 from nopekit import verdicts as verdicts_mod
@@ -357,6 +360,82 @@ class TheGuardReadsTheWorkflow(unittest.TestCase):
                 self.assertNotEqual(job.command, "the named step")
 
 
+@unittest.skipUnless(HAS_YAML, NO_YAML)
+class TheGuardSaysWhatItRead(unittest.TestCase):
+    """``fw.ci_job``'s pass rests on the build step's own lines. What slipped
+    through "no masking" (holdout review, a console's upstream workflow): the
+    build ran in ``python3 <script>.py build``, the script ran docker through
+    ``bash -c`` with no status check, a failed build exited 0, and the pass
+    claimed more than the guard read."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix="fw-ci-said-")
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        self.spec, self.fn = _registry().get("fw.ci_job")
+
+    def _guard(self, steps: str, **params):
+        path = _write(self.repo, ".github/workflows/build.yml",
+                      _workflow(steps=steps, container=None))
+        ctx = gates_mod.GateContext(root=self.repo, ledger=Ledger(),
+                                    params={"firmware_ci_workflow": path, **params},
+                                    out_dir=os.path.join(self.repo, "out"), tier=0,
+                                    log=lambda _m: None, extra={})
+        return self.fn(ctx)
+
+    def test_a_script_the_step_runs_is_named_as_not_read(self):
+        v = self._guard("      - name: Build Script\n        run: python3 tools/fw.py build\n",
+                        firmware_ci_step="Build Script")
+        self.assertTrue(v.passed, v.render())
+        self.assertTrue(v.detail.endswith("; no masking in the step's own lines; tools/fw.py "
+                                          "is not read"), v.detail)
+        v = self._guard("      - name: Build\n        run: ./ci/build.sh && bash ci/pack.sh\n",
+                        firmware_ci_step="Build")
+        self.assertIn("./ci/build.sh, ci/pack.sh are not read", v.detail)
+
+    def test_a_command_the_pack_knows_says_only_the_steps_lines(self):
+        v = self._guard("      - name: Build\n        run: west build -b x\n")
+        self.assertTrue(v.detail.endswith("; no masking in the step's own lines"), v.detail)
+        v = self._guard("      - name: Build\n        run: fwtool --all\n",
+                        firmware_ci_step="Build")
+        self.assertIn("what its command runs is not read", v.detail)
+
+    def test_an_unnamed_step_is_named_by_its_run_line(self):
+        """Holdout review (a handheld): the handle act logs for an unnamed step,
+        its run's first line, worked and no document said so."""
+        v = self._guard("      - run: ./build.sh all\n", firmware_ci_step="./build.sh all")
+        self.assertTrue(v.passed, v.render())
+        v = self._guard("      - run: ./build.sh all\n", firmware_ci_step="nope")
+        self.assertIn("or, with neither, its run's first line", v.error)
+
+
+class EveryTemplateSaysWhetherItWasReplayed(unittest.TestCase):
+    """Holdout review (a watch): the arduino-cli template piped ``install.sh`` with
+    ``BINDIR=$HOME/bin`` and never made the folder, so it failed in the pack's own
+    runner image, and nothing had ever replayed it. Each template now says whether
+    this pack replayed it, and the arduino-cli one makes its folder first."""
+
+    def setUp(self):
+        with open(os.path.join(PACK, "references", "ci-templates.md"), encoding="utf-8") as fh:
+            self.text = fh.read()
+        self.sections = {m.group(1): m.group(2) for m in re.finditer(
+            r"^## (.+?)\n(.*?)(?=^## |\Z)", self.text, re.M | re.S) if "```yaml" in m.group(2)}
+
+    def test_each_template_is_marked(self):
+        self.assertGreaterEqual(len(self.sections), 7)
+        for name, body in self.sections.items():
+            with self.subTest(template=name):
+                head = body.split("```yaml", 1)[0]
+                self.assertRegex(head, r"\*\*(?:Replayed|Not replayed)\*\*",
+                                 "say whether this pack replayed it")
+
+    def test_the_arduino_template_makes_its_bin_folder_before_installing(self):
+        block = self.sections["arduino-cli"].split("```yaml", 1)[1].split("```", 1)[0]
+        made = block.find('mkdir -p "$HOME/bin"')
+        self.assertGreater(made, 0, block)
+        self.assertLess(made, block.find("install.sh"), "the folder comes before install.sh")
+        self.assertNotIn("/master/install.sh", block, "install.sh at a pinned tag")
+
+
 # --------------------------------------------------------------------------- #
 # the build's own lines
 # --------------------------------------------------------------------------- #
@@ -393,13 +472,28 @@ def _job(**over):
     return C.Job(**base)
 
 
+def _is_replay(loader) -> bool:
+    """Whether ``loader`` is the replay's (``_replay.loader``: a method of
+    ``_replay_named`` bound to the replay's name). Read by name: the gate module
+    and this file may each hold their own load of ``_replay.py``."""
+    return getattr(getattr(loader, "__func__", None), "__name__", "") == "_replay_named"
+
+
+def _manifest(files: dict) -> list:
+    """``images`` as the read-back lists them: name, size and sha256 of each
+    image in ``files``."""
+    return [{"name": rel, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for rel, data in sorted(files.items()) if rel.endswith(R.OUTPUT_SUFFIXES)]
+
+
 def _recorded(name: str, files: dict | None = None) -> dict:
     """A replay's result from a committed act excerpt, scrubbed as the loader
     scrubs it."""
     entries, act = R.parse(_log(name), functools.partial(
         R._scrub, copy=RECORDED_COPY, tmp=os.path.dirname(RECORDED_COPY)))
-    return {"workflow": "github/workflows/build.yml", "job": "build", "rc": 0,
-            "timeout": False, "entries": entries, "act": act, "files": files or {},
+    return {"workflow": "github/workflows/build.yml", "job": "build", "matrix": {}, "rc": 0,
+            "timeout": False, "timeout_s": float(R.TIMEOUT_S), "entries": entries, "act": act,
+            "files": files or {}, "configs": {}, "images": _manifest(files or {}),
             "oversize": 0, "toolchain": {}, "cleanup": ""}
 
 
@@ -413,8 +507,10 @@ def _step_result(log: str, result: str = "failure", *, before: str = "success",
          "act": ["exitcode '1': failure"] if before == "failure" else []},
         {"stage": "Main", "id": ["1"], "name": "Build", "result": result, "log": log,
          "act": []}]}
-    return {"workflow": "w", "job": "build", "rc": 0, "timeout": False, "entries": [entry],
-            "act": [], "files": files or {}, "oversize": 0, "toolchain": {}, "cleanup": ""}
+    return {"workflow": "w", "job": "build", "matrix": {}, "rc": 0, "timeout": False,
+            "timeout_s": float(R.TIMEOUT_S), "entries": [entry], "act": [],
+            "files": files or {}, "configs": {}, "images": _manifest(files or {}),
+            "oversize": 0, "toolchain": {}, "cleanup": ""}
 
 
 BIN = {"build/sleeper.bin": b"\xe9" + bytes(15), "build/sleeper.elf": b"\x7fELF"}
@@ -506,6 +602,112 @@ class TheBuildIsJudgedOnItsOwnLines(unittest.TestCase):
         self._raises(result, "could not set up job build")
         self._raises(dict(_step_result(""), timeout=True), "did not finish in 1800 s")
         self._raises(dict(_step_result(""), oversize=R.OUTPUT_CAP + 1), "past the")
+
+    def test_a_failed_step_is_quoted_by_its_own_cause(self):
+        """Holdout review (an NCS watch): a west configure failure ends with
+        west's ``FATAL ERROR``, and its cause is the ``CMake Error`` line above
+        it; the detail quoted the last error-like line. A failed step before the
+        build was quoted by act's own last line, not its output."""
+        log = ("-- west build: generating a build system\n"
+               "CMake Error at CMakeLists.txt:7 (find_package):\n"
+               "  Could not find a package configuration file provided by \"Zephyr\"\n"
+               "-- Configuring incomplete, errors occurred!\n"
+               "FATAL ERROR: command exited with status 1: cmake -B build\n")
+        self._raises(_step_result(log), "on no line this pack knows as a design fault: "
+                                        "CMake Error at CMakeLists.txt:7 (find_package):")
+        result = _step_result("", "success", before="failure")
+        result["entries"][0]["steps"][1]["log"] = "fetching\nerror: pathspec 'v9' did not match\n"
+        self._raises(result, "(error: pathspec 'v9' did not match)")
+
+    def test_an_install_over_empty_apt_lists_names_the_difference(self):
+        """Holdout review (two projects): ``sudo apt-get install`` with no update
+        works on GitHub, whose hosted image ships populated apt lists, and fails in
+        act's runner image, which ships them empty (measured:
+        act_apt_empty_lists.jsonl). The reason named no cause."""
+        job = _job(index=1, name="Build", command="make", image="", runs_on="ubuntu-24.04",
+                   ids=("0", "1"), runs=("sudo apt-get install -y gcc-arm-none-eabi make",
+                                         "make -j4"))
+        with self.assertRaises(R.ToolFault) as caught:
+            R.judge(_recorded("act_apt_empty_lists.jsonl"), job)
+        said = str(caught.exception)
+        self.assertIn("step 'Toolchain' before the build failed on empty apt lists", said)
+        self.assertIn("run `sudo apt-get update` first): E: Unable to locate package "
+                      "gcc-arm-none-eabi", said)
+        for other in (dataclasses.replace(job, runs=("sudo apt-get update && sudo apt-get "
+                                                     "install -y gcc-arm-none-eabi", "make")),
+                      dataclasses.replace(job, image="debian:bookworm")):
+            with self.subTest(job=other.runs[0][:24], image=other.image):
+                with self.assertRaises(R.ToolFault) as caught:
+                    R.judge(_recorded("act_apt_empty_lists.jsonl"), other)
+                self.assertIn("cannot tell a manifest error from a network fault "
+                              "(E: Unable to locate package", str(caught.exception))
+
+    def test_a_script_that_ran_nothing_here_is_errored_not_judged(self):
+        """Holdout review (a console's upstream workflow): the build step ran a
+        Python script that runs docker with no status check, so it read success;
+        the replay mounts no docker socket, the script built nothing, and the
+        missing image would have read as a design FAIL. Measured:
+        act_script_docker.jsonl."""
+        job = _job(index=0, name="Build", command="the named step", image="",
+                   runs_on="ubuntu-24.04")
+        result = _recorded("act_script_docker.jsonl")
+        self.assertEqual(R.main_step(result["entries"][0], 0)["result"], "success")
+        for glob in (None, "build/fw.uf2"):
+            with self.subTest(firmware_image=glob):
+                with self.assertRaises(R.ToolFault) as caught:
+                    R.judge(result, job, glob)
+                self.assertIn("could not run in the replay (no docker daemon in jobs, or a "
+                              "file the copy lacks): ERROR: failed to connect to the docker "
+                              "API", str(caught.exception))
+        step = R.main_step(result["entries"][0], 0)
+        step["log"] = step["log"].replace("ERROR: failed to connect", "connected")
+        with self.assertRaises(R.ToolFault) as caught:
+            R.judge(result, job)
+        self.assertIn("python3: can't open file", str(caught.exception))
+
+    def test_one_matrix_entry_or_none(self):
+        """``firmware_ci_matrix`` names one entry: act's ``--matrix`` selects every
+        entry that agrees on the keys given (measured with act 0.2.97: a key left
+        out runs each of its values), so more than one is errored."""
+        result = _step_result("", "success", files=BIN)
+        result["matrix"] = {"side": "l"}
+        result["entries"][0]["matrix"] = {"side": "l"}
+        passed, detail = R.judge(result, _job(matrix=True))
+        self.assertTrue(passed, detail)
+        self.assertIn("matrix entry {side: l}", detail)
+        result["entries"].append(dict(result["entries"][0], matrix={"side": "l", "n": 2}))
+        self._raises(result, "firmware_ci_matrix {side: l} selects 2 entries")
+        result["entries"] = []
+        self._raises(result, "firmware_ci_matrix {side: l} may name no entry")
+
+    def test_the_pass_names_the_entry_act_ran(self):
+        """Review of the holdout fixes, measured with act 0.2.97 in dry-run mode:
+        act ignores a ``--matrix`` key the job's matrix does not have, so
+        ``device:x`` ran a job with no matrix once (matrix ``{}``) and a job whose
+        matrix is ``{side: [l]}`` as ``{side: l}``. The pass named ``matrix entry
+        {device: x}``, an entry that was never replayed. Each is errored now, and a
+        pass names the entry act logged."""
+        result = _step_result("", "success", files=BIN)
+        result["matrix"] = {"device": "x"}
+        self._raises(result, "firmware_ci_matrix {device: x} names a matrix entry, and job "
+                             "build has no matrix: act ran it once")
+        result["entries"][0]["matrix"] = {"side": "l"}
+        self._raises(result, "firmware_ci_matrix {device: x} is not the entry act ran "
+                             "({side: l}): act ignores a key the job's matrix does not have "
+                             "(device)")
+        result["matrix"] = {"side": "l", "n": 2}
+        result["entries"][0]["matrix"] = {"side": "l", "n": 3}
+        self._raises(result, "is not the entry act ran ({n: 3, side: l})")
+        result["matrix"] = {"side": "l", "n": 2, "lto": True}
+        result["entries"][0]["matrix"] = {"side": "l", "n": 2, "lto": True, "shield": "s"}
+        passed, detail = R.judge(result, _job(matrix=True))
+        self.assertTrue(passed, detail)
+        self.assertIn("matrix entry {lto: true, n: 2, shield: s, side: l}", detail,
+                      "the entry act logged, with a key the include added")
+        result["matrix"] = {}
+        result["entries"][0]["matrix"] = {"side": "l"}
+        passed, detail = R.judge(result, _job(matrix=True))
+        self.assertIn("matrix entry {side: l}", detail, "a one-entry matrix act ran whole")
 
     def test_a_step_before_the_build_is_the_tools_unless_ci_tolerates_it(self):
         self._raises(_step_result("", "success", before="failure"),
@@ -713,9 +915,11 @@ class TheCopyIsWhatTheNextCommitHolds(unittest.TestCase):
 class _StandIn(unittest.TestCase):
     """A bin directory with ``act`` and ``docker`` stand-ins first on PATH, a HOME
     of the test's own, and the replay lock's root in the test's own directory, so
-    the replay's lock and caches land nowhere real. (The real lock is every
-    process's of this user, whatever HOME says: a stand-in act starts no
-    container, and a test of it never waits on a person's replay.)"""
+    the replay's lock lands nowhere real. (The real lock is every process's of
+    this user, whatever HOME says: a stand-in act starts no container, and a test
+    of it never waits on a person's replay. act's action cache is this user's
+    too, under the home the user database gives: its path reaches the stand-in,
+    which writes nothing there.)"""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="fw-standin-")
@@ -752,9 +956,10 @@ class _StandIn(unittest.TestCase):
         shutil.copytree(os.path.join(PACK, "selftest", "assets", "esp-sleep"), dst)
         return os.path.join(dst, "github", "workflows", "build.yml")
 
-    def replay(self, path: str) -> dict:
+    def replay(self, path: str, keep: tuple = ("build/sleeper.bin", "build/sleeper.elf"),
+               **kw) -> dict:
         with mock.patch.dict(os.environ, self.env):
-            return R.replay(path, job="build")
+            return R.replay(path, job="build", keep=keep, **kw)
 
 
 @unittest.skipUnless(HAS_GIT, "git is not on PATH: the replay's copy is not walked")
@@ -773,7 +978,7 @@ class TheReplayRunsActAsDesigned(_StandIn):
         self.assertEqual([c["argv"][:1] for c in act], [["--version"], ["push"]])
         argv, env = act[1]["argv"], act[1]["env"]
         for flag in ("--bind", "--json", "--pull=false", "--action-offline-mode",
-                     "--no-cache-server"):
+                     "--no-cache-server", "--rm"):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index("--container-daemon-socket") + 1], "-")
         self.assertEqual(argv[argv.index("-W") + 1], "github/workflows/build.yml")
@@ -813,7 +1018,7 @@ class TheReplayRunsActAsDesigned(_StandIn):
         self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
                    "copy_in_log": RECORDED_COPY, "sleep": 0.05,
                    "write": {"dist/app.bin": {"head": "e9", "size": 64}}})
-        result = self.replay(path)
+        result = self.replay(path, keep=("dist/app.bin",))
         self.assertEqual(sorted(result["files"]), ["dist/app.bin"])
         self.assertEqual(result["files"]["dist/app.bin"], same)
         self.assertTrue(R.judge(result, _job(), "dist/app.bin")[0])
@@ -859,10 +1064,41 @@ class TheReplayRunsActAsDesigned(_StandIn):
             result = self.replay(self.app())
         self.assertTrue(result["timeout"])
         docker = [c["argv"] for c in self.calls() if c["tool"] == "docker"]
-        self.assertTrue(any(a[:2] == ["ps", "-q"] and a[3].startswith("volume=") for a in docker),
-                        docker)
+        # `-aq`: a stopped job container is listed too (review of the holdout
+        # runs: `-q` alone, on a timeout alone, left a failed job's container).
+        self.assertTrue(any(a[:2] == ["ps", "-aq"] and a[3].startswith("volume=")
+                            for a in docker), docker)
         with self.assertRaises(R.ToolFault):
             R.judge(result, _job())
+
+    def test_the_replay_reads_no_environment_variable(self):
+        """Review of the holdout fixes: the module's docstring said the replay
+        reads no environment variable in Python, and ``os.path.expanduser("~")``
+        for act's action cache read ``HOME`` (measured: ``env:HOME`` among a
+        traced replay's opaque channels; the doctor's scan, which looks for
+        ``environ`` and ``getenv`` by name, did not see it). The cache is under
+        the uid's home in the user database, whatever ``HOME`` says."""
+        self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
+                   "copy_in_log": RECORDED_COPY})
+        app, trace = self.app(), verdicts_mod.GateTrace()
+        with verdicts_mod.tracing(trace):
+            self.replay(app)
+        self.assertEqual(sorted(c for c in trace.opaque if c.startswith("env:")), [],
+                         sorted(trace.opaque))
+        paths = set()
+        for home in ("home-a", "home-b"):
+            self.env["HOME"] = os.path.join(self.tmp, home)
+            os.makedirs(self.env["HOME"])
+            self.replay(app)
+            argv = [c["argv"] for c in self.calls() if c["tool"] == "act"][-1]
+            paths.add(argv[argv.index("--action-cache-path") + 1])
+        self.assertEqual(paths, {os.path.join(R.user_home(), ".cache", "nopekit",
+                                              "firmware-ci", "actions")})
+        with mock.patch.object(R, "user_home", lambda: ""):
+            self.replay(app)
+        argv = [c["argv"] for c in self.calls() if c["tool"] == "act"][-1]
+        self.assertNotIn("--action-cache-path", argv,
+                         "with no home in the user database, act caches in the replay's own")
 
 
 class TheActVersionCheckNeedsNothingElse(_StandIn):
@@ -932,6 +1168,188 @@ class TheActVersionIsPinned(_StandIn):
                          ["log.txt", "images.json", "toolchain.json"])
 
 
+#: The workflow ``tests/fw_logs/act_apt_empty_lists.jsonl`` was recorded from (act
+#: 0.2.97, the pinned act-24.04 runner image, the replay's own flags): an install
+#: with no ``apt-get update`` before it.
+APT_WORKFLOW = """name: b
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Toolchain
+        run: sudo apt-get install -y gcc-arm-none-eabi make
+      - name: Build
+        run: make -j4
+"""
+
+
+@unittest.skipUnless(HAS_GIT and HAS_YAML, "git or PyYAML is missing: the gates do not run")
+class OneReplayPerSweep(_StandIn):
+    """The four tier-1 gates of one sweep share one replay. What slipped through
+    (holdout review, a watch's check: four gates at 250-404 s each): the replay's
+    lock asked whether ``/tmp`` exists, the sweep's memo signed ``/tmp``, and any
+    file made there between two gates (their own controls make one each) moved
+    the signature, so every reader replayed again."""
+
+    def test_the_readers_share_the_builds_replay_while_tmp_moves(self):
+        self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
+                   "copy_in_log": RECORDED_COPY,
+                   "write": {"build/sleeper.bin": {"size": 0x7b6d0, "head": "e9"},
+                             "build/sleeper.elf": {"head": "7f454c46", "size": 64}}})
+        registry = _registry()
+        ctx = dataclasses.replace(
+            packs_mod.baseline_context(PACK, out_dir=os.path.join(self.tmp, "out")),
+            memo=verdicts_mod.SweepMemo(), tier=1)
+        outcomes = {}
+        with mock.patch.dict(os.environ, self.env):
+            for gid in GATES[1:]:
+                # What every process on the machine does to the temp root between
+                # two gates (the lock's root is the test's own, _StandIn).
+                with open(os.path.join(self.tmp, f"made-before-{gid}"), "w"):
+                    pass
+                spec, fn = registry.get(gid)
+                outcomes[gid] = gates_mod.run_gate(spec, fn, ctx,
+                                                   trace=verdicts_mod.GateTrace()).outcome
+        pushes = [c for c in self.calls() if c["tool"] == "act" and c["argv"][:1] == ["push"]]
+        self.assertEqual(len(pushes), 1, f"one replay for {outcomes}")
+        self.assertEqual(outcomes["fw.build"], "pass", outcomes)
+
+
+@unittest.skipUnless(HAS_GIT and HAS_YAML, "git or PyYAML is missing: the gates do not run")
+class TheReplayLeavesNothing(_StandIn):
+    """Holdout review (three projects): act keeps a failed job's container running
+    unless it is given ``--rm``, and the replay stopped containers on a timeout
+    only, so each failed replay left one bound to a removed copy."""
+
+    def _failed(self, **extra):
+        self.mode({"log": os.path.join(LOGS, "act_apt_empty_lists.jsonl"),
+                   "copy_in_log": RECORDED_COPY, "exit": 1, **extra})
+        repo = os.path.join(self.tmp, "fw")
+        return self.replay(_write(repo, ".github/workflows/build.yml", APT_WORKFLOW))
+
+    def test_a_failed_replay_removes_its_job_containers(self):
+        result = self._failed(containers=["c0ffee"])
+        act = [c["argv"] for c in self.calls() if c["tool"] == "act"]
+        self.assertIn("--rm", act[-1])
+        docker = [c["argv"] for c in self.calls() if c["tool"] == "docker"]
+        self.assertIn(["rm", "-f", "c0ffee"], docker)
+        rm_at = docker.index(["rm", "-f", "c0ffee"])
+        chown_at = next(i for i, a in enumerate(docker) if a[:1] == ["run"])
+        self.assertLess(rm_at, chown_at, "the job's container goes before the copy does")
+        self.assertEqual(result["cleanup"], "")
+
+    def test_a_container_that_stays_is_named(self):
+        result = self._failed(containers=["c0ffee"], rm_fails=True)
+        self.assertIn("job container c0ffee could not be removed: docker rm -f c0ffee",
+                      result["cleanup"])
+
+
+@unittest.skipUnless(HAS_GIT, "git is not on PATH: the replay's copy is not walked")
+class TheReadBackKeepsWhatTheGatesRead(_StandIn):
+    """Holdout review (an NCS watch): the read-back took the bytes of every image
+    the job wrote, against a cap sized on the baseline, so a sysbuild's 284 MB of
+    images read errored. Now only the images the gates name come back whole; the
+    rest are listed by name, size and sha256."""
+
+    def test_an_image_no_gate_names_is_listed_not_read(self):
+        self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
+                   "copy_in_log": RECORDED_COPY,
+                   "write": {"build/sleeper.bin": {"size": 64, "head": "e9"},
+                             "build/sleeper.elf": {"head": "7f454c46", "size": 64},
+                             "build/zephyr/zephyr_pre0.elf": {"head": "7f454c46",
+                                                              "size": 4096}}})
+        app = self.app()
+        with mock.patch.object(R, "OUTPUT_CAP", 1024):
+            result = self.replay(app)
+        self.assertEqual(result["oversize"], 0)
+        self.assertEqual(sorted(result["files"]), ["build/sleeper.bin", "build/sleeper.elf"])
+        pre = b"\x7fELF" + bytes(4092)
+        self.assertEqual([r for r in result["images"] if r["name"].endswith("pre0.elf")],
+                         [{"name": "build/zephyr/zephyr_pre0.elf", "size": 4096,
+                           "sha256": hashlib.sha256(pre).hexdigest()}])
+        self.assertEqual(R.image_names(result), ["build/sleeper.bin", "build/sleeper.elf",
+                                                 "build/zephyr/zephyr_pre0.elf"])
+        with mock.patch.object(R, "OUTPUT_CAP", 100):
+            result = self.replay(app)
+        self.assertEqual(result["oversize"], 128, "the named images past the cap still say so")
+
+
+@unittest.skipUnless(HAS_GIT and HAS_YAML, "git or PyYAML is missing: the gate does not run")
+class AnErroredReplayKeepsItsLog(_StandIn):
+    """Holdout review (three projects): an errored ``fw.build`` kept no log, and
+    its reason quoted act's ``Job failed``; each person replayed the failure by
+    hand to find its cause. Now the log is evidence on every outcome the replay
+    reached, and the reason quotes the step's own cause."""
+
+    def _build(self, params: dict):
+        spec, fn = _registry().get("fw.build")
+        ctx = gates_mod.GateContext(root=self.tmp, ledger=Ledger(), params=params,
+                                    out_dir=os.path.join(self.tmp, "out"), tier=1,
+                                    log=lambda _m: None, extra={})
+        with mock.patch.dict(os.environ, self.env):
+            return gates_mod.run_gate(spec, fn, ctx)
+
+    def test_the_failing_steps_log_is_evidence(self):
+        self.mode({"log": os.path.join(LOGS, "act_apt_empty_lists.jsonl"),
+                   "copy_in_log": RECORDED_COPY, "exit": 1})
+        wf = _write(os.path.join(self.tmp, "fw"), ".github/workflows/build.yml", APT_WORKFLOW)
+        verdict = self._build({"firmware_ci_workflow": wf})
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("on empty apt lists", verdict.error)
+        logs = [p for p in verdict.evidence if os.path.basename(p) == "log.txt"]
+        self.assertEqual(len(logs), 1, verdict.evidence)
+        with open(logs[0], encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("== job build, step 'Toolchain': failure\n", text)
+        self.assertIn("E: Unable to locate package gcc-arm-none-eabi\n", text)
+        self.assertIn("-- act: exitcode '100': failure", text)
+        self.assertNotIn(self.tmp, text, "the log names no temporary directory")
+
+    def test_the_timeout_is_the_projects_to_set(self):
+        """Holdout review (a handheld): a job that clones and installs ESP-IDF per
+        matrix entry cannot finish in a fixed 1800 s, and no key could say so."""
+        self.mode({"sleep": 5})
+        verdict = self._build({"firmware_ci_workflow": self.app(),
+                               "firmware_ci_timeout_s": 1})
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("act did not finish in 1 s (firmware_ci_timeout_s)", verdict.error)
+
+    def test_a_timeout_keeps_what_act_logged_before_it(self):
+        """Review of the holdout fixes: on a timeout the replay returned before it
+        read act's output, so ``log.txt`` was empty, and the error with the least
+        to go on named no step. ``subprocess.TimeoutExpired`` carries what act
+        wrote up to the stop (bytes, whatever ``text=`` said)."""
+        self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
+                   "copy_in_log": RECORDED_COPY, "stderr": "act: stand-in stderr line\n",
+                   "stall": {"lines": 36, "seconds": 60}})
+        verdict = self._build({"firmware_ci_workflow": self.app(),
+                               "firmware_ci_timeout_s": 2})
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("act did not finish in 2 s (firmware_ci_timeout_s); the job's containers "
+                      "were removed; step 'Build' was still running", verdict.error)
+        logs = [p for p in verdict.evidence if os.path.basename(p) == "log.txt"]
+        self.assertEqual(len(logs), 1, verdict.evidence)
+        with open(logs[0], encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("step 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683': "
+                      "success\n", text)
+        self.assertIn("step 'Build' (the build step): stopped at the timeout\n", text)
+        self.assertIn("-- ccache will be used for faster recompilation\n", text)
+        self.assertIn("act: stand-in stderr line\n", text)
+        self.assertTrue(text.endswith("== act was stopped at 2 s (firmware_ci_timeout_s): the "
+                                      "log ends where it stopped\n"), text[-200:])
+        self.assertNotIn(self.tmp, text, "the log names no temporary directory")
+
+    def test_a_matrix_entry_goes_to_act(self):
+        self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
+                   "copy_in_log": RECORDED_COPY})
+        self.replay(self.app(), matrix={"device": "beta", "n": 2, "lto": True})
+        argv = [c["argv"] for c in self.calls() if c["tool"] == "act"][-1]
+        pairs = [argv[i + 1] for i, a in enumerate(argv) if a == "--matrix"]
+        self.assertEqual(pairs, ["device:beta", "lto:true", "n:2"])
+
+
 #: A replay's critical section with no replay in it: the lock held for a second
 #: under ``<argv[2]>``, its entry and exit appended to ``argv[3]`` with this
 #: process's HOME.
@@ -996,20 +1414,31 @@ class TheReplayLockIsTheUsers(unittest.TestCase):
 
     def test_a_directory_that_is_not_this_users_is_never_the_lock(self):
         """/tmp is everyone's: a link where the directory goes (or a directory
-        another user made) is not a lock of ours, and the lock falls back to
-        HOME's, the old place."""
+        another user made) is not a lock of ours, and the lock falls back to the
+        old place, under the uid's home in the user database (``user_home``,
+        stood in for here), never under ``HOME`` (review of the holdout fixes:
+        ``os.path.expanduser`` read it). With no home there, it is errored."""
         elsewhere = os.path.join(self.tmp, "elsewhere")
         home = os.path.join(self.tmp, "home")
-        os.makedirs(elsewhere)
-        os.makedirs(home)
+        env_home = os.path.join(self.tmp, "env-home")
+        for path in (elsewhere, home, env_home):
+            os.makedirs(path)
         os.symlink(elsewhere, os.path.join(self.tmp, f"nopekit-{os.getuid()}"))
         with mock.patch.object(R, "LOCK_ROOT", self.tmp), \
-                mock.patch.dict(os.environ, {"HOME": home}):
+                mock.patch.object(R, "user_home", lambda: home), \
+                mock.patch.dict(os.environ, {"HOME": env_home}):
             with R._one_replay_at_a_time():
                 pass
         self.assertEqual(os.listdir(elsewhere), [])
+        self.assertEqual(os.listdir(env_home), [], "HOME is not read")
         self.assertTrue(os.path.isfile(os.path.join(home, ".cache", "nopekit", "firmware-ci",
                                                     "replay.lock")))
+        with mock.patch.object(R, "LOCK_ROOT", self.tmp), \
+                mock.patch.object(R, "user_home", lambda: ""):
+            with self.assertRaises(R.ToolFault) as caught:
+                with R._one_replay_at_a_time():
+                    pass
+        self.assertIn("the replay lock has no place", str(caught.exception))
 
 
 # --------------------------------------------------------------------------- #
@@ -1746,12 +2175,15 @@ class TheGatesReadOneReplay(unittest.TestCase):
     def setUpClass(cls):
         cls.registry = _registry()
 
-    def _run(self, gid: str, files: dict, params: dict | None = None, result=None):
+    def _run(self, gid: str, files: dict, params: dict | None = None, result=None, *,
+             claims: list | None = None, through_spine: bool = False):
         replay = result or _recorded("act_esp_short_ota_slot.jsonl", files)
         real = gates_mod.GateContext.load_file
+        self.loaders = []
 
         def load_file(self_, path, loader=None):
-            if isinstance(loader, functools.partial):
+            if _is_replay(loader):
+                self.loaders.append(json.loads(loader.__self__))
                 return replay
             return real(self_, path, loader)
 
@@ -1765,11 +2197,14 @@ class TheGatesReadOneReplay(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="fw-gate-")
         self.addCleanup(shutil.rmtree, tmp, True)
         spec, fn = self.registry.get(gid)
-        ctx = gates_mod.GateContext(root=PACK, ledger=Ledger(), params=base,
+        ctx = gates_mod.GateContext(root=PACK, ledger=Ledger(claims=claims or []), params=base,
                                     out_dir=os.path.join(tmp, "out"), tier=1,
                                     log=lambda _m: None, extra={})
         with mock.patch.object(gates_mod.GateContext, "load_file", load_file):
-            return fn(ctx)
+            if not through_spine:
+                return fn(ctx)
+            with mock.patch.object(gates_mod, "availability", lambda _spec: (True, "")):
+                return gates_mod.run_gate(spec, fn, ctx)
 
     def _files(self, *funcs):
         return {"build/sleeper.bin": b"\xe9" + bytes(0x7b6d0 - 1),
@@ -1806,6 +2241,114 @@ class TheGatesReadOneReplay(unittest.TestCase):
                         True)
         v = self._run("fw.image_fits", self._files(), {"firmware_ci_workflow": wf})
         self.assertIn("has a matrix", v.error)
+
+    def test_a_matrix_entry_named_is_read(self):
+        """Holdout review (a handheld's upstream workflow): a matrix job could not
+        be replayed one entry at a time, so every reader errored on it. With
+        ``firmware_ci_matrix`` the replay runs one entry, the readers read its
+        files, and the loader names the entry (so the gates share that replay)."""
+        wf = _write(tempfile.mkdtemp(prefix="fw-mx-"), ".github/workflows/b.yml",
+                    _workflow(job_extra="strategy:\n  matrix:\n    side: [l, r]\n"))
+        self.addCleanup(shutil.rmtree, os.path.dirname(os.path.dirname(os.path.dirname(wf))),
+                        True)
+        result = _recorded("act_esp_short_ota_slot.jsonl", self._files())
+        result["matrix"] = {"side": "l"}
+        for entry in result["entries"]:
+            entry["matrix"] = {"side": "l"}             # act logs the entry it ran
+        v = self._run("fw.image_fits", self._files(), {"firmware_ci_workflow": wf,
+                                                      "firmware_ci_matrix": {"side": "l"}},
+                      result=result)
+        self.assertEqual((v.outcome, v.measured), ("pass", 48.3), v.render())
+        self.assertEqual(self.loaders[-1]["matrix"], {"side": "l"})
+        for bad in ({"side": ["l"]}, ["l"], {"a:b": "l"}):
+            with self.subTest(firmware_ci_matrix=bad):
+                v = self._run("fw.image_fits", self._files(),
+                              {"firmware_ci_workflow": wf, "firmware_ci_matrix": bad})
+                self.assertIn("firmware_ci_matrix is", v.error)
+
+    def test_every_reader_asks_for_one_replay(self):
+        """The loader every gate passes names the same replay: the job, both
+        image globs, the matrix entry and the timeout. A gate that left a glob out
+        would ask for another replay (holdout review: four replays in one check)."""
+        asked = []
+        for gid in ("fw.build", "fw.image_fits", "fw.sleep_wake", "fw.tx_power"):
+            self._run(gid, self._files("esp_deep_sleep_start", "esp_sleep_enable_ext0_wakeup"),
+                      {"firmware_ci_timeout_s": 600})
+            asked.append(self.loaders[-1])
+        self.assertEqual(asked, [{"job": "build", "keep": ["build/sleeper.bin",
+                                                             "build/sleeper.elf"],
+                                  "matrix": {}, "timeout_s": 600.0}] * 4)
+        a, b = R.loader("build", ("x.bin",), {}, None), R.loader("build", ("x.bin",), {}, None)
+        self.assertEqual(gates_mod._loader_id(a), gates_mod._loader_id(b),
+                         "two gates' loaders for one replay are one key in the sweep's memo")
+        self.assertNotEqual(gates_mod._loader_id(a),
+                            gates_mod._loader_id(R.loader("build", ("x.bin",), {"s": "l"})))
+
+    def test_a_timeout_that_is_not_a_time_is_errored(self):
+        for bad in (-1, 0, "600", True):
+            with self.subTest(firmware_ci_timeout_s=bad):
+                v = self._run("fw.build", self._files(), {"firmware_ci_timeout_s": bad})
+                self.assertIn("firmware_ci_timeout_s is", v.error)
+
+    def test_the_flash_fit_claim_states_the_limit(self):
+        """Holdout review (two projects): a claim stating the headroom PACK.md
+        recommends made the spine warn "one number in two places", because the
+        gate always said 100. The gate now reports the flash-fit claim's limit
+        and still fails a byte past the region whatever the claim says."""
+        def fit(limit, units="%", quantity="flash use", comparator="<="):
+            return packs_mod.baseline_claims({"_claims": [{
+                "id": "FIT", "statement": "the image leaves headroom in its slot",
+                "kind": "measurable", "tags": ["flash-fit"],
+                "acceptance": {"quantity": quantity, "comparator": comparator,
+                               "limit": limit, "units": units}}]})
+
+        v = self._run("fw.image_fits", self._files(), claims=fit(85), through_spine=True)
+        self.assertEqual((v.outcome, v.measured, v.limit, v.comparator, v.units),
+                         ("pass", 48.3, 85.0, "<=", "%"), v.render())
+        self.assertEqual(claims_mod.limit_disagreements(Ledger(claims=fit(85)), [v]), [],
+                         "the claim's limit and the gate's are one number")
+        v = self._run("fw.image_fits", self._files(), claims=fit(40), through_spine=True)
+        self.assertEqual((v.outcome, v.measured, v.limit), ("fail", 48.3, 40.0), v.render())
+        files = self._files()
+        files["build/sleeper.bin"] = b"\xe9" + bytes(0x100000 + 500 - 1)
+        v = self._run("fw.image_fits", files, claims=fit(150), through_spine=True)
+        self.assertEqual((v.outcome, v.measured), ("fail", 100.1), v.render())
+        self.assertIn("past the region itself", v.detail)
+        for bad in (fit(85, units="B"), fit(85, quantity="ram use"), fit(85, comparator=">=")):
+            with self.subTest(claim=bad[0].acceptance.render()):
+                v = self._run("fw.image_fits", self._files(), claims=bad)
+                self.assertIn("state the headroom so", v.error)
+        v = self._run("fw.image_fits", self._files(), claims=fit(None), through_spine=True)
+        self.assertEqual((v.outcome, v.limit), ("pass", 100.0),
+                         "a flash-fit claim with no limit leaves the region's own bound")
+
+    def test_two_flash_fit_claims_name_the_one_to_keep(self):
+        """Review of the holdout fixes: a claim at the region's bound beside a
+        headroom claim, both tagged flash-fit, errored the gate with the spine's
+        advice to a gate's author ("read one claim by its id"), which a project
+        cannot follow: the tag is the pack's. The gate still errors (one goalpost
+        per tag), and says what the project does, first, inside the 200
+        characters an error keeps."""
+        def claim(cid, limit):
+            return {"id": cid, "statement": f"flash use at most {limit} %",
+                    "kind": "measurable", "tags": ["flash-fit"],
+                    "acceptance": {"quantity": "flash use", "comparator": "<=",
+                                   "limit": limit, "units": "%"}}
+
+        two = packs_mod.baseline_claims({"_claims": [claim("FW-FIT", 100),
+                                                     claim("FW-HEAD", 85)]})
+        v = self._run("fw.image_fits", self._files(), claims=two, through_spine=True)
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertTrue(v.error.startswith("keep the flash-fit tag on one claim, the one that "
+                                           "states the headroom, and take it off the rest: "),
+                        v.error)
+        self.assertIn("FW-FIT (flash use <= 100 %) and FW-HEAD (flash use <= 85 %)", v.error)
+        self.assertNotIn("read one claim by its id", v.error)
+        same = packs_mod.baseline_claims({"_claims": [claim("FW-FIT", 85),
+                                                      claim("FW-HEAD", 85)]})
+        v = self._run("fw.image_fits", self._files(), claims=same, through_spine=True)
+        self.assertEqual((v.outcome, v.limit), ("pass", 85.0),
+                         "two claims that state one condition are one goalpost")
 
     def test_missing_inputs_skip(self):
         for gid, key in (("fw.image_fits", "app_memory_map"), ("fw.image_fits", "firmware_image"),
@@ -1846,7 +2389,7 @@ class TheTxGateReadsOneReplay(unittest.TestCase):
         real = gates_mod.GateContext.load_file
 
         def load_file(self_, path, loader=None):
-            if isinstance(loader, functools.partial):
+            if _is_replay(loader):
                 return result
             return real(self_, path, loader)
 

@@ -44,22 +44,36 @@ A gate whose prerequisite did not pass reads Skipped.
   `$?` that exits, `rc=$?` and a later `exit $rc`, or after a pipe the same on
   `${PIPESTATUS[0]}`; under `-e`, a bare test on it counts too. `echo "exited $?"`
   does not. An unspecified shell runs `bash -e {0}` (or `sh -e
-  {0}`), which has no pipefail. `shell: bash` has it. It is **errored**, never failed,
+  {0}`), which has no pipefail. `shell: bash` has it. Its pass says what it read:
+  `no masking in the step's own lines`, and it names each repository file the
+  step runs (`python3 tools/build.py`, `./build.sh`) as not read. A script can
+  discard a command's status, and the guard does not read scripts. It is
+  **errored**, never failed,
   on a shape the replay cannot run: a Windows, macOS or self-hosted runner with no
   container, docker inside the job (`espressif/esp-idf-ci-action`), a shell that is
   not bash or sh, a reusable workflow, a `${{ }}` in `if:` or `continue-on-error`, and
   a job or step it cannot choose.
 - **`fw.build`** runs act v0.2.97 on that job: `--bind`, so the job writes into the
   copy; no docker socket in the jobs; no secrets, variables or caches; pinned runner
-  images; `--pull=false`. The verdict is the build step's own result. It **fails** on a
-  line from a closed list in a failed build step (`FAILED: ….obj`, `undefined
-  reference to`, `region … overflowed`, `Invalid BOARD`, `devicetree error:`, a Kconfig
-  abort), on such a line in a step that read success (masked), on ZMK's `Unable to
-  locate ZMK config at:` warning, and on a `firmware_image` the job did not write.
+  images; `--pull=false`; `--rm`, and every job container of the copy is removed
+  after the replay, whatever its outcome. The verdict is the build step's own
+  result. It **fails** on a line from a closed list in a failed build step
+  (`FAILED: ….obj`, `undefined reference to`, `region … overflowed`, `Invalid
+  BOARD`, `devicetree error:`, a Kconfig abort), on such a line in a step that read
+  success (masked), on ZMK's `Unable to locate ZMK config at:` warning, and on a
+  `firmware_image` the job did not write. A step that read success and says that a
+  part of it did not run in the replay (docker with no daemon, a script the copy
+  does not hold) is errored, before the image is looked for. Its evidence,
+  `log.txt`, holds each step's own output on every outcome the replay reached, an
+  errored one too, and an errored reason quotes the failing step's first cause line
+  (`CMake Error`, apt's `E:`, `error:`). On a timeout it holds act's output up to
+  the stop, and the reason names the step that was still running.
 - **`fw.image_fits`** compares the bytes the image writes with a region from a cited
-  record. It reports flash use in %, rounded up to 0.1 %, limit 100. The pass is
-  decided on bytes: one byte past the slot fails. The spine's cross-check holds a
-  claim's headroom (`flash use <= 85 %`). It **fails** with no limit on bytes in
+  record. It reports flash use in %, rounded up to 0.1 %. Its limit is the headroom
+  the `flash-fit` claim states (`flash use <= 85 %`), else 100, the region's own
+  bound. One byte past the region fails, whatever the claim says: the bytes decide
+  that. A `flash-fit` claim in another quantity, unit or direction is errored. It
+  **fails** with no limit on bytes in
   flash outside the app region, on a vector table that is not at the start the
   bootloader jumps to, and, where `ram` is stated, on an ELF segment (by its run
   address, `.bss` included) that starts in a stated bank and runs past its end, or
@@ -98,9 +112,13 @@ A gate whose prerequisite did not pass reads Skipped.
   host whose controller is in another image or chip, and a stack with no Kconfig.
 
 A tool fault is errored, never a fail: a step before the build that fails, act or
-docker stopping, a timeout (1800 s), a compiler the machine stopped (OOM, an internal
-compiler error, a full disk), a network failure, and a failure on a line the closed
-list does not hold.
+docker stopping, a timeout (`firmware_ci_timeout_s`, default 1800 s), a compiler the
+machine stopped (OOM, an internal compiler error, a full disk), a network failure,
+and a failure on a line the closed list does not hold. A step before the build that
+fails on `E: Unable to locate package` in a pinned runner image, with no `apt-get
+update` before it, is named as the replay's difference from GitHub: GitHub's hosted
+image ships its apt lists filled, and act's runner images ship them empty. The
+remedy is `sudo apt-get update` before the install, a step GitHub runs the same way.
 
 ## Model projection
 
@@ -112,7 +130,9 @@ of its own: the workflow chooses the build, and the claim holds the limit.
 |---|---|
 | `firmware_ci_workflow` | the workflow that builds the firmware, from the project root; every gate skips without it |
 | `firmware_ci_job` | the job id (optional) |
-| `firmware_ci_step` | the build step's name or `id:`, when its command is not on the list (optional); act logs a step with an `id:` under it |
+| `firmware_ci_step` | the build step, when its command is not on the list (optional): its name, its `id:`, or, for a step with neither, its run's first line (the name act logs for it) |
+| `firmware_ci_matrix` | one entry of a matrix job, `{key: value}` with a value for each key (optional): act's `--matrix key:value`; the replay is errored unless exactly one entry runs and it holds each key, since act ignores a key the matrix does not have |
+| `firmware_ci_timeout_s` | the replay's wall clock in s (optional, default 1800) |
 | `firmware_image` | the file the device receives, a glob in the job's workspace (`build/*.bin`: `*` stays inside one directory, `**/` crosses any number) |
 | `firmware_elf` | the ELF in the job's workspace, a glob |
 | `app_memory_map` | the region, one of three shapes (below) |
@@ -143,7 +163,11 @@ reaches flash through the cache, so it takes the ESP or slot shape only.
 - `ci-build`: the CI job can be replayed, and no masking hides a failed build (the
   guard alone).
 - `flash-fit`, with `{"quantity": "flash use", "comparator": "<=", "limit": 85,
-  "units": "%"}`; `memory-fit`, `ota-slot`.
+  "units": "%"}`: `fw.image_fits` reports this limit. State the headroom here, once:
+  two `flash-fit` claims with different limits error the gate, and it names both.
+  Keep the tag on the headroom claim. A byte past the region fails whatever it says,
+  so a second claim at 100 % adds nothing this gate can show. `memory-fit` and
+  `ota-slot` claims are covered and cross-checked, and their limits are not read.
 - `deep-sleep`, `wakeup-source`: the image arms a deep-sleep wake. A wake on real
   hardware is a physical claim.
 - `ble-tx-power`, with `{"quantity": "bluetooth le transmit power setting",
@@ -161,8 +185,21 @@ reaches flash through the cache, so it takes the ESP or slot shape only.
 exactly; another version reads Skipped and names the install line), `docker` and
 `git` on PATH, and the job's images already pulled. `references/installing.md` has
 the steps and the checksum. The baseline's replay took 40-49 s on seven cores. The
-four tier-1 gates share one replay per check. They read through subprocesses the
-trace cannot see into, so they run again on every check at tier 1 or above.
+four tier-1 gates share one replay per check: they ask for it with one loader
+(`_replay.loader`), and the replay asks nothing of a path the memo would see move.
+They read through subprocesses the trace cannot see into, so they run again on every
+check at tier 1 or above. So do their controls: a control that read through a
+subprocess is never current, so each check replays the known-good and the
+known-bad of each of the four gates again. A tier-1 check of the baseline is
+nine replays: three checks measured on 2026-11-24 took 548-668 s on seven cores,
+of which the gates' one replay took 61-82 s, each reader 0.01-0.04 s, and each
+gate's two controls 118-169 s. A project's own build multiplies the first part, not the
+controls, which replay the pack's own app.
+
+The replay reads back whole only the images that `firmware_image` and
+`firmware_elf` name, and every configuration file, to 64 MiB in all. Every other
+image is listed by name, size and sha256 in `images.json`. Past the cap the replay
+is errored and says so: name one file with each glob.
 
 ## What this pack cannot settle
 
@@ -170,13 +207,24 @@ trace cannot see into, so they run again on every check at tier 1 or above.
   to a pin that can wake (an ESP32 RTC GPIO, an STM32 WKUP pin). A symbol shows that
   an image arms a wake somewhere, not that every path arms it before the sleep call.
 - Whether the stated `app_memory_map` is right. A person confirms its cited source.
-- act differs from GitHub: runner images, secrets, caches and `if:` contexts. A
-  JavaScript action fails in a job image with no `node`. In bind mode a matrix's
-  entries share one workspace in turn, so `fw.image_fits` and `fw.sleep_wake` are
-  errored on a matrix job. A tracked symlink is copied as the link, never followed,
-  so one to a directory outside the repository dangles in the replay as it does on
-  the runner. Each difference shows as errored or in the detail, never as a pass
-  GitHub would not give.
+- act differs from GitHub: runner images (their apt lists are empty), secrets,
+  caches and `if:` contexts. A JavaScript action fails in a job image with no
+  `node`. In bind mode a matrix's entries share one workspace in turn, so the
+  readers are errored on a matrix job unless `firmware_ci_matrix` names one entry.
+  A tracked symlink is copied as the link, never followed, so one to a directory
+  outside the repository dangles in the replay as it does on the runner. Each
+  difference shows as errored or in the detail, never as a pass GitHub would not
+  give.
+- A CI the replay cannot run (a matrix of toolchain installs past any timeout, a
+  build inside docker, a runner act does not have). The route: a single-entry job
+  from `references/ci-templates.md` beside your CI, recorded as a decision (`nopekit
+  decide`) that says why, with the claim restated to name that job. The replay then
+  judges that job, not your CI.
+- What a script the build step runs does: `fw.ci_job` reads the step's own lines,
+  and names each script it did not read.
+- A job container act could not remove is named in the replay's cleanup. To find
+  one by hand: `docker ps -a --filter volume=<copy>`, or `docker ps -a --filter
+  name=act-`; remove it with `docker rm -f <id>`.
 - Dependencies the job fetches live (west, the component manager, PlatformIO).
   Two checks of one tree can differ when an upstream moves.
 - ZMK's reusable `build-user-config` workflow: it builds outside its workspace, and
@@ -206,7 +254,7 @@ trace cannot see into, so they run again on every check at tier 1 or above.
 
 - `references/installing.md`: act, its checksum, the images and a smoke test.
 - `references/ci-templates.md`: one workflow per stack, each building in its
-  workspace with no masked pipe.
+  workspace with no masked pipe, and each marked as replayed or not.
 - `references/memory-maps.md`: how to state `app_memory_map` for each bootloader.
 - `references/wake-rules.md` and `references/signatures.md`: the rule tables and the
   closed lists, each line with its committed log excerpt.
