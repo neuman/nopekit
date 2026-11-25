@@ -26,8 +26,10 @@ is not the pack.
 | `fw.tx_power` | 1 | `ble-tx-power` | sourced: the stack's own Kconfig resolution, by rules cited to its Kconfig and sources | the TX level line removed, so ESP-IDF's default +9 dBm applies |
 
 `fw.ci_job` is the replay's validity guard. It reads the workflow in about 0.03 s,
-before a container starts. `fw.build` needs it, and the three readers need `fw.build`.
-A gate whose prerequisite did not pass reads Skipped.
+before a container starts. `fw.build` reads the guard's choice itself: it is errored
+on a job the guard refuses and skipped on one the guard fails, and it replays a job
+whose build the guard could not read, where the guard skips. The three readers need
+`fw.build`. A gate whose prerequisite did not pass reads Skipped.
 
 - **`fw.ci_job`** chooses the job (`firmware_ci_job`, else the one job that runs a
   build command it knows) and the build step (`firmware_ci_step`, else the one step
@@ -44,10 +46,22 @@ A gate whose prerequisite did not pass reads Skipped.
   `$?` that exits, `rc=$?` and a later `exit $rc`, or after a pipe the same on
   `${PIPESTATUS[0]}`; under `-e`, a bare test on it counts too. `echo "exited $?"`
   does not. An unspecified shell runs `bash -e {0}` (or `sh -e
-  {0}`), which has no pipefail. `shell: bash` has it. Its pass says what it read:
-  `no masking in the step's own lines`, and it names each repository file the
-  step runs (`python3 tools/build.py`, `./build.sh`) as not read. A script can
-  discard a command's status, and the guard does not read scripts. It is
+  {0}`), which has no pipefail. `shell: bash` has it. When the step's own lines
+  hold no build command, it reads every shell script of the repository the step
+  runs, after a build too (`./build.sh` under its `#!` line, `bash -eo pipefail
+  ci/x.sh` under those options, a sourced file in the step's own shell, with the
+  options that the step's lines and the files sourced before it set), and the
+  scripts those run, by the same rules, and the line that runs each one that
+  builds. Its pass says what it read: `no masking in the step's own lines`, then
+  the scripts it read, and it names each other repository file the step runs as
+  not read. It **skips**, and never passes, when it cannot read the build: inside
+  an action (`uses:`), in a Python or other non-shell script, in a file that is
+  not in the repository, or behind a command this pack does not know. The skip
+  names what it could not read, and `fw.build`'s replay still judges the build's
+  own result. But where no script it read holds the build, a line that runs a
+  file it cannot read **fails** when it falls back to a command that succeeds
+  (`python3 tools/build.py || true`) or pipes under a shell with no pipefail: the
+  build may run in that file, and its failure then reads green. It is
   **errored**, never failed,
   on a shape the replay cannot run: a Windows, macOS or self-hosted runner with no
   container, docker inside the job (`espressif/esp-idf-ci-action`), a shell that is
@@ -66,8 +80,18 @@ A gate whose prerequisite did not pass reads Skipped.
   does not hold) is errored, before the image is looked for. Its evidence,
   `log.txt`, holds each step's own output on every outcome the replay reached, an
   errored one too, and an errored reason quotes the failing step's first cause line
-  (`CMake Error`, apt's `E:`, `error:`). On a timeout it holds act's output up to
-  the stop, and the reason names the step that was still running.
+  (`CMake Error`, apt's `E:`, `error:`). For `CMake Error at <file>:<line>
+  (message):`, that is the message under it (its indented lines, across blank
+  lines, up to the call stack), joined into one line, with the location after
+  it. A step that runs a composite action is read with the
+  action's own steps: their output holds the design lines and the cause, and an
+  errored reason quotes the action's own last error line (its last `::error`
+  annotation) and then the first cause line in the output of its step that failed.
+  On a timeout it holds act's output up to the stop, and the reason names the step
+  that was still running. A pass names the images `firmware_image` and
+  `firmware_elf` name first, then the job's other images apart: by name up to
+  four, else counted (`images.json` lists each). A build writes some of those, and
+  a fetch (`west update`, a package manager) writes others.
 - **`fw.image_fits`** compares the bytes the image writes with a region from a cited
   record. It reports flash use in %, rounded up to 0.1 %. Its limit is the headroom
   the `flash-fit` claim states (`flash use <= 85 %`), else 100, the region's own
@@ -130,7 +154,7 @@ of its own: the workflow chooses the build, and the claim holds the limit.
 |---|---|
 | `firmware_ci_workflow` | the workflow that builds the firmware, from the project root; every gate skips without it |
 | `firmware_ci_job` | the job id (optional) |
-| `firmware_ci_step` | the build step, when its command is not on the list (optional): its name, its `id:`, or, for a step with neither, its run's first line (the name act logs for it) |
+| `firmware_ci_step` | the build step, when its command is not on the list (optional): its name, its `id:`, or, for a step with neither, the name act logs for it: its `uses:` value, else its run's first line |
 | `firmware_ci_matrix` | one entry of a matrix job, `{key: value}` with a value for each key (optional): act's `--matrix key:value`; the replay is errored unless exactly one entry runs and it holds each key, since act ignores a key the matrix does not have |
 | `firmware_ci_timeout_s` | the replay's wall clock in s (optional, default 1800) |
 | `firmware_image` | the file the device receives, a glob in the job's workspace (`build/*.bin`: `*` stays inside one directory, `**/` crosses any number) |
@@ -201,6 +225,22 @@ The replay reads back whole only the images that `firmware_image` and
 image is listed by name, size and sha256 in `images.json`. Past the cap the replay
 is errored and says so: name one file with each glob.
 
+One replay runs at a time for each user on a machine, behind a lock in
+`/tmp/nopekit-<uid>/`: act names a job's container from the workflow and the job
+alone, so two replays at once remove each other's containers. The replay that holds
+the lock writes its pid, repository, workflow and job into it. A replay first tries
+the lock without waiting. If it must wait, it prints on stderr which pid holds the
+lock and what it replays, and then waits. Each replay ends within its own
+`firmware_ci_timeout_s`.
+
+`nopekit gate show fw.build` prints `last verdict` as the spine's resolver reads it
+in the shell you run it in. Where act, docker or git is not on PATH, the resolver
+applies that shell's missing tool (a missing tool is a skip, never a pass), so a
+pass a check recorded reads `[skip] fw.build : requires act (not on PATH)`, and
+`runnable here`, a few lines above it in the same block, says NO. This is the spine's rule, not a lost
+verdict: the pass is still in `.nopekit/verdicts/fw.build/`. Run `gate show` in a
+shell that has act, docker and git to see it. The three readers read the same way.
+
 ## What this pack cannot settle
 
 - A wake on real hardware, sleep current, and whether the board routed the button
@@ -220,8 +260,17 @@ is errored and says so: name one file with each glob.
   from `references/ci-templates.md` beside your CI, recorded as a decision (`nopekit
   decide`) that says why, with the claim restated to name that job. The replay then
   judges that job, not your CI.
-- What a script the build step runs does: `fw.ci_job` reads the step's own lines,
-  and names each script it did not read.
+- What a build inside an action or a non-shell script does: `fw.ci_job` reads the
+  step's own lines and the shell scripts they run, skips on a build it cannot
+  read, and names each file it did not read.
+- A file that a `.gitignore` matches and that is not tracked. The replay's copy
+  holds what `git ls-files -co --exclude-standard` lists: every tracked file, one
+  added with `git add -f` too, and each untracked file no ignore rule matches. The
+  copy's own commit holds the same files, so `git ls-files` in the job lists a
+  force-added file as GitHub's checkout does. An ignored file that is on disk and
+  not tracked is not in the replay, and a build that reads it reads errored on
+  the file it did not find. Track it with `git add -f <file>`, as an upstream that
+  needs it does.
 - A job container act could not remove is named in the replay's cleanup. To find
   one by hand: `docker ps -a --filter volume=<copy>`, or `docker ps -a --filter
   name=act-`; remove it with `docker rm -f <id>`.

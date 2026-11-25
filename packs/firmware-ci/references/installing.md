@@ -67,8 +67,14 @@ loaded machine).
 For the chosen job, act runs `push` on a copy of what the next commit would hold:
 `git ls-files -co --exclude-standard` in a work tree, or every file under the
 repository where it is ignored or in no work tree, without `.git`, `.nopekit` and
-act's `.actrc`, `.secrets`, `.env`, `.vars` and `.input`. The copy gets one commit
-with a fixed author and date, because act reads the commit and the branch from git.
+act's `.actrc`, `.secrets`, `.env`, `.vars` and `.input`. A tracked file is in the
+copy even when a `.gitignore` matches it (one added with `git add -f`); an ignored
+file that is not tracked is not. The copy gets one commit of every file it holds
+(`git add --force`, so `git ls-files` in the job lists a force-added file, as in
+GitHub's checkout), with a fixed author and date, because act reads the commit and
+the branch from git. One replay runs at a time for your user, behind a lock in
+`/tmp/nopekit-<uid>/`; a replay that must wait prints on stderr which pid holds the
+lock and what it replays.
 act runs with `--bind` (the job writes into the copy), `--container-daemon-socket -`
 (no docker socket in any job), `/dev/null` for secrets, variables, environment and
 inputs, no cache server, `--rm`, and HOME pointed at an empty directory, so no

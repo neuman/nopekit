@@ -32,7 +32,23 @@ too. `docker_127.log` (`exec: "no-such-command": executable file not found`) is
 the excerpt for that case. The reason quotes the step's first cause line, in this
 order of the log: `CMake Error`, apt's `E:`, `error:`, `FATAL ERROR`. A west
 configure failure ends with west's `FATAL ERROR`, and its cause is the `CMake
-Error` line above it.
+Error` line above it. `CMake Error at <file>:<line> (<command>):` is only where
+CMake raised the error: the reason quotes the message under it, which CMake
+indents and wraps, joined into one line, with the location after it in brackets.
+`act_esp_cmake_missing_file.jsonl` is the excerpt: the baseline with
+`SDKCONFIG_DEFAULTS` naming a file the copy does not hold reads `SDKCONFIG_DEFAULTS
+'<repo>/sdkconfig.release' does not exist. (CMake Error at
+/opt/esp/idf/tools/cmake/project.cmake:683)`.
+
+A step that runs a composite action is read with the action's own steps, which
+act logs under the step's id with their own index (`["1", "0"]`, `["1", "1"]`):
+the design lines and the cause are read in their output. The reason quotes the
+action's own last error line, its last `::error` annotation, then the first cause
+line in the output of the action's step that failed.
+`act_esp_composite_cmake.jsonl` (the same missing file, built by a composite
+action that ends `echo "::error::idf.py build failed"`) is errored, and
+`act_esp_composite_link.jsonl` (the `unresolved_symbol` edit, built by that
+action) fails on its `undefined reference to` line.
 
 ## Replay gaps in a step that read success: errored
 

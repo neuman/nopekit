@@ -123,3 +123,27 @@ Four real firmware repositories, replayed by people who had not written the pack
 - A replay that read `HOME` through `os.path.expanduser`, where its docstring said
   it read no environment variable. The action cache and the fallback lock are now
   under the uid's home in the user database.
+
+## What the second holdout round found
+
+- An errored reason that quoted CMake's location header, `CMake Error at
+  <file>:<line> (message):`, a line in a build-system module. The missing file
+  CMake named under it was only in `log.txt`. The reason now quotes the message
+  under the header, joined into one line, with the location after it.
+- A build step that runs a composite action, read by its own record, which holds
+  no output. The reason quoted act's `Job failed`, and a compile error inside the
+  action could only read errored. The step is now read with the action's own
+  steps, and the reason quotes the action's own last error line.
+- A guard pass over a build inside an action, a Python script, or a command the
+  pack does not know: "no masking in the step's own lines", over lines that held
+  no build. The guard now reads the shell scripts the step runs, and skips on a
+  build it cannot read. `fw.build` no longer needs the guard, so its replay still
+  judges such a build.
+- A file that upstream tracks although its `.gitignore` matches it, in the copy
+  and out of the copy's own commit. The commit now holds every file the copy
+  holds, as GitHub's checkout does.
+- A pass that listed a test vector `west update` fetched first among the images
+  the job wrote, and the spine cut the detail before the signed app image. The
+  images `firmware_image` and `firmware_elf` name now come first.
+- A replay that waited in silence on another project's replay. The lock is tried
+  without waiting first, and a wait prints who holds it.

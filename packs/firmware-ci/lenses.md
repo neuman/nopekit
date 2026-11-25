@@ -14,7 +14,9 @@ take to close it. A green replay answers none of them.
 
 - Does any step after the build hide its status: a `tee`, a `grep`, an `|| true`,
   a script that ends with `echo done`? `fw.ci_job` reads the build step's own lines
-  only, and names each script that step runs as not read. Open each one.
+  and, where they hold no build command, the shell scripts they run. It names each
+  other file the step runs as not read, and it skips a build inside an action or a
+  Python script. Open each one.
 - Does a later step upload a file a failed build left behind?
 
 ## The region nobody confirmed
