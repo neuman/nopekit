@@ -116,8 +116,11 @@ that reaches the part's own pads through tracks on the pads' layers is the
 antenna's own copper, and so is a via on such a track: each is listed beside the
 part's own pads and not counted. A zone's fill is never the antenna's own (a
 ground pour under a printed antenna is the defect the rule is for), nor is
-anything beyond a via, nor a track of those nets that touches none of the
-antenna's copper (a ground track that crosses under it still counts). What is
+anything beyond a via or beyond another part's pad (the search stops there, on
+every layer: a ground track that runs on from the ground arm's via, or from a
+capacitor's ground pad, still counts), nor a track of those nets that touches
+none of the antenna's copper (a ground track that crosses under it still
+counts). What is
 not judged: a two-pad drawing (two pads cannot show a drawing read mirrored, so
 a drawing still registers on three or more pads off one line).
 

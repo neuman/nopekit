@@ -2494,9 +2494,16 @@ STOCK_MODEL_DIRS = (
 )
 _MODEL_VAR = re.compile(r"\$\{([^}]+)\}|\$\(([^)]+)\)")
 
-#: The model files ``--subst-models`` puts in place of a VRML model: a STEP of the
-#: same name beside it. A VRML file alone cannot go into a STEP export, so it is
-#: not a model found.
+#: The model files ``--subst-models`` puts in place of a VRML model that is
+#: there: a STEP of the same name beside it. The stage copies the twin with the
+#: VRML file; it never makes a model found. Measured with KiCad 9.0.9 on the
+#: baseline's U1 named as ``3d/SOT-23-6.wrl``: with the VRML file and its STEP
+#: twin, the twin is fitted; with the VRML file alone, kicad-cli puts its mesh in
+#: the export ("Adding component U1"); with the STEP twin alone, "Could not add
+#: 3D model for U1. File not found: ${KIPRJMOD}/3d/SOT-23-6.wrl", and U1 is not
+#: in the export. (What slipped through in the review of H2: a VRML name counted
+#: as found by its twin alone, so a declared height for that part was named
+#: unused, and the run skipped on the part kicad-cli left out.)
 _SUBST_EXTS = (".step", ".stp", ".STEP", ".STP")
 
 #: The courtyard layer of a footprint on each side. A declared height is the
@@ -2588,8 +2595,9 @@ def _model_file(model: str, board_dir: str) -> str | None:
     found nowhere here: ``${KIPRJMOD}`` is the board's folder, another variable
     is the environment's, and KiCad's own 3D library variable, unset, is
     searched where its installers put it (:data:`STOCK_MODEL_DIRS`). A
-    relative path is read from the board's folder. A VRML model counts only by
-    the STEP beside it, as ``--subst-models`` reads it."""
+    relative path is read from the board's folder. The file the path names is
+    the one kicad-cli looks for, a VRML file too: a STEP beside a VRML name
+    that is not there is never read (:data:`_SUBST_EXTS`)."""
     unset: list[str] = []
 
     def var(m) -> str:
@@ -2609,12 +2617,7 @@ def _model_file(model: str, board_dir: str) -> str | None:
         options = [expanded.replace("\0", base) for base in bases]
     else:
         options = [expanded]
-    found = []
-    for path in options:
-        if not os.path.isabs(path):
-            path = os.path.join(board_dir, path)
-        stem, ext = os.path.splitext(path)
-        found += ([stem + e for e in _SUBST_EXTS] if ext.lower() == ".wrl" else [path])
+    found = [p if os.path.isabs(p) else os.path.join(board_dir, p) for p in options]
     return next((p for p in found if os.path.isfile(p)), None)
 
 
@@ -3005,7 +3008,11 @@ def _read_board(ctx: GateContext, gid: str, fit: _Fit) -> str | None:
         rec["box"] = box
     for ref in fit.contacts:
         if ref != BODY:
-            placed(ref, "a contact")
+            # A footprint with no type and no model that takes a declared height
+            # is fitted, so it may seat by design too. (What slipped through in
+            # the review of H2: the height made it a part and the contact still
+            # read "the board does not place it".)
+            placed(ref, "a contact", untyped=ref in fit.heights)
             if ref in fit.bodiless:
                 raise _FitError(f"{label}{ref} is listed as bodiless and has a contact: a "
                                 f"part with no body touches nothing")
@@ -3241,7 +3248,7 @@ def _export(ctx: GateContext, gid: str, fit: _Fit, timeout: float, how: str = ""
     stem, stage = staged
     # Every part's model kept with the project goes to the stage, a part of
     # any type among them (_parts_and_models), and a VRML model's STEP twin
-    # with it, as --subst-models reads it.
+    # with it, which --subst-models reads in place of a VRML file that is there.
     src_dir = os.path.dirname(os.path.abspath(fit.board))
     for ref in fit.parts:
         for model in fit.models.get(ref, []):
@@ -3512,15 +3519,30 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
                               f"not reach kicad-cli's export")
             if unfound:
                 # Every part here names a model: one with neither skipped before the
-                # export, and one with both is refused (_read_board). So the advice
-                # is to hide the model as well as to state a height. (What slipped
-                # through in P7: the advice was to state a height alone, which the
-                # next run refused; and at 241 characters, past the 200 a skip
-                # reason keeps, that advice was cut off before it was shown.)
-                skips.append(f"{label}kicad-cli left out {', '.join(unfound[:8])}: it did not "
-                             f"find their 3D models. Install KiCad's 3D library, keep each "
-                             f"model beside the board, or hide it and state a height in "
-                             f"pcb_part_heights_mm")
+                # export. Where this host has no file its model names, a declared
+                # height stands in for it (_read_board), so the advice is to state
+                # one. Where it has the file and kicad-cli left the part out all the
+                # same, a height is named unused beside the model, so the advice is
+                # to hide the model. (What slipped through in P7: the advice was to
+                # state a height alone, which the next run refused; and at 241
+                # characters, past the 200 a skip reason keeps, that advice was cut
+                # off before it was shown. In the review of H2: the advice still
+                # said to hide a model after a height had come to stand in for a
+                # missing one, and a part whose height was stated was told to state
+                # one.)
+                board_dir = os.path.dirname(os.path.abspath(fit.board))
+                here = [r for r in unfound if r in fit.unused
+                        or any(_model_file(m, board_dir) for m in fit.models.get(r, []))]
+                gone = [r for r in unfound if r not in here]
+                if gone:
+                    skips.append(f"{label}kicad-cli left out {', '.join(gone[:8])}: it did "
+                                 f"not find their 3D models. Install KiCad's 3D library, keep "
+                                 f"each model beside the board, or state a height in "
+                                 f"pcb_part_heights_mm")
+                if here:
+                    skips.append(f"{label}kicad-cli left out {', '.join(here[:8])}: their "
+                                 f"model files are here and did not load. Hide each model, "
+                                 f"and state its height in pcb_part_heights_mm if it has none")
             judged_parts += sum(1 for r in fit.parts if r in measured_parts)
             for name, row in sorted(measured_parts.items()):
                 enc = row["enclosure"]
@@ -3749,12 +3771,19 @@ def _antenna_own_items(tree: list, board, fp: list, nets: list[str]) -> set[str]
     net the record names (``own_nets``), on a layer of the part's own pads, and
     joined to those pads through such tracks alone; and each via of those nets
     on such a track. A zone's fill is never the antenna's own, nor is anything
-    beyond a via. What slipped through (a holdout run): a printed antenna's
-    feed and ground arm are tracks, and the added area forbids every track, so
-    a sound inverted-F antenna read as findings of itself. *Rejected:* every
-    item of a named net (a ground track that crosses under the antenna, or a
-    ground pour, would be excused by the ground arm's net); the net alone
-    without the copper (the same)."""
+    beyond a via or beyond another part's pad: two tracks that both reach one
+    via, or one pad of another part, are not joined through each other. What
+    slipped through (a holdout run): a printed antenna's feed and ground arm
+    are tracks, and the added area forbids every track, so a sound inverted-F
+    antenna read as findings of itself. And in the review of H2: two tracks
+    that end on one via touch each other there, so the search went on through
+    the ground arm's via, and through a decoupling capacitor's ground pad, and
+    excused a ground track that ran on, on the same layer, under the radiating
+    arm. *Rejected:* every item of a named net (a ground track that crosses
+    under the antenna, or a ground pour, would be excused by the ground arm's
+    net); the net alone without the copper (the same); a stop at a via of the
+    named nets only (a via of another net there is a short, which DRC names,
+    and the search must not run on through it either)."""
     wanted = set(nets)
     if not wanted:
         return set()
@@ -3779,6 +3808,36 @@ def _antenna_own_items(tree: list, board, fp: list, nets: list[str]) -> set[str]
             tracks.append((str(K.value(item, "uuid") or K.value(item, "tstamp") or ""),
                            str(K.value(item, "layer")), list(zip(pts, pts[1:])),
                            float(K.value(item, "width", default=0.0)) / 2.0))
+    # Where the search stops: every via, of any net, read on every layer (a
+    # blind via spans fewer, and reading it on all is the side that excuses
+    # less), and every pad of every other part, each as a circle of its half
+    # diagonal, the reach this function gives the part's own pads.
+    stops = []
+    for via in K.children(tree, "via"):
+        at = K.child(via, "at")
+        if at is not None:
+            stops.append(((float(at[1]), float(at[2])),
+                          float(K.value(via, "size", default=0.0)) / 2.0, set(copper)))
+    for other in K.children(tree, "footprint"):
+        if other is fp:
+            continue
+        oplace = _footprint_to_board_raw(other)
+        for pad in K.children(other, "pad"):
+            at, size = K.child(pad, "at"), K.child(pad, "size")
+            if at is None:
+                continue
+            r = math.hypot(float(size[1]), float(size[2])) / 2.0 if size is not None else 0.0
+            stops.append((oplace((float(at[1]), float(at[2]))), r,
+                          _layers_of((K.child(pad, "layers") or [])[1:], copper)))
+
+    def joined(lines, half, olines, ohalf, layer) -> bool:
+        if not any(_seg_seg(*a, *b) <= half + ohalf for a in lines for b in olines):
+            return False
+        return not any(layer in sl
+                       and any(_seg_point(c, *ln) <= half + r for ln in lines)
+                       and any(_seg_point(c, *ln) <= ohalf + r for ln in olines)
+                       for c, r, sl in stops)
+
     found: set[int] = set()
     todo = [i for i, (_u, layer, lines, half) in enumerate(tracks)
             if any(layer in pl and _seg_point(c, *ln) <= half + r
@@ -3790,8 +3849,8 @@ def _antenna_own_items(tree: list, board, fp: list, nets: list[str]) -> set[str]
         found.add(i)
         _u, layer, lines, half = tracks[i]
         for j, (_v, other, olines, ohalf) in enumerate(tracks):
-            if j not in found and other == layer and any(
-                    _seg_seg(*a, *b) <= half + ohalf for a in lines for b in olines):
+            if j not in found and other == layer and joined(lines, half, olines, ohalf,
+                                                            layer):
                 todo.append(j)
     # As kicad-cli names each item in its report (_kicad.kiid).
     out = {K.kiid(tracks[i][0]) for i in found} - {None}

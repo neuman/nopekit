@@ -47,10 +47,25 @@ judge without the value fails first (a charger that senses nothing).
     `beta_tol_pct`, `rt_table_c_ohm`.
 - `pcb_protectors.<id>`: required `battery`, `kind`, `where`, `functions`,
   `source`; `ref` and `value` on a board (and optional `board`).
-  - `charge_temp`: required `sense` {pin, ...} and `ntc`, optional `network`,
-    `acts`; in the pack, `window_c` {cold_c, hot_c}. A charger may name its
-    `sense` {pin} alone, with no `ntc`: the rule then judges only whether its
-    input is switched off (`pcb.charge_temperature` below).
+  - `charge_temp`: required `sense` and `ntc`, optional `network`, `acts`; in
+    the pack, `window_c` {`cold_c` [min, max], `hot_c` [min, max]} alone. A
+    charger may name its `sense` {`pin`} alone, with no `ntc`: the rule then
+    judges only whether its input is switched off (`pcb.charge_temperature`
+    below).
+    - `sense`: required `pin` and `kind`. A `current` source takes `i_a`,
+      `cold_v` and `hot_v`, each [min, max]; a `ratio` input (a divider) takes
+      `pullup_ref`, `pullup_tol_pct`, `cold_frac` and `hot_frac`, the two
+      fractions each [min, max]. Each kind refuses the other's keys.
+    - `ntc`: the board's thermistor, required `ref`, `value`, `r25_ohm`,
+      `r25_tol_pct`, optional `beta_k`, `beta_pair_c`, `beta_tol_pct`,
+      `rt_table_c_ohm`; or `{"battery_therm": true}`, the pack's own (its
+      battery's `ntc` record, on its `therm` pin).
+    - `network`: optional `series_ref`, `parallel_ref` (not across the pack's
+      own NTC), `tol_pct` (required with either), and `others` [{`ref`,
+      `value`, `why`}] (any other part on the sense net, declared).
+    - `acts` (required when the element is not the charger): {`pin`, `to`
+      {`ref`, `pin`}}: the element's output pin, and the pin it drives on the
+      part that stops the charge.
   - `overcharge_v`, `overdischarge_v`: required `v_max` or `v_min`, `per_cell`;
     on a board `sense` ({pin, through: [refs]}, or {taps} for two or more cells)
     and `acts` {pin, switch {ref, value, control, path}}.
@@ -64,8 +79,19 @@ judge without the value fails first (a charger that senses nothing).
     `through` [{ref, value, path: [p, q], why}] (the series parts from the
     terminal to the block, in order: a power switch, a fuse), and `ahead` [{ref,
     value, why}] (a part on a net before the block, declared).
-  - `charge_v`, `charge_a`, `safety_timer`: as `selftest/baseline.json`'s
-    `_notes` give them.
+  - `charge_v` (required of a charger): required `per_cell` (true when the
+    voltage is each cell's, false when it is the whole stack's); then one of
+    `v_reg_v` [min, max] (the datasheet's regulation voltage), `divider`
+    {`vfb_v` [min, max], `top_ref`, `bottom_ref`, `tol_pct`} (the feedback
+    divider on the board, read off its two resistors: a charger on the board
+    only), or `set_by`: `"firmware"` (named, never judged; refused beside a
+    value).
+  - `charge_a` (required of a charger): one of `a_max` (the most charge
+    current, A), `prog` {`ref`, `k_v` [min, max], `r_tol_pct`} (the PROG
+    resistor on the board: the current is `k_v` over its resistance; a charger
+    on the board only), or `set_by`: `"firmware"` (as above).
+  - `safety_timer`: a flag, kept as evidence. No rule reads it, and it is not a
+    function on its own: a record that states only it is refused.
 - `pcb_conductors.<id>`: required `battery`, `kind`, `start_c`, `limit_c`,
   `protected_by`, `source`; a track's `net` and `continuous_rise_c`, any other
   kind's `ref`, `value`, `pins`, `area_mm2`, `continuous_a`; optional `board`.

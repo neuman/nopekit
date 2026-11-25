@@ -76,9 +76,11 @@ with nothing on the board. The gate therefore:
    there is to state;
 2. reads the export with OpenCascade's XCAF reader, which keeps each component's
    name (KiCad names each part's model by its reference), and skips, naming them,
-   if any placed part did not arrive. Such a part names a model, so the skip
-   says to install the library, keep the model beside the board, or state a
-   height.
+   if any placed part did not arrive. Such a part names a model. Where this
+   host has no file it names, the skip says to install the library, keep the
+   model beside the board, or state a height. Where the file is here and
+   kicad-cli left the part out all the same, a height would be named unused,
+   so the skip says to hide the model (and state its height if it has none).
 
 `pcb_enclosure_bodiless` lists, by reference, parts that truly have no body to fit
 (an antenna drawn in copper). A model kept with the project (`${KIPRJMOD}/...`,
@@ -99,10 +101,12 @@ for a part with no courtyard), raised `h` mm (the datasheet's seated height;
 A part whose model is not on this host is one that names none, or one whose
 every model is found nowhere here: `${KIPRJMOD}` is the board's folder, another
 variable the environment's, and KiCad's own `KICAD<n>_3DMODEL_DIR`, unset, is
-looked for where KiCad's installers put the library; a VRML model counts by the
-STEP beside it. There the box stands in, the model left out of the staged copy,
-and the pass names it ("at its declared height, its model not found here"). On a
-host that has the model, the model is fitted and the pass names the height
+looked for where KiCad's installers put the library. A model is found only by
+the file its path names, a VRML file too: kicad-cli 9.0.9 looks for that file,
+and with a STEP twin beside a VRML name that is not there it says "File not
+found" and leaves the part out. There the box stands in, the model left out of
+the staged copy, and the pass names it ("at its declared height, its model not
+found here"). On a host that has the model, the model is fitted and the pass names the height
 unused. One body each, never both: a union of the two would fail a sound board
 on one host and not another. (What slipped through, a holdout run: a part that
 named a model was refused a height outright, so a board copied from a machine
@@ -136,9 +140,10 @@ cutout, a light pipe, a cell on foam. A feature is:
 
 The part keeps the limit against every other feature, and any shared volume still
 fails it: a contact excuses closeness, never a collision. A ref with no feature
-and a feature with no reason are refused. An allow-list entry for one part
-against anything once hid a real interference, so a region is held to what its
-part can reach:
+and a feature with no reason are refused. A footprint with no type and no model
+that takes a declared height is a part, and may seat by design too. An
+allow-list entry for one part against anything once hid a real interference, so
+a region is held to what its part can reach:
 
 - the enclosure material it takes out must lie within twice the claim's limit of
   the part's own box (its bounding box as placed, in the enclosure's frame).

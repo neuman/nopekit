@@ -147,10 +147,11 @@ not), or a module whose antenna is off the board (`"none"`, listed, not judged).
 `own_nets` names a printed antenna's own nets (its feed and its ground arm): their
 tracks that reach the part's pads through tracks on the pads' layers, and a via on
 those tracks, are its own copper, listed and not counted, as its pads are. A pour
-is never its own, nor anything beyond a via. A found module with no keep-out in
-its footprint, and no record, skips by name, never passes: 26 of the 57 stock
-modules carry none (the LoRa modules among them, whose antenna is on a pad or a
-connector), and three carry only an area that allows tracks or copper pour. The baseline's record names
+is never its own, nor anything beyond a via or another part's pad. A found
+module with no keep-out in its footprint, and no record, skips by name, never
+passes: 26 of the 57 stock modules carry none (the LoRa modules among them,
+whose antenna is on a pad or a connector), and three carry only an area that
+allows tracks or copper pour. The baseline's record names
 `selftest/assets/radio_board.kicad_pcb` (made by `make_radio_board.py`), which
 only this gate reads. `references/antenna-keepout.md` holds every field, the
 survey and the measurements.

@@ -4733,11 +4733,14 @@ class BoardsSitInAnyOrientationAndBesideEachOther(unittest.TestCase):
         apart = self._run(fits(("broken", "whole"), 2.0))
         self.assertEqual(apart.outcome, "skipped", apart.render())
         self.assertIn("fit broken: kicad-cli left out U1", apart.skip_reason)
-        # The advice is one the gate accepts, and is shown: a part that names a
-        # model and a declared height is refused, and a skip reason keeps 200
-        # characters (review of P7).
+        # The advice is one the gate accepts, and is shown: a skip reason keeps
+        # 200 characters (review of P7). A declared height stands in for a model
+        # found nowhere here, so it is the advice (review of H2: the advice
+        # still said to hide the model, as it had when a height beside a named
+        # model was refused).
         self.assertTrue(apart.skip_reason.endswith(
-            "or hide it and state a height in pcb_part_heights_mm"), apart.skip_reason)
+            "or state a height in pcb_part_heights_mm"), apart.skip_reason)
+        self.assertNotIn("hide", apart.skip_reason)
 
     def test_a_contact_between_boards_is_one_shape_against_one_shape(self):
         excused = self._two(0.5, {"board": {"right:board": {"reason": "the edges seat "
@@ -6642,6 +6645,40 @@ class TheGatesTagsAreThisPacksOwn(unittest.TestCase):
                 self.assertRegex(text, rf"(?s)\n- `{old}`(?:(?!\n- ).)*`{new}`")
 
 
+class TheBatteryReferenceNamesEveryKey(unittest.TestCase):
+    """Every key the battery, protector and conductor records take is named in
+    references/battery.md. What slipped through (review of H2): charge_v's
+    divider {vfb_v, top_ref, bottom_ref, tol_pct} and charge_a's prog {ref,
+    k_v, r_tol_pct} were written out only in selftest/baseline.json's _notes,
+    so a person who read the reference could not state them (holdout watchy
+    D01/D02). The keys are read off power.py's strict readers, so a key added
+    there and not here goes red. pcb_rails is mismate.md's."""
+
+    def test_every_key_a_reader_takes_is_in_the_reference(self):
+        import ast
+        with open(os.path.join(PACK, "gates", "power.py"), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        named = {n.targets[0].id: n.value for n in ast.walk(tree)
+                 if isinstance(n, ast.Assign) and len(n.targets) == 1
+                 and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Tuple)}
+        rails = next(n for n in ast.walk(tree)
+                     if isinstance(n, ast.ClassDef) and n.name == "_Rail")
+        skip = {id(n) for n in ast.walk(rails)}
+        keys: set[str] = set()
+        for node in ast.walk(tree):
+            if (id(node) in skip or not isinstance(node, ast.Call)
+                    or not isinstance(node.func, ast.Attribute) or node.func.attr != "keys"):
+                continue
+            for arg in node.args[2:]:
+                arg = named.get(arg.id, arg) if isinstance(arg, ast.Name) else arg
+                if isinstance(arg, ast.Tuple):
+                    keys |= {e.value for e in arg.elts if isinstance(e, ast.Constant)}
+        self.assertGreater(len(keys), 60, "the readers were not found")
+        with open(os.path.join(PACK, "references", "battery.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(sorted(k for k in keys if not re.search(rf"\b{k}\b", text)), [])
+
+
 class ThePartSetHasNoTypeFilter(unittest.TestCase):
     """``_parts_and_models``, ``_model_file`` and the fit's timeouts and region
     refusals, without KiCad."""
@@ -6672,9 +6709,17 @@ class ThePartSetHasNoTypeFilter(unittest.TestCase):
                          os.path.join(here, "SOT-23-6.step"))
         self.assertEqual(model_file("3d/SOT-23-6.step", ASSETS),
                          os.path.join(ASSETS, "3d/SOT-23-6.step"))
-        # A VRML model counts by the STEP beside it, as --subst-models reads it.
-        self.assertEqual(model_file("${KIPRJMOD}/3d/SOT-23-6.wrl", ASSETS),
-                         os.path.join(here, "SOT-23-6.step"))
+        # A VRML name counts by its own file, never by the STEP beside it: with
+        # the twin alone, kicad-cli 9.0.9 says "File not found" and leaves the
+        # part out (review of H2; ABodiedPartOfAnyTypeIsFitted runs it).
+        self.assertIsNone(model_file("${KIPRJMOD}/3d/SOT-23-6.wrl", ASSETS))
+        root = tempfile.mkdtemp(prefix="nopekit-fit-wrl-")
+        self.addCleanup(shutil.rmtree, root, True)
+        os.makedirs(os.path.join(root, "3d"))
+        with open(os.path.join(root, "3d", "SOT-23-6.wrl"), "w", encoding="utf-8") as fh:
+            fh.write("#VRML V2.0 utf8\n")
+        self.assertEqual(model_file("${KIPRJMOD}/3d/SOT-23-6.wrl", root),
+                         os.path.join(root, "3d", "SOT-23-6.wrl"))
         self.assertIsNone(model_file("${KIPRJMOD}/3d/not-installed.step", ASSETS))
         self.assertIsNone(model_file("${NOT_A_KICAD_VARIABLE}/x.step", ASSETS))
         with mock.patch.dict(os.environ, {"KICAD9_3DMODEL_DIR": ASSETS}):
@@ -6745,6 +6790,33 @@ class ThePartSetHasNoTypeFilter(unittest.TestCase):
                     "box_mm": [[-1.5, -1.45], [1.5, 1.45]]}}, "h"))
         self.assertIsNone(self.g["_read_board"](ctx, "pcb.enclosure_fit", fit))
         self.assertEqual(fit.heights["U1"]["box"], (-1.5, -1.45, 1.5, 1.45))
+
+    def test_an_untyped_part_at_its_height_may_seat_by_design(self):
+        """What slipped through (review of H2): a footprint with no type and no
+        model took a declared height and was fitted, and a contact on it read
+        "the board does not place it". Without the height it still does."""
+        root = tempfile.mkdtemp(prefix="nopekit-fit-seat-")
+        self.addCleanup(shutil.rmtree, root, True)
+
+        def hand_fitted(tree):
+            _drop_model("U1")(tree)
+            K.child(_footprint(tree, "U1"), "attr")[1:] = ["exclude_from_pos_files",
+                                                           "exclude_from_bom"]
+        board = _variant_board(root, hand_fitted)
+        ctx = _fit_ctx(tempfile.mkdtemp(dir=root), dict(_baseline(), pcb_board=board))
+        Fit, heights, contacts = self.g["_Fit"], self.g["_heights"], self.g["_contacts"]
+        place = {"x": 0.0, "y": 0.0, "z": 0.0, "rot_x_deg": 0.0, "rot_y_deg": 0.0,
+                 "rot_z_deg": 0.0}
+        ledge = {"U1": {"ledge": {"reason": "the display rests on the window ledge",
+                                  "region_mm": [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]}}}
+        fit = Fit("", board, "e.step", place, set(), contacts(ledge, "c"),
+                  heights({"U1": {"h": 1.0, "source": "datasheet"}}, "h"))
+        self.assertIsNone(self.g["_read_board"](ctx, "pcb.enclosure_fit", fit))
+        self.assertIn("U1", fit.parts)
+        fit = Fit("", board, "e.step", place, set(), contacts(ledge, "c"), {})
+        with self.assertRaises(self.g["_FitError"]) as raised:
+            self.g["_read_board"](ctx, "pcb.enclosure_fit", fit)
+        self.assertIn("a contact names U1: the board does not place it", str(raised.exception))
 
     def test_parts_with_no_model_and_a_lost_one_are_named_in_one_skip(self):
         root = tempfile.mkdtemp(prefix="nopekit-fit-lost-")
@@ -6818,6 +6890,20 @@ class ABodiedPartOfAnyTypeIsFitted(unittest.TestCase):
         v = self._run(lambda t: None, {"U1": {"h": 1.0, "source": "seated height"}})
         self.assertEqual((v.outcome, v.measured), ("fail", 0.8), v.render())
         self.assertIn("declared height not used, its model found: U1", v.detail)
+
+    def test_a_vrml_name_with_only_its_step_twin_takes_its_height(self):
+        """What slipped through (review of H2): U1 named as a VRML file that is
+        not there, its STEP twin beside it. The fit counted the model found by
+        the twin and named the height unused; kicad-cli 9.0.9 looks for the
+        VRML file only, left U1 out, and the run skipped, telling the person to
+        state the height they had stated."""
+        def wrl(tree):
+            for item in _footprint(tree, "U1"):
+                if isinstance(item, list) and K.head(item) == "model":
+                    item[1] = K.Q("${KIPRJMOD}/3d/SOT-23-6.wrl")
+        v = self._run(wrl, {"U1": {"h": 1.0, "source": "seated height"}})
+        self.assertEqual((v.outcome, v.measured), ("pass", 1.35), v.render())
+        self.assertIn("at its declared height, its model not found here: U1", v.detail)
 
 
 @unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
@@ -6902,6 +6988,41 @@ class TheKeepoutReadsAPrintedAntenna(unittest.TestCase):
         self.assertEqual(own, ids)
         self.assertEqual(self.g["_antenna_own_items"](tree, board, fp, []), set())
         self.assertEqual(self.g["_antenna_own_items"](tree, board, fp, ["RF"]), set())
+
+    def test_the_search_stops_at_a_via_and_at_another_parts_pad(self):
+        """What slipped through (review of H2): two tracks that end on one via,
+        or on one pad of another part, touch there, so the search ran on through
+        them. U1's GND pad 1 with a track to a via and two front tracks on from
+        it; and a track from the pad to C1's GND pad 2, where the board's own
+        GND track runs on, and one more from that one's end. Only the track to
+        the via, the via and the track to C1 are U1's own."""
+        tree = K.load_tree(RADIO_BOARD)
+        fp = _footprint(tree, "U1")
+        place = self.g["_footprint_to_board_raw"]
+        pad = _pad(tree, "U1", "1")
+        cx, cy = place(fp)((float(K.child(pad, "at")[1]), float(K.child(pad, "at")[2])))
+        cap = _pad(tree, "C1", "2")
+        px, py = place(_footprint(tree, "C1"))((float(K.child(cap, "at")[1]),
+                                                 float(K.child(cap, "at")[2])))
+        onward = next(s for s in K.children(tree, "segment")
+                      if (float(K.child(s, "start")[1]), float(K.child(s, "start")[2]))
+                      == (px, py))
+        ex, ey = float(K.child(onward, "end")[1]), float(K.child(onward, "end")[2])
+        layer = "F.Cu"
+        for edit in (_track(layer, (cx, cy), (cx, cy - 3)),
+                     _via((cx, cy - 3)),
+                     _track(layer, (cx, cy - 3), (cx + 2, cy - 3)),
+                     _track(layer, (cx + 2, cy - 3), (cx + 2, cy - 6)),
+                     _track(layer, (cx, cy), (px, py)),
+                     _track(layer, (ex, ey), (ex, ey + 3))):
+            edit(tree)
+        board = K.board_from_tree(tree)
+        own = self.g["_antenna_own_items"](tree, board, fp, ["GND"])
+        ids = {K.kiid(_uid(name)) for name in (
+            f"{layer}{(cx, cy)}{(cx, cy - 3)}", f"via{(cx, cy - 3)}",
+            f"{layer}{(cx, cy)}{(px, py)}")}
+        self.assertEqual(own, ids, "nothing past the via or C1's pad is U1's own")
+        self.assertNotIn(K.kiid(K.value(onward, "uuid")), own)
 
 
 class TheKeepoutPicksAnUnnamedArea(unittest.TestCase):
