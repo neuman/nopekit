@@ -1218,6 +1218,13 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
                            "and warns for each limit that parts",
         "left_out_unseen": "{gate} (it reads inputs that nopekit cannot see)",
         "left_out_stale": "{gate} (its result is stale)",
+        # The same row's clause for an evaluator not registered here: an
+        # orphan entry, which no check run compares. What slipped through
+        # (review of J5): it read "(its result is stale) — nopekit check
+        # compares it", beside the orphan-entries row's "nothing here can
+        # re-run them".
+        "doctor_left_out_orphan": "not compared, not registered here: {list} — nothing "
+                                  "here runs {them}",
     }),
     # Who entered a physical result (GLOSSARY §1, *recorded by*): named, or the
     # unattributed form. What slipped through (review of P2.1): one template for

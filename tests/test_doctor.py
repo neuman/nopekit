@@ -21,15 +21,19 @@ past a check without it:
 * **two-outcomes** — one gate, identical inputs, two answers: a warning while
   `verdicts.TWO_OUTCOMES_IS_ERROR` is False, a failure once it is True; two
   control outcomes at one rho_control fail always (the gate is not admitted) —
-  while a run at the gate's current version and inputs could land on them. A
-  pair at another version, or on a file read that moved since, is named as
-  history, not a failure (holdout, general packs, round 2: a pack fix left two
-  round-1 entries at an old rho, and `doctor` stayed red on them for good).
+  each while a run at the gate's current version and inputs could land on
+  them. A pair at another version, on a file read that moved since, or of an
+  evaluator not registered here is named as history, not a failure (holdout,
+  general packs, round 2: a pack fix left two round-1 control entries at an
+  old rho, and `doctor` stayed red on them for good; review of J5: the verdict
+  entries' pairs had no such split).
 * **limits** — an evaluator's limit that parts from its claim's, over current
   results; each covering evaluator whose result is not current here is named
-  as not compared, with why (holdout, general packs, round 2: the row read ok
-  over an evaluator that reads inputs nopekit cannot see, and never said it
-  had left that one out).
+  as not compared, with why, and one not registered here apart, as nothing
+  here runs it (holdout, general packs, round 2: the row read ok over an
+  evaluator that reads inputs nopekit cannot see, and never said it had left
+  that one out; review of J5: it told the reader to run `check` for an orphan,
+  and named every evaluator with no cap).
 * **sealed-fixtures** — invariant 5 at runtime (`packs.seal_findings`): a pack
   control that reads its host's params passes in some projects and fails in
   others. The known-bad input must come from the pack's own baseline. Only the
@@ -222,6 +226,34 @@ def _plant_control_pair(project: str, gate_id: str, *, code: str = "",
         wrote = verdicts.write_control(project, entry)
         if not wrote.written:                      # pragma: no cover - reported
             raise AssertionError(f"{gate_id}: the planted control was not written: {wrote}")
+        names.append(wrote.name)
+    return tuple(names)
+
+
+def _plant_verdict_pair(project: str, entry: verdicts.Entry, *, code: str = "",
+                        files: dict | None = None, gate: str = "") -> tuple[str, ...]:
+    """Two verdict entries at one rho that is not ``entry``'s gate's current
+    one, with two outcomes — ``entry``, keyed as an earlier run would have keyed
+    it, and the same entry with its outcome flipped — and their names. Keyed as
+    `verdicts.rho` keys it: under another code digest (``code``), with a file
+    read recorded at other bytes (``files``), or filed under a gate id nothing
+    registers (``gate``)."""
+    gate_id = gate or entry.gate
+    digest = (hashlib.sha256(code.encode("utf-8")).hexdigest() if code
+              else entry.code["digest"])
+    reads = dict(entry.reads)
+    if files:
+        reads["files"] = {**(reads.get("files") or {}), **files}
+    first = dataclasses.replace(entry, gate=gate_id, code={**entry.code, "digest": digest},
+                                reads=reads, rho=verdicts.rho(gate_id, entry.spine, digest,
+                                                              reads))
+    second = dataclasses.replace(first, verdict={**first.verdict,
+                                                 "passed": not first.verdict["passed"]})
+    names = []
+    for planted in (first, second):
+        wrote = verdicts.write_entry(project, planted)
+        if not wrote.written:                      # pragma: no cover - reported
+            raise AssertionError(f"{gate_id}: the planted entry was not written: {wrote}")
         names.append(wrote.name)
     return tuple(names)
 
@@ -732,6 +764,64 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
             self.assertNotIn(name, failing, row)
         self.assertEqual(code, 1)
 
+    def test_two_verdict_outcomes_no_current_run_can_reach_are_history(self):
+        """Review of J5: only the control pairs had the split. A gate that gave
+        two answers for one input, fixed by an edit that moved its code, left
+        its two verdict entries at the old rho, and `doctor` stayed red on them
+        for good beside one clean entry at the new rho: no command removes a
+        cache entry. rho keys the spine, the gate's code digest and what it
+        read, so a pair under another code digest, on a file read that moved,
+        or of an evaluator not registered here is history, named, never a FAIL.
+        A read doctor cannot re-read (the model does not load) it never calls
+        moved."""
+        cases = (
+            ("another version", dict(code="an earlier bracket.bed_fit"),
+             "at another version of the evaluator"),
+            ("a moved file read",
+             dict(files={"model/bracket.py": hashlib.sha256(b"earlier bytes").hexdigest()}),
+             "on inputs that moved since (model/bracket.py changed)"),
+            ("an evaluator not registered here", dict(gate="bracket.retired"),
+             "bracket.retired: two outcomes ("),
+        )
+        for name, plant, said in cases:
+            with self.subTest(name):
+                project = self.copy()
+                names = _plant_verdict_pair(project, _entry(project, "bracket.bed_fit"),
+                                            **plant)
+                code, rows = _doctor_in_process(project)
+                self.assertRow(rows, "two-outcomes", "ok", "history, not a failure", said,
+                               *names, absent=("not deterministic",))
+                self.assertEqual(code, 0, rows)
+
+        # The same moved file read, with a model that does not load: the pair's
+        # params cannot be re-read, so nothing here can say it moved — live.
+        project = self.copy()
+        names = _plant_verdict_pair(
+            project, _entry(project, "bracket.bed_fit"),
+            files={"model/bracket.py": hashlib.sha256(b"earlier bytes").hexdigest()})
+        with open(os.path.join(project, "model", "bracket.py"), "a", encoding="utf-8") as fh:
+            fh.write("\nraise RuntimeError('planted: the model does not load')\n")
+        code, rows = _doctor_in_process(project)
+        self.assertRow(rows, "two-outcomes", "FAIL", "the same inputs gave two answers",
+                       *names, absent=("history, not a failure",))
+        self.assertEqual(code, 1)
+
+        # A pair a current run CAN land on beside history: the row fails on that
+        # one alone, and still names the history apart.
+        project = self.copy()
+        current = _entry(project, "bracket.bed_fit")
+        old = _plant_verdict_pair(project, current, code="an earlier bracket.bed_fit")
+        live = dataclasses.replace(current, verdict={**current.verdict,
+                                                     "passed": not current.verdict["passed"]})
+        self.assertTrue(verdicts.write_entry(project, live).written)
+        code, rows = _doctor_in_process(project)
+        row = self.assertRow(rows, "two-outcomes", "FAIL", current.name, live.name,
+                             "history, not a failure", *old)
+        failing = row["detail"].split("history, not a failure", 1)[0]
+        for name in old:
+            self.assertNotIn(name, failing, row)
+        self.assertEqual(code, 1)
+
     def test_limits_names_each_evaluator_it_did_not_compare(self):
         """Holdout, general packs, round 2 (D06, disputed): the limits row passed
         the resolver's stale gates to `claims.limit_disagreements`, and an
@@ -769,10 +859,58 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
                        "bracket.deflection (its result is stale)",
                        "nopekit check compares them",
                        absent=("one number in two places",))
+
+        # An evaluator not registered here (review of J5): its entry is an
+        # orphan, in the resolver's stale gates with the claims it recorded, and
+        # no check run compares it. Named apart, never as stale beside "nopekit
+        # check compares it", which the orphan-entries row would contradict.
+        entry = _entry(project, "bracket.bed_fit")
+        self.assertTrue(verdicts.write_entry(
+            project, dataclasses.replace(entry, gate="bracket.retired")).written)
+        _code, rows = _doctor(project)
+        row = self.assertRow(rows, "limits", "ok", unseen,
+                             "bracket.deflection (its result is stale)",
+                             "not compared, not registered here: bracket.retired — nothing "
+                             "here runs it",
+                             absent=("bracket.retired (its result is stale)",))
+        self.assertNotIn("bracket.retired",
+                         row["detail"].split("nopekit check compares them", 1)[0], row)
+        self.assertRow(rows, "orphan-entries", "warn", "bracket.retired",
+                       "nothing here can re-run them")
         self.assertClean("limits")
         self.assertEqual(self.clean["limits"]["detail"],
                          "every compared evaluator judges against its claim's own limit",
                          "nothing is left out on the checked bracket")
+
+    def test_limits_cuts_each_list_as_every_row_does(self):
+        """Review of J5: the clause named every evaluator it left out, with no
+        cap, where every other doctor row shows `_DOCTOR_SHOWN` and then "(+n
+        more)" — a model edit in a project of dozens of evaluators named each
+        one. Both of its lists are cut: the evaluators a check run compares, and
+        those not registered here."""
+        shown = cli_mod._DOCTOR_SHOWN
+        project = self.copy()
+        limit_file = os.path.join(self.tmp(), "limit.txt")
+        with open(limit_file, "w", encoding="utf-8") as fh:
+            fh.write("5.0\n")
+        for i in range(shown + 1):
+            _write(project, f"gates/outside_limit_{i}.py",
+                   _OUTSIDE_LIMIT_GATE.format(limit_file=limit_file, fixture=_FIXTURE)
+                   .replace("bracket.outside_limit", f"bracket.outside_limit_{i}"))
+        proc = _run(project, "check")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        entry = _entry(project, "bracket.bed_fit")
+        for i in range(shown + 1):
+            self.assertTrue(verdicts.write_entry(
+                project, dataclasses.replace(entry, gate=f"bracket.retired_{i}")).written)
+        _code, rows = _doctor(project)
+        row = self.assertRow(rows, "limits", "ok",
+                             "(+1 more) — nopekit check compares them",
+                             "(+1 more) — nothing here runs them")
+        compared, orphans = row["detail"].split("not compared, not registered here:", 1)
+        self.assertEqual(compared.count("(it reads inputs that nopekit cannot see)"), shown,
+                         row)
+        self.assertEqual(orphans.count("bracket.retired_"), shown, row)
 
     def test_sealed_fixtures(self):
         project = self.copy()
