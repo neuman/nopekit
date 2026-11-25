@@ -37,7 +37,27 @@ PACKS_DIR = os.path.join(REPO, "packs")
 #: from a parent project (see docs/ORIGINS.md) and carries its method, not its
 #: content — a leaked identifier means a pack is documenting somebody else's device
 #: instead of its own domain.
-FORBIDDEN = ("cyberdeck", "gripster", "thumbdeck", "keymat", "snap dome")
+#:
+#: Lower case: the scan lowers the text it reads, so an entry with a capital
+#: letter never matches (``test_every_word_is_found`` holds it).
+#:
+#: General-packs Z1 adds the six after "snap dome", each a string only the parent
+#: spells, found in the handheld cut and gone from the tree before it was added: a
+#: firmware board name a test copied, the parent's own driver module, its radio
+#: module's grant id, two of its CAD part names and its DRC rule's name (renamed by
+#: P3, and its body by Z1). What slipped through before them: the five words held,
+#: and every one of these sat in packs, docs, spine docstrings and tests, because
+#: none of them spells a forbidden word.
+#: *Rejected:* common parts the parent also used (every reference design names
+#: them, and a pack for handheld electronics must be free to); the grant id's
+#: prefix alone (it is the module maker's, on every module it certifies); the DRC
+#: rule's condition (a natural rule for any ground pad: only its name is the
+#: parent's); a hash of each word in place of the word (the scan matches a
+#: substring anywhere in a file, and a hash matches only a token whose edges the
+#: scan is told).
+FORBIDDEN = ("cyberdeck", "gripster", "thumbdeck", "keymat", "snap dome",
+             "handdeck", "tmag5273_nub", "2alph-e73", "grip_lid", "back_left",
+             "gnd_pad_edge")
 
 
 def _pack_dirs():
@@ -2127,6 +2147,16 @@ class NoLeakedProvenance(unittest.TestCase):
         not prose, and the word inside one is noise."""
         root = self._plant({"mesh.stl": b"solid\x00" + self._word().encode() + b"\x00"})
         self.assertEqual(_leaks(root), [])
+
+    def test_every_word_is_found(self):
+        """Each entry, planted in capitals in a file of its own, is reported at its
+        own index: an entry the lowered text can never hold (a capital in it)
+        refuses nothing (general-packs Z1)."""
+        planted = {f"notes/{i}.md": f"intro\n{word.upper()}\n"
+                   for i, word in enumerate(FORBIDDEN)}
+        self.assertEqual(sorted(_leaks(self._plant(planted))),
+                         sorted(f"{os.path.join('notes', f'{i}.md')}: FORBIDDEN[{i}]"
+                                for i in range(len(FORBIDDEN))))
 
     def test_a_virtualenv_is_skipped(self):
         """Third-party code is not this repository's content, and some of it
