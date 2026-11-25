@@ -99,13 +99,15 @@ for a part with no courtyard), raised `h` mm (the datasheet's seated height;
 `source` says which).
 
 A part whose model is not on this host is one that names none, or one whose
-every model is found nowhere here: `${KIPRJMOD}` is the board's folder, KiCad's
-own `KICAD<n>_3DMODEL_DIR` is looked for where KiCad's installers put the
-library, and any other variable is found nowhere. The gate reads no variable's
-value from the environment (a verdict keyed on none would be opaque, and
-`doctor` names such a read), so on a host that sets `KICAD<n>_3DMODEL_DIR` to a
-folder of its own, kicad-cli may find a model the gate does not, and a declared
-height stands in for it there: still one body. A model is found only by
+every model is found nowhere here: `${KIPRJMOD}` is the board's folder, a
+variable the project names in `pcb_model_dirs` is its folder alone (below),
+KiCad's own `KICAD<n>_3DMODEL_DIR` is otherwise looked for where KiCad's
+installers put the library, and any other variable is found nowhere. The gate
+reads no variable's value from the environment (a verdict keyed on none would be
+opaque, and `doctor` names such a read), so on a host that sets
+`KICAD<n>_3DMODEL_DIR` to a folder of its own and states none, kicad-cli may find
+a model the gate does not, and a declared height stands in for it there: still
+one body. A model is found only by
 the file its path names, a VRML file too: kicad-cli 9.0.9 looks for that file,
 and with a STEP twin beside a VRML name that is not there it says "File not
 found" and leaves the part out. There the box stands in, the model left out of
@@ -129,6 +131,31 @@ a box turned 45 degrees, not the larger box around it. A courtyard is a keep-out
 usually a little wider than the body, so the box is a little wider than the part.
 One listed as bodiless with a height, and one with neither a courtyard on its own
 side nor a `box_mm`, are refused.
+
+## A model library of the project's own: `pcb_model_dirs`
+
+`pcb_model_dirs` = `{variable: folder}` names the folder a model path variable
+stands for, from the project root or absolute: `{"KICAD9_3DMODEL_DIR":
+"hardware/3dmodels"}` for a 3D library kept with the project, `{"MY_3D":
+"/opt/models"}` for a variable of the project's own. Any variable but `KIPRJMOD`
+(the board's folder, which KiCad sets) may be named; a name that a model path
+could not hold, an empty folder or a value that is not an object is refused. A
+model path that names the variable is looked for in that folder alone, never in
+the stock folders, and the staged copy of the board names the folder by its
+absolute path in the variable's place, so kicad-cli reads the file the gate
+found, whatever its own environment or configuration says (a kicad-cli in a
+container must have the folder mounted). A folder not on this host is not
+refused: its models are found nowhere here, as an uninstalled library's are, and
+a declared height stands in where one is stated. The gate reads the parameter
+through its context, so it is in the verdict's key (invariant 7), as each
+parameter it reads is. (What slipped
+through, in the merge of the holdout fixes: the gate stopped reading
+`KICAD<n>_3DMODEL_DIR` from the environment, so a host that points it at a
+folder of its own got a declared height in place of a model kicad-cli would
+find, and nothing the project could state moved it. Rejected: the environment
+again, an input no key holds; the folder handed to kicad-cli in its environment,
+which the gate would build from its own; each model copied into the stage,
+megabytes a run on a populated board.)
 
 ## Contacts by design
 

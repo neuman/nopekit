@@ -142,7 +142,14 @@ reports it, and a screw in it is `lenses.md`'s. A hole with a copper ring counts
 An area's cutouts stay cutouts: the added area carries the outline and each
 cutout, as KiCad saved them, so a feed track cut out of a chip antenna's
 clearance is not a finding. A project that sets `items_not_allowed` to ignore,
-or excludes a finding, does not hide one: the staged copy sets it back.
+or excludes a finding, does not hide one: the staged copy sets it back. It runs
+only where the kicad-cli on PATH and the pcbnew it imports are a pair it was
+measured on (`gates/pcbnew/`: kicad-cli 9.0.9 with pcbnew 9.0.9), and skips
+under any other pair, naming both: kicad-cli 10.0.8 names no keep-out area for a
+track, and the gate ties a finding to its part by that name, so under it a board
+with two tracks in the keep-out read pass (measured, beside pcbnew 9.0.9 and
+10.0.8). A finding that names none of the gate's areas is an error, never
+passed over.
 
 A record (`{id: {board?, ref, value, keepout, own_nets?, source}}`, held to the
 board's ref and value) brings in what the library does not: a module from a
@@ -428,6 +435,13 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   The move: run each on a KiCad 10 board under kicad-cli and pcbnew 10, send its
   tool failure through a tool-limit check, and then drop
   `_kicad.TOOL_RUN_VERSION`.
+- **The keep-out under a pair of releases it was not measured on.**
+  `pcb.antenna_keepout` skips, naming both releases, unless the kicad-cli on PATH
+  and the pcbnew it imports are a pair a record in `gates/pcbnew/` names
+  (kicad-cli 9.0.9 with pcbnew 9.0.9). kicad-cli 10.0.8 is in no pair: it writes
+  "Items not allowed" for a track in a keep-out, naming no area, and the gate
+  ties each finding to its part by that name. The move: tie such a finding to its
+  part, run every keep-out test on the pair, and add it to its pcbnew record.
 - **What KiCad's library checks compare with.** `lib_footprint_mismatch`,
   `lib_footprint_issues` (DRC) and `lib_symbol_issues`, `lib_symbol_mismatch`,
   `footprint_link_issues` (ERC) compare the design with the library each table
@@ -604,9 +618,14 @@ it. The regions are held to that reach in a pass of their own, before the full
 fit, and every region refused is listed in one run with the box to draw.
 `pcb_part_heights_mm` gives a part whose model is not on this host (none named,
 or one found nowhere here) its courtyard's box, or the outline its `box_mm`
-states, raised to a stated height. Each helper call gets `pcb_fit_timeout_s`, or
-120 s and 5 s for each part it handles. `references/enclosure-fit.md` has each in
-full.
+states, raised to a stated height. `pcb_model_dirs` (`{variable: folder}`, from
+the project root or absolute) names the folder a model path variable stands for:
+a model naming `${KICAD9_3DMODEL_DIR}`, or a variable of the project's own, is
+looked for there alone, and the staged board names the folder in its place, so
+kicad-cli reads the same file. The gate reads no environment variable, so a
+3D library outside KiCad's own install folders is stated here, in the key. Each
+helper call gets `pcb_fit_timeout_s`, or 120 s and 5 s for each part it handles.
+`references/enclosure-fit.md` has each in full.
 
 ## Pointing a project at its board
 
@@ -623,6 +642,7 @@ full.
 "pcb_board_placement": {"x": 2.0, "y": 17.0, "z": 4.0, "rot_x_deg": 0, "rot_z_deg": 90},
 "pcb_enclosure_contacts": {"J5": {"cutout": {"region_mm": [[-1, 2, 4], [3, 12, 9]],
                                              "reason": "the receptacle's shell seats in its cutout"}}},
+"pcb_model_dirs": {"KICAD9_3DMODEL_DIR": "hardware/3dmodels"},
 "pcb_part_heights_mm": {"SW2": {"h": 3.5, "source": "the switch's datasheet, seated height"},
                         "LS1": {"h": 2.8, "box_mm": [[-6, -6], [6, 6]],
                                 "source": "the speaker's drawing; its footprint has no courtyard"}},

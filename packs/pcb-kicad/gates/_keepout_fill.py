@@ -2,8 +2,13 @@
 """``pcb.antenna_keepout``'s refill, run by the gate in a child process:
 
     python3 _keepout_fill.py <board.kicad_pcb> <refilled.kicad_pcb>
+    python3 _keepout_fill.py --version
 
-It loads the board with KiCad's own ``pcbnew`` (the project file beside it gives
+The second form prints ``pcbnew.Version()`` and nothing else: the gate asks it
+before any board is staged, to hold the pair of releases it runs (pcbnew here,
+kicad-cli for the DRC) to a pair it was measured on (``pcb._keepout_pair``).
+
+The first form loads the board with KiCad's own ``pcbnew`` (the project file beside it gives
 the net classes' clearances, and the board file its zones' settings), refills
 every zone with ``pcbnew.ZONE_FILLER``, as KiCad's "Fill All Zones" does, and
 saves the copy. It prints one JSON line: ``{"zones": <count>, "filled": <bool>,
@@ -45,8 +50,13 @@ import sys
 
 
 def main(argv: list[str]) -> int:
+    if argv == ["--version"]:
+        import pcbnew
+        print(pcbnew.Version())
+        return 0
     if len(argv) != 2:
-        print("usage: _keepout_fill.py <board.kicad_pcb> <refilled.kicad_pcb>", file=sys.stderr)
+        print("usage: _keepout_fill.py <board.kicad_pcb> <refilled.kicad_pcb> | --version",
+              file=sys.stderr)
         return 2
     src, dst = argv
     import pcbnew

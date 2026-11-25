@@ -1572,6 +1572,26 @@ def _release_record(ctx: GateContext, release: str, *, load: bool):
     return record, str(record["release"]), measured
 
 
+def _cli_release() -> tuple[str, str]:
+    """``(release, "")`` of the kicad-cli on PATH, from ``kicad-cli version
+    --format plain`` (it printed ``9.0.9`` and ``10.0.8``), or ``("", why it
+    named none)``: it could not be launched, ran past :data:`VERSION_TIMEOUT_S`,
+    or printed no ``X.Y.Z``. :func:`_tool_limit` asks it after a run failed, and
+    ``pcb.antenna_keepout`` before it runs anything (:func:`_keepout_pair`)."""
+    try:
+        proc = subprocess.run(["kicad-cli", "version", "--format", "plain"], capture_output=True,
+                              text=True, timeout=VERSION_TIMEOUT_S, stdin=subprocess.DEVNULL)
+    except OSError as exc:
+        return "", f"could not launch kicad-cli: {exc}"
+    except subprocess.TimeoutExpired:
+        return "", f"kicad-cli version ran past {VERSION_TIMEOUT_S:g} s"
+    release = _release_of(proc.stdout)
+    if release:
+        return release, ""
+    said = (proc.stdout or proc.stderr).strip().splitlines()[-1:] or ["nothing"]
+    return "", f"kicad-cli version exited {proc.returncode}, printing {said[0][:60]!r}"
+
+
 def _release(ctx: GateContext, doc: dict) -> str:
     """The release of kicad-cli that wrote ``doc``, as a verdict's detail says
     it, after asking for its record (which keys it: :data:`RELEASES_DIR`)."""
@@ -1603,12 +1623,7 @@ def _tool_limit(ctx: GateContext, path: str) -> str:
     formats = [(f, K.header_version(f)) for f in files]
     if not any(fmt for _f, fmt in formats):
         return ""
-    try:
-        proc = subprocess.run(["kicad-cli", "version", "--format", "plain"], capture_output=True,
-                              text=True, timeout=VERSION_TIMEOUT_S, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    release = _release_of(proc.stdout)
+    release, _why = _cli_release()
     if not release:
         return ""
     try:
@@ -3005,9 +3020,10 @@ _PART_ATTRS = ("smd", "through_hole")
 #: packages' path, the macOS bundle's, and the Windows
 #: installer's for KiCad 10 and 9. ``_model_file`` reads them to say whether a
 #: model is found on this host before the export: a declared height stands in
-#: for a model found nowhere here. *Rejected:* asking kicad-cli first (an export
-#: per question, a full run each); a search of the disk (slow, and it finds old
-#: releases' libraries).
+#: for a model found nowhere here. A variable the project names in
+#: :data:`MODEL_DIRS_KEY` is searched in its folder alone. *Rejected:* asking
+#: kicad-cli first (an export per question, a full run each); a search of the
+#: disk (slow, and it finds old releases' libraries).
 MODEL_DIR_VARS = re.compile(r"^KICAD\d*_3DMODEL_DIR$")
 STOCK_MODEL_DIRS = (
     "/usr/share/kicad/3dmodels",
@@ -3016,6 +3032,31 @@ STOCK_MODEL_DIRS = (
     r"C:\Program Files\KiCad\9.0\share\kicad\3dmodels",
 )
 _MODEL_VAR = re.compile(r"\$\{([^}]+)\}|\$\(([^)]+)\)")
+
+#: The project's own folder for a model path variable: ``{variable: folder}``, the
+#: folder from the project root unless it is absolute (``{"KICAD9_3DMODEL_DIR":
+#: "hardware/3dmodels"}``). ``pcb.enclosure_fit`` reads it through ``ctx``, so it is
+#: in the verdict's key (invariant 7). A model path that names the variable is
+#: looked for in that folder alone (``_model_file``), and the staged board names
+#: the folder in its place (``_named_dirs``), so kicad-cli reads the file the gate
+#: found, by its absolute path, whatever its own environment or configuration
+#: says. Any variable but ``KIPRJMOD`` may be named, KiCad's own and a project's
+#: (``${MY_3D}``).
+#:
+#: What slipped through, in the merge of general-packs H2 after H3: the merge made
+#: ``_model_file`` read no environment variable (rho keys none, and ``doctor``
+#: holds the bundled gates to none), so a host whose ``KICAD<n>_3DMODEL_DIR``
+#: points at a folder of its own got a declared height in place of a model
+#: kicad-cli would find, or a skip for a part with none, and nothing the project
+#: could state moved it. *Rejected:* reading the variable from the environment
+#: (the read the merge took out: an input no key holds, and the doctor's
+#: ``env-reads`` row); handing the folder to kicad-cli in its environment (the
+#: gate would build that environment from ``os.environ``, the same read); copying
+#: each model into the stage (megabytes a run for a populated board, where an
+#: absolute path reads the same file); a list of folders per variable (KiCad
+#: gives a variable one value).
+MODEL_DIRS_KEY = "pcb_model_dirs"
+_VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 #: The model files ``--subst-models`` puts in place of a VRML model that is
 #: there: a STEP of the same name beside it. The stage copies the twin with the
@@ -3113,14 +3154,15 @@ def _parts_and_models(tree: list) -> tuple[list[str], dict[str, list[str]], list
     return parts, models, [r for r in unasked if r not in models]
 
 
-def _model_file(model: str, board_dir: str) -> str | None:
+def _model_file(model: str, board_dir: str, dirs: dict | None = None) -> str | None:
     """The file a footprint's model path names on this host, or None when it is
-    found nowhere here: ``${KIPRJMOD}`` is the board's folder, KiCad's own 3D
-    library variable is searched where its installers put it
-    (:data:`STOCK_MODEL_DIRS`), and any other variable is found nowhere. A
-    relative path is read from the board's folder. The file the path names is
-    the one kicad-cli looks for, a VRML file too: a STEP beside a VRML name
-    that is not there is never read (:data:`_SUBST_EXTS`).
+    found nowhere here: ``${KIPRJMOD}`` is the board's folder, a variable the
+    project names in ``dirs`` (:data:`MODEL_DIRS_KEY`, absolute folders) is that
+    folder alone, KiCad's own 3D library variable is otherwise searched where its
+    installers put it (:data:`STOCK_MODEL_DIRS`), and any other variable is found
+    nowhere. A relative path is read from the board's folder. The file the path
+    names is the one kicad-cli looks for, a VRML file too: a STEP beside a VRML
+    name that is not there is never read (:data:`_SUBST_EXTS`).
 
     No variable's value is read from the environment: rho keys none, so a read
     makes the verdict opaque (``env:<NAME>``, never Fresh), and ``doctor``'s
@@ -3128,16 +3170,20 @@ def _model_file(model: str, board_dir: str) -> str | None:
     through, in the merge of general-packs H2 after H3: H2 read ``os.environ``
     here for every variable but ``${KIPRJMOD}``, and test_doctor's zero-hits
     check, red on H2's base for firmware-ci's reads, went red again for this
-    one. The cost: on a host that sets ``KICAD<n>_3DMODEL_DIR`` to a folder of
-    its own, kicad-cli finds a model this search does not, and a declared height
+    one. A host that sets ``KICAD<n>_3DMODEL_DIR`` to a folder of its own states
+    that folder in ``pcb_model_dirs`` instead, where the key holds it; without
+    it, kicad-cli may find a model this search does not, and a declared height
     stands in for it there (still one body). *Rejected:* ``os.path.expandvars``
     (the same read, out of the scan's sight)."""
     other: list[str] = []
+    dirs = dirs or {}
 
     def var(m) -> str:
         name = m.group(1) or m.group(2)
         if name == "KIPRJMOD":
             return board_dir
+        if name in dirs:
+            return dirs[name]
         other.append(name)
         return "\0"
 
@@ -3151,6 +3197,57 @@ def _model_file(model: str, board_dir: str) -> str | None:
         options = [expanded]
     found = [p if os.path.isabs(p) else os.path.join(board_dir, p) for p in options]
     return next((p for p in found if os.path.isfile(p)), None)
+
+
+def _model_dirs(ctx: GateContext) -> dict[str, str]:
+    """``pcb_model_dirs`` (:data:`MODEL_DIRS_KEY`) as ``{variable: absolute
+    folder}``, read through ``ctx``; {} when the project states none. Raises
+    ``_FitError`` for a record the gate cannot read. A folder that is not on this
+    host is not refused: a model there is found nowhere here, as one in a stock
+    folder that is not installed."""
+    raw = ctx.param(MODEL_DIRS_KEY)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise _FitError(f"{MODEL_DIRS_KEY} is {raw!r}: give {{variable: folder}}, the folder "
+                        f"from the project root or absolute, e.g. {{\"KICAD9_3DMODEL_DIR\": "
+                        f"\"hardware/3dmodels\"}}")
+    out: dict[str, str] = {}
+    for name, folder in raw.items():
+        at = f"{MODEL_DIRS_KEY}[{name!r}]"
+        if not isinstance(name, str) or not _VAR_NAME.match(name):
+            raise _FitError(f"{at}: a variable is named as a footprint's model path names it "
+                            f"inside ${{...}}: letters, digits and '_'")
+        if name == "KIPRJMOD":
+            raise _FitError(f"{at}: KIPRJMOD is the board's own folder, which KiCad sets; it "
+                            f"is not the project's to name")
+        if not isinstance(folder, str) or not folder.strip():
+            raise _FitError(f"{at} is {folder!r}: give the folder, from the project root or "
+                            f"absolute")
+        out[name] = os.path.normpath(os.path.abspath(K.project_path(ctx, folder)))
+    return out
+
+
+def _named_dirs(tree: list, dirs: dict[str, str]) -> bool:
+    """Each model path in ``tree`` (a staged copy) that names a variable of
+    ``dirs`` rewritten with that variable's folder, so kicad-cli reads the file
+    :func:`_model_file` found, by its absolute path, and never resolves the
+    variable from its own environment or configuration. Whether any path moved.
+    Named by absolute path, as the declared-height boxes are: kicad-cli resolves
+    ``${KIPRJMOD}`` only where a ``.kicad_pro`` sits beside the board."""
+    moved = False
+
+    def var(m) -> str:
+        name = m.group(1) or m.group(2)
+        return dirs[name] if name in dirs else m.group(0)
+
+    for fp in K.children(tree, "footprint"):
+        for model in K.children(fp, "model"):
+            path = _MODEL_VAR.sub(var, str(model[1]))
+            if path != str(model[1]):
+                model[1] = K.Q(path)
+                moved = True
+    return moved
 
 
 def _arc_points(start, mid, end) -> list[tuple[float, float]]:
@@ -3412,6 +3509,9 @@ class _Fit:
     stand_in: dict = dataclasses.field(default_factory=dict)
     #: ``{ref: file}`` for a declared height not used: the model is found.
     unused: dict = dataclasses.field(default_factory=dict)
+    #: ``{variable: absolute folder}``, the project's ``pcb_model_dirs``
+    #: (:data:`MODEL_DIRS_KEY`): where a model path naming the variable is found.
+    model_dirs: dict = dataclasses.field(default_factory=dict)
 
     def name(self, ref: str) -> str:
         return f"{self.id}:{ref}" if self.id else ref
@@ -3525,7 +3625,7 @@ def _read_board(ctx: GateContext, gid: str, fit: _Fit) -> str | None:
         # than either, fails a sound board on one host and not another); the
         # old refusal (the only way past it was to edit the board).
         shown = models.get(ref, [])
-        found = {m: _model_file(m, board_dir) for m in shown}
+        found = {m: _model_file(m, board_dir, fit.model_dirs) for m in shown}
         if any(found.values()):
             fit.unused[ref] = next(f for f in found.values() if f)
             continue
@@ -3563,7 +3663,8 @@ def _read_board(ctx: GateContext, gid: str, fit: _Fit) -> str | None:
         # to the 200 characters a skip reason keeps: at 207 the last choice,
         # pcb_enclosure_bodiless, was cut off (seen in the review of P7).
         lost = sorted(r for r in fit.parts if r not in boxed and models.get(r)
-                      and not any(_model_file(m, board_dir) for m in models[r]))
+                      and not any(_model_file(m, board_dir, fit.model_dirs)
+                                  for m in models[r]))
         if lost:
             return (f"{label}{len(unmodelled)} part(s) name no 3D model "
                     f"({', '.join(unmodelled[:3])}), {len(lost)} one not found here "
@@ -3799,6 +3900,13 @@ def _export(ctx: GateContext, gid: str, fit: _Fit, timeout: float, how: str = ""
     with open(log, "w", encoding="utf-8") as fh:
         fh.write(f"fit {fit.key}: {fit.board}\n")
     boxed = {r: rec for r, rec in fit.heights.items() if r not in fit.unused}
+    # A copy: the loaded tree stays as read. A model path that names a variable
+    # the project gave a folder (pcb_model_dirs) names that folder here, so
+    # kicad-cli reads the file _model_file found (_named_dirs).
+    tree = K.parse(K.dump(fit.tree)) if boxed or fit.model_dirs else None
+    if tree is not None and _named_dirs(tree, fit.model_dirs) and not boxed:
+        with open(stem + ".kicad_pcb", "w", encoding="utf-8") as fh:
+            fh.write(K.dump(tree) + "\n")
     if boxed:
         # The box is in the footprint's model frame: x right, y UP (KiCad's
         # footprint frame is y down), z up from the seating plane. kicad-cli
@@ -3810,7 +3918,6 @@ def _export(ctx: GateContext, gid: str, fit: _Fit, timeout: float, how: str = ""
         # sits beside the board (measured: without one, every such model is
         # "File not found" and left out, with exit 0).
         os.makedirs(os.path.join(stage, HEIGHT_DIR), exist_ok=True)
-        tree = K.parse(K.dump(fit.tree))           # a copy: the loaded tree stays as read
         boxes = []
         for n, (ref, rec) in enumerate(sorted(boxed.items())):
             x0, y0, x1, y1 = rec["box"]
@@ -3920,6 +4027,10 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
                              f"project states")
     try:
         fits = _fits(ctx, gid)
+        if not isinstance(fits, Verdict):
+            dirs = _model_dirs(ctx)
+            for fit in fits:
+                fit.model_dirs = dirs
     except _FitError as exc:
         return Verdict(gate=gid, passed=False, error=str(exc))
     if isinstance(fits, Verdict):
@@ -4064,7 +4175,8 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
                 # one.)
                 board_dir = os.path.dirname(os.path.abspath(fit.board))
                 here = [r for r in unfound if r in fit.unused
-                        or any(_model_file(m, board_dir) for m in fit.models.get(r, []))]
+                        or any(_model_file(m, board_dir, fit.model_dirs)
+                               for m in fit.models.get(r, []))]
                 gone = [r for r in unfound if r not in here]
                 if gone:
                     skips.append(f"{label}kicad-cli left out {', '.join(gone[:8])}: it did "
@@ -4155,6 +4267,44 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
 # the antenna's keep-out
 # --------------------------------------------------------------------------- #
 KEEPOUT_FILL_HELPER = os.path.join(_HERE, "_keepout_fill.py")
+
+#: The pairs of releases ``pcb.antenna_keepout`` was measured on, by the pcbnew
+#: release that refills: one file per release, ``gates/pcbnew/<release>.json``,
+#: holding the kicad-cli releases the gate was measured beside under it
+#: (``kicad_cli``), the day and the host, and what was shown there. The gate runs
+#: only on a pair a record names (:func:`_keepout_pair`), and asks for the record
+#: of the running pcbnew by its path, found or not, so the spine keys the pcbnew
+#: release as :data:`RELEASES_DIR` keys kicad-cli's.
+#:
+#: **A pair, not a release.** The gate hands one board to two KiCad programs:
+#: pcbnew refills it, kicad-cli judges both copies, and the gate ties each finding
+#: to its part by the name kicad-cli writes for the area. A release of either can
+#: move what the gate reads. What slipped through, in the merge of general-packs H1
+#: and H2: with kicad-cli 10.0.8 (the kicad/kicad:10.0 image) beside pcbnew 9.0.9,
+#: a chip antenna's keep-out with a GND track and an RF track in it read pass at 0,
+#: where kicad-cli 9.0.9 beside the same pcbnew reads fail at 2. Measured on the
+#: staged copies: kicad-cli 10.0.8 writes "Items not allowed" for a track in the
+#: added area and names no area (9.0.9: "Items not allowed (keepout area
+#: 'nopekit_antenna_AE1')"); it names the area for a pad, a via and a zone fill. The
+#: stored copy, which pcbnew never touches, read the same, and so did the image's
+#: own pair, pcbnew 10.0.8 beside kicad-cli 10.0.8: the cause is kicad-cli 10.0.8's
+#: words, and no pair with it was measured. The selftest under kicad-cli 10.0.8
+#: still read qualified: its control is a zone fill, whose words name the area.
+#: *Rejected:* any pair of one release (10.0.8 beside 10.0.8 read the same false
+#: pass); a series (10.0.x), as a release record's formats stand for its series (a
+#: patch release can move the words, and the words are what this gate reads:
+#: ``fdm.slice`` skips every OrcaSlicer release it was not measured on for the same
+#: reason); the pairs in the kicad-cli records (the pcbnew release would then be no
+#: path the gate asks for, so a control under two pcbnew releases would land on one
+#: key); the two releases read after the refill and the first DRC, from the child's
+#: line and the report (no extra launch, but a pair never measured has then refilled
+#: and judged the board, and its crash reads as the gate's error, louder than the
+#: cause). The cost: one ``kicad-cli version`` (0.1 s here, 0.2 to 0.9 s through the
+#: image) and one child that imports pcbnew (0.8 s) on each run that judges a board.
+PCBNEW_DIR = os.path.join(_HERE, "pcbnew")
+
+#: The keys of a pcbnew pair record.
+PCBNEW_KEYS = ("release", "kicad_cli", "measured", "on", "shown")
 
 #: The KiCad footprint libraries whose parts this gate finds by itself: a
 #: footprint from one of them is a radio module with its antenna on it. KiCad
@@ -4672,6 +4822,80 @@ def _judging_project(path: str) -> None:
         json.dump(doc, fh, indent=2, sort_keys=True)
 
 
+def _pcbnew_release(gid: str):
+    """``(release, "")`` of the pcbnew the refill imports (``_keepout_fill.py
+    --version``, in a child under the same Python, as the refill runs), or
+    ``("", why it named none)``. A child that exits other than 0 is an error
+    Verdict: a pcbnew that cannot be imported cannot refill, and that crash read
+    as an error before this question was asked (:func:`_refill`)."""
+    try:
+        proc = subprocess.run([sys.executable, KEEPOUT_FILL_HELPER, "--version"],
+                              capture_output=True, text=True, timeout=VERSION_TIMEOUT_S,
+                              stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return "", f"pcbnew's version ran past {VERSION_TIMEOUT_S:g} s"
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout).strip().splitlines()[-1:] or ["no output"]
+        return Verdict(gate=gid, passed=False,
+                       error=f"pcbnew could not name its release (_keepout_fill.py --version "
+                             f"exited {proc.returncode}): {tail[0][:120]}")
+    release = _release_of(proc.stdout)
+    return release, "" if release else f"it printed {proc.stdout.strip()[:40]!r}"
+
+
+def _pair_records(ctx: GateContext) -> dict[str, dict]:
+    """``{pcbnew release: record}`` of every record in :data:`PCBNEW_DIR`, each
+    read through ``ctx`` (so a record edited moves the key). Raises ValueError on
+    a record not of the shape :data:`PCBNEW_KEYS` names."""
+    try:
+        names = sorted(n for n in os.listdir(PCBNEW_DIR) if n.endswith(".json"))
+    except FileNotFoundError:
+        names = []
+    out: dict[str, dict] = {}
+    for name in names:
+        record = ctx.load_file(os.path.join(PCBNEW_DIR, name), loader=_load_json)
+        if (not isinstance(record, dict) or sorted(record) != sorted(PCBNEW_KEYS)
+                or f"{record['release']}.json" != name
+                or not isinstance(record["kicad_cli"], list)
+                or not all(isinstance(r, str) and _RELEASE.fullmatch(r)
+                           for r in record["kicad_cli"])):
+            raise ValueError(f"gates/pcbnew/{name} is not a pair record: it holds exactly "
+                             f"{list(PCBNEW_KEYS)}, its release as its name, kicad_cli a "
+                             f"list of releases")
+        out[record["release"]] = record
+    return out
+
+
+def _keepout_pair(ctx: GateContext, gid: str) -> Verdict | None:
+    """None when the kicad-cli on PATH and the pcbnew the refill imports are a
+    pair a record in :data:`PCBNEW_DIR` names. Otherwise a skip naming both
+    releases and the pairs measured, never a run: a pair never measured may write
+    words this gate does not read, and a finding it cannot read is a pass it did
+    not earn (:data:`PCBNEW_DIR`). An error for a pcbnew that cannot be imported
+    or a record not of its shape. Asked once, before any board is staged."""
+    cli, cli_why = _cli_release()
+    pcb = _pcbnew_release(gid)
+    if isinstance(pcb, Verdict):
+        return pcb
+    pcbnew, pcb_why = pcb
+    try:
+        records = _pair_records(ctx)
+    except ValueError as exc:
+        return Verdict(gate=gid, passed=False, error=str(exc))
+    # Each release asked for by its record's path, found or not: what keys it.
+    if cli:
+        _release_record(ctx, cli, load=False)
+    if pcbnew:
+        os.path.isfile(os.path.join(PCBNEW_DIR, pcbnew + ".json"))
+    if cli and cli in records.get(pcbnew, {}).get("kicad_cli", ()):
+        return None
+    pairs = [f"kicad-cli {c} with pcbnew {p}"
+             for p in sorted(records, key=_release_key) for c in records[p]["kicad_cli"]]
+    return _skip(gid, f"kicad-cli {cli or f'(no release: {cli_why})'} beside pcbnew "
+                      f"{pcbnew or f'(no release: {pcb_why})'}: not a pair this gate was "
+                      f"measured on ({'; '.join(pairs) or 'none'}; gates/pcbnew/)")
+
+
 def _refill(ctx: GateContext, gid: str, board: str, out: str, log: str):
     """``_keepout_fill.py`` on the staged ``board``, writing ``out``: the ids of
     the board's holes with no copper (``bare_holes``, as KiCad's pcbnew decides
@@ -4718,7 +4942,9 @@ def _antenna_findings(doc: dict, owners: dict[str, str],
     standoff under the antenna failed a sound board. Rejected: counting it on
     purpose, since the rule is copper; matching KiCad's words, which do not say
     whether the pad has a ring.) An item among the part's own tracks and vias
-    (``mine``, :func:`_antenna_own_items`) is its own copper too."""
+    (``mine``, :func:`_antenna_own_items`) is its own copper too. On a staged
+    copy no other area exists, so an item named by none of ``owners`` is an
+    error there (:func:`_antenna_untied`), never passed over."""
     found, own, holes = [], [], []
     mine = mine or {}
     for v in doc.get("violations", []):
@@ -4739,6 +4965,29 @@ def _antenna_findings(doc: dict, owners: dict[str, str],
             else:
                 found.append(row)
     return found, own, holes
+
+
+def _antenna_untied(doc: dict, owners: dict[str, str]) -> list[str]:
+    """The words of each item a DRC report finds not allowed in a keep-out whose
+    violation names none of this gate's areas (``owners``). On a staged copy,
+    which holds no keep-out but the added areas (:func:`_without_keepouts`),
+    every such item is in one of them, and :func:`_antenna_findings` cannot say
+    which part's. What slipped through, in the merge of general-packs H1 and H2:
+    :func:`_antenna_findings` passed over such an item as another area's, and
+    kicad-cli 10.0.8 names no area for a track ("Items not allowed"), so every
+    track in a keep-out was dropped and a board with two read pass at 0. The pair
+    check (:func:`_keepout_pair`) keeps 10.0.8 from running here at all; this
+    keeps a measured pair that writes new words from passing on them."""
+    out: list[str] = []
+    for v in doc.get("violations", []):
+        if v.get("type") != "items_not_allowed":
+            continue
+        named = re.search(r"keepout area '([^']*)'", str(v.get("description", "")))
+        if named and named.group(1) in owners:
+            continue
+        out += ([str(item.get("description", "")) for item in v.get("items", [])]
+                or [str(v.get("description", ""))])
+    return out
 
 
 def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
@@ -4799,6 +5048,13 @@ def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
             return Verdict(gate=gid, passed=False, evidence=ev,
                            error=f"kicad-cli exited {code} on the {copy} copy but its report "
                                  f"lists {len(everything)} item(s): the two disagree")
+        untied = _antenna_untied(doc, owners)
+        if untied:
+            return Verdict(gate=gid, passed=False, evidence=ev,
+                           error=f"{_release(ctx, doc)} named no keep-out area for "
+                                 f"{len(untied)} item(s) not allowed ({untied[0][:40]!r}, "
+                                 f"the {copy} copy): only this gate's areas are on the "
+                                 f"copy, and no finding is dropped")
         hits, theirs, open_holes = _antenna_findings(doc, owners, bare, mine)
         for key, ref, words in hits:
             found.setdefault(key, {"ref": ref, "item": words, "copies": []})["copies"].append(copy)
@@ -4869,6 +5125,14 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
     pour moved under the antenna and not refilled reads clean, and the next refill
     puts the copper there. The source pipeline held its module's keep-out with a
     script written for that one board; nothing in this pack checked it.
+
+    **Which releases.** Only a pair of kicad-cli and pcbnew releases a record in
+    ``gates/pcbnew/`` names (:data:`PCBNEW_DIR`, :func:`_keepout_pair`), asked
+    before any board is staged; any other pair skips, naming both. An item not
+    allowed in a keep-out that names none of this gate's areas is an error
+    (:func:`_antenna_untied`). What slipped through, in the merge of H1 and H2:
+    kicad-cli 10.0.8 names no area for a track, and a board with two tracks in
+    the keep-out read pass at 0.
 
     The verdict is the count of items found, each counted once over both copies,
     against 0. A fail counts beside a part not judged; a part not judged beside
@@ -5012,6 +5276,13 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
                 plans.append((n, path, bname, tree, copper, areas, mine))
     except P.RecordError as exc:
         return Verdict(gate=gid, passed=False, error=str(exc))
+    # The two releases, once, before any board is staged, and only when a board
+    # is to be judged: a record's error and a board the reader skips are said in
+    # their own words, with no tool run.
+    if plans:
+        refused = _keepout_pair(ctx, gid)
+        if refused is not None:
+            return refused
     findings: list[dict] = []
     own: list[dict] = []
     holes: list[dict] = []
