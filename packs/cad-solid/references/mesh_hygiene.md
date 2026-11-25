@@ -119,8 +119,10 @@ Three methods, in increasing cost and confidence:
    local reach includes sharp corners: trimesh's `proximity.thickness` with
    `method="max_sphere"` reads 0.244 mm on the subdivided 10 mm acute-edge prism
    used by the gate's test. It cannot replace this gate's wall measure while
-   keeping that ordinary corner exempt. The gate instead uses trimesh's coplanar
-   groups and edge adjacency to separate corners from nonadjacent tapered flanks.
+   keeping that ordinary corner exempt. The gate instead groups faces into smooth
+   surfaces (joined across edges under 30°) and uses their edge adjacency to
+   separate corners from nonadjacent tapered flanks, and it does not cast from a
+   sliver face, whose normal is not known.
 3. **A medial-axis transform.** The real answer, and the expensive one. Reach for it
    when the thin region is load-bearing and the design has stopped moving.
 

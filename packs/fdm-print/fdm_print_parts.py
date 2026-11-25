@@ -418,6 +418,58 @@ def part_set(ctx: Any) -> PartSet:
     return PartSet(parts=tuple(parts), source=" + ".join(sources))
 
 
+@dataclass(frozen=True)
+class PerPart:
+    """``{part: number}`` from one per-part map, and the key that stated it.
+
+    The names are sanitised as :func:`part_set` sanitises them, so a map entry
+    and a set member that name one part compare equal. ``problem`` is why a
+    stated map could not be read, or ``""``.
+    """
+
+    values: dict
+    source: str = ""
+    problem: str = ""
+
+
+def per_part(ctx: Any, keys: Sequence[str], what: str) -> PerPart:
+    """The first of ``keys`` the projection states, read as ``{part: number}``.
+
+    What slipped through with a single number only: ``fdm.min_wall`` and the
+    guard judged one part, so the person picked the part by hand, and no verdict
+    named it. That is the complaint this module's part set was written to end,
+    and the single-number gates had kept it. A map states every part's number.
+
+    It is read strictly, and each problem is returned rather than dropped: a value
+    that is not a positive finite number, a name that sanitises to another
+    entry's name, a map that is not a mapping. A dropped entry would leave its
+    part judged on nothing, and the verdict would not say so. ``what`` names the
+    quantity in the problem line.
+    """
+    raw, key = _first_stated(ctx, keys)
+    if raw is None:
+        return PerPart(values={})
+    if not isinstance(raw, dict):
+        return PerPart(values={}, source=key, problem=(
+            f"{key} is {type(raw).__name__}; write {{part: {what}}}, one entry per "
+            f"part, named as the part set names it"))
+    values: dict = {}
+    for name, value in raw.items():
+        clean = sanitise(name)
+        number = None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+        if number is None or not (number > 0.0) or number == float("inf"):
+            return PerPart(values={}, source=key, problem=(
+                f"{key}[{name!r}] is {value!r}; {what} is a positive number"))
+        if clean in values:
+            return PerPart(values={}, source=key, problem=(
+                f"{key} names {clean!r} twice once the names are made safe for the "
+                f"viewer; name each part once"))
+        values[clean] = number
+    return PerPart(values=values, source=key)
+
+
 #: Where the build direction is stated, primary spelling first. Resolved
 #: pack-scoped first (``fdm.build_axis``) by ``GateContext.param``.
 BUILD_AXIS_KEYS = ("build_axis", "layer_normal", "print_axis")

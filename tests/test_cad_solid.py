@@ -694,5 +694,163 @@ class TheLimitIsTheClaims(_Case):
         self.assertIn("'um'", v.error)
 
 
+# --------------------------------------------------------------------------- #
+# holdout: a published design's chamfer, a sliver face, and a seated layer
+# --------------------------------------------------------------------------- #
+def _knife_rim():
+    """A 4 mm disc whose rim is a revolved 45 deg knife edge, the chamfer drawn in
+    three strips that are not coplanar, as a CAD tessellator writes a curved
+    chamfer: only the last strip shares an edge with the top face."""
+    import numpy as np                              # noqa: PLC0415 - tools present only
+    import trimesh                                  # noqa: PLC0415
+
+    profile = np.array([(0.0, 0.0), (8.0, 0.0), (11.6, 3.6), (11.8, 3.81), (12.0, 4.0),
+                        (0.0, 4.0)])
+    return trimesh.creation.revolve(profile, sections=64)
+
+
+def _sliver_box(h: float = 1e-6):
+    """A 10 mm cube whose top face holds one sliver triangle 0.1 mm in from its +X
+    edge: altitude ``h``, its normal tilted 60 deg toward -X by the tiny dip of its
+    third vertex. Its inward ray runs into the +X wall after 0.115 mm."""
+    import numpy as np                              # noqa: PLC0415 - tools present only
+    import trimesh                                  # noqa: PLC0415
+    from nopekit.modelio import load_path           # noqa: PLC0415
+
+    earclip = load_path(os.path.join(REPO, "packs", "fdm-print", "selftest",
+                                     "baseline_mesh.py"))._earclip
+    top = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+    a, b = (9.9, 2.0), (9.9, 8.0)
+    c = (9.9 - 0.5 * h, 5.0)
+    verts = ([(x, y, 10.0) for x, y in top] + [(x, y, 0.0) for x, y in top]
+             + [(a[0], a[1], 10.0), (b[0], b[1], 10.0), (c[0], c[1], 10.0 - 0.866 * h)])
+    P1, P2, P3, P4, Q1, Q2, Q3, Q4, A, B, C = range(11)
+    left = [P1, A, C, B, P4]
+    right = [P1, P2, P3, P4, B, A]
+    xy = [v[:2] for v in verts]
+    faces = []
+    for ring in (left, right):
+        faces += [(ring[i], ring[j], ring[k]) for i, j, k in earclip([xy[n] for n in ring])]
+    faces += [(A, B, C),
+              (Q1, Q3, Q2), (Q1, Q4, Q3),
+              (Q1, Q2, P2), (Q1, P2, P1), (Q2, Q3, P3), (Q2, P3, P2),
+              (Q3, Q4, P4), (Q3, P4, P3), (Q4, Q1, P1), (Q4, P1, P4)]
+    return trimesh.Trimesh(vertices=np.asarray(verts, dtype=float),
+                           faces=np.asarray(faces), process=False)
+
+
+class ATessellatedChamferIsNotAWall(_Case):
+    """A published housing read a 0.188 mm wall: a ray from the second strip of a
+    revolved 45 deg chamfer crossed the feather edge into the ledge. The strips
+    were coplanar groups of their own, and only the first shared an edge with the
+    ledge. A surface is a smooth patch now (``SMOOTH_PATCH_DEG``)."""
+
+    GATE = "cad.wall_thickness"
+
+    def test_the_second_strip_reads_the_disc_not_the_edge(self):
+        if self._skipped_here():
+            return
+        rim = _knife_rim()
+        self.assertTrue(rim.is_watertight and rim.is_volume)
+        v = self._run(self.GATE, {"rim": rim}, {"process_min_wall_mm": 1.0})
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertAlmostEqual(v.measured, 4.0, places=3)
+
+    def test_a_thin_rim_on_the_same_disc_still_fails(self):
+        """The patch rule removes the corner, never a wall: a 0.5 mm disc fails."""
+        if self._skipped_here():
+            return
+        import numpy as np                          # noqa: PLC0415 - tools present only
+        import trimesh                              # noqa: PLC0415
+
+        thin = trimesh.creation.revolve(np.array([(0.0, 0.0), (12.0, 0.0), (12.0, 0.5),
+                                                  (0.0, 0.5)]), sections=64)
+        v = self._run(self.GATE, {"disc": thin}, {"process_min_wall_mm": 1.0})
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertAlmostEqual(v.measured, 0.5, places=3)
+
+
+class ASliverFaceIsNotCast(_Case):
+    """A face of almost no area on a printed top read 0.126 mm where 2.57 mm and
+    3.1 mm of material lay: its normal was not known to a degree, and its ray went
+    sideways. A face under ``MIN_CAST_ALTITUDE_MM`` is not cast from."""
+
+    GATE = "cad.wall_thickness"
+
+    def test_the_sliver_is_counted_and_not_cast(self):
+        if self._skipped_here():
+            return
+        box = _sliver_box()
+        self.assertTrue(box.is_watertight and box.is_volume)
+        v = self._run(self.GATE, {"box": box}, {"process_min_wall_mm": 1.0})
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertAlmostEqual(v.measured, 10.0, places=3)
+        self.assertIn("1 sliver face(s)", v.detail)
+        self.assertEqual(self._evidence(v)["sliver_faces_not_cast"], 1)
+
+    def test_a_well_shaped_face_of_the_same_tilt_is_still_cast(self):
+        """The floor is the altitude, never the tilt: at 0.05 mm the same face is
+        a real one, and its 0.115 mm reading stands."""
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, {"box": _sliver_box(h=0.05)}, {"process_min_wall_mm": 1.0})
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertLess(v.measured, 0.2)
+
+    def _evidence(self, v) -> dict:
+        with open(v.evidence[0], encoding="utf-8") as fh:
+            return json.load(fh)
+
+
+def _stack(overlap: float) -> dict:
+    """A 40 x 40 mm plate seated on another, ``overlap`` mm into it."""
+    return {"base": _box((40.0, 40.0, 10.0), (0.0, 0.0, 5.0)),
+            "plate": _box((40.0, 40.0, 4.0), (0.0, 0.0, 12.0 - overlap))}
+
+
+class ASeatedLayerIsNotAClash(_Case):
+    """Two coincident faces left a few microns into each other share a layer whose
+    volume is depth times area, and a seated flat contact over 1600 mm^2 failed
+    the 0.2 mm^3 volume tolerance with nothing wrong. Measured on the shared solid,
+    a layer within the depth tolerance is judged on depth, as a bonded joint is."""
+
+    GATE = "cad.clash"
+
+    def test_a_three_micron_layer_passes_with_nothing_declared(self):
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, _stack(0.003))
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertIn("1 seated layer(s) judged on depth", v.detail)
+        with open(v.evidence[0], encoding="utf-8") as fh:
+            row = json.load(fh)["pairs"][0]
+        self.assertTrue(row["seated"])
+        self.assertGreater(row["volume_mm3"], 0.2)
+
+    def test_a_real_interference_of_the_same_shape_still_fails(self):
+        """0.084 mm is how far a published design modelled a part into its pocket."""
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, _stack(0.084))
+        self.assertEqual(v.outcome, "fail", v.render())
+        with open(v.evidence[0], encoding="utf-8") as fh:
+            row = json.load(fh)["pairs"][0]
+        self.assertFalse(row["seated"])
+
+    def test_two_layers_at_two_heights_are_not_one_layer(self):
+        """The bound is the whole shared solid's: two thin contacts 10 mm apart in
+        height are not a layer, and stay judged on volume."""
+        if self._skipped_here():
+            return
+        import trimesh                              # noqa: PLC0415 - tools present only
+
+        frame = trimesh.util.concatenate([_box((40.0, 10.0, 10.0), (0.0, -15.0, 5.0)),
+                                          _box((40.0, 10.0, 10.0), (0.0, 15.0, 15.0))])
+        bar = trimesh.util.concatenate([_box((40.0, 10.0, 2.0), (0.0, -15.0, 10.997)),
+                                        _box((40.0, 10.0, 2.0), (0.0, 15.0, 20.997))])
+        v = self._run(self.GATE, {"frame": frame, "bar": bar})
+        self.assertEqual(v.outcome, "fail", v.render())
+
+
 if __name__ == "__main__":
     unittest.main()

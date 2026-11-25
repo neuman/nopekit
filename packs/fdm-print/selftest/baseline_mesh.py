@@ -60,7 +60,9 @@ FOOT_T_MM = 4.0
 
 WALL_T_MM = 3.2
 """Side wall thickness — eight beads at the 0.4 mm nozzle. This is the
-thinnest section anywhere in the part, and it is what ``min_wall_mm`` reports."""
+thinnest wall across the layer plane, and it is what ``part_min_wall_mm``
+reports. The feet and the roof, 4 mm along the build axis, are its thinnest
+floor (``part_min_floor_mm``)."""
 
 OPENING_W_MM = 30.0
 """Clear width of the opening: the conduit it straddles, plus fit clearance."""
