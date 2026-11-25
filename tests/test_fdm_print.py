@@ -24,6 +24,16 @@ here is one place where its answer was wrong for a reason that would recur:
   ``fdm.layer_alignment`` bound every printability claim and skipped it until a
   load axis was stated (``EachGateHasATagOfItsOwn``).
 
+In review of those fixes: a set of boxes beside one mesh sent the face gates to
+the one mesh, where a correct support statement naming the set's other parts was
+refused as misspelt (``APartOnStatedSupport``); a set's overhang verdict and every
+bridge verdict with nothing under the bead floor said neither allowance, where
+PACK.md said every verdict did (``TheAllowancesAreSaidInEveryVerdict``);
+``fdm.layer_alignment`` judged one part beside a stated set with no word on it
+(``TheSingleNumberGatesTakeASet``); and cad-solid's PACK.md said its broad tags
+bind every gate, which ``cad.clearance`` does not carry
+(``EachGateHasATagOfItsOwn``).
+
 The meshes are built here, small and synthetic; none of the published designs'
 geometry is in the repository. Without trimesh and numpy the mesh cases assert
 the gates' availability skip instead.
@@ -327,6 +337,33 @@ class APartOnStatedSupport(_Case):
                     self.assertEqual(v.outcome, "error", v.render())
                     self.assertIn(text, v.error)
 
+    def test_a_set_of_boxes_and_one_mesh_takes_a_statement_for_the_set(self):
+        """A set of boxes states no mesh, so the face gates judge the one mesh.
+        Before, the statement could name that mesh's part alone, and a correct
+        entry for the lid ERRORed both gates as a misspelt part."""
+        if self._skipped_here():
+            return
+        params = dict(_single(_baseline()), mesh_path=self._stl("shelf", self._prism(SHELF)),
+                      bbox_by_part_mm={"shelf": [14.0, 10.0, 8.0], "lid": [20.0, 20.0, 3.0]},
+                      supports_by_part={"shelf": TREE, "lid": TREE})
+        for gate in ("fdm.bridge_span", "fdm.overhang"):
+            with self.subTest(gate=gate):
+                v = self._run(params, gate=gate)
+                self.assertEqual(v.outcome, "pass", v.render())
+                self.assertIn("supports_by_part for lid not used (no mesh)", v.detail)
+        # Only the mesh's entry is applied: with the lid's alone, the shelf's
+        # cantilever is judged as printed without support.
+        v = self._run(dict(params, supports_by_part={"lid": TREE}))
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("not used", v.detail)
+        # And a name in neither is still refused, with the closest one.
+        for gate in ("fdm.bridge_span", "fdm.overhang"):
+            with self.subTest(gate=gate, misspelt=True):
+                v = self._run(dict(params, supports_by_part={"shelf": TREE, "lidd": TREE}),
+                              gate=gate)
+                self.assertEqual(v.outcome, "error", v.render())
+                self.assertIn("did you mean 'lid'?", v.error)
+
     def test_none_is_the_default_said_aloud(self):
         if self._skipped_here():
             return
@@ -334,6 +371,63 @@ class APartOnStatedSupport(_Case):
                       supports_by_part={"shelf": {"supports": "none",
                                                   "reason": "prints unsupported"}})
         self.assertEqual(self._run(params).outcome, "fail")
+
+
+# --------------------------------------------------------------------------- #
+# the two allowances that stand in for mesh quality are said, pass or fail
+# --------------------------------------------------------------------------- #
+#: A post on two legs: its 6 mm ceiling is a real bridge, well inside the limit,
+#: and no region falls under the bead floor.
+ARCH = [(0.0, 0.0), (2.0, 0.0), (2.0, 5.0), (8.0, 5.0), (8.0, 0.0), (10.0, 0.0),
+        (10.0, 8.0), (0.0, 8.0)]
+#: The baseline's floor: one bead at its 0.42 mm line width.
+FLOOR = "a region under 0.176 mm^2 (one bead at the 0.42 mm line width) is not judged"
+
+
+class TheAllowancesAreSaidInEveryVerdict(_Case):
+    """PACK.md says the tessellation tolerance and the bead floor are stated in
+    every verdict that judges a face or a ceiling region. Before, a set's overhang
+    headline said only the limit, and a bridge verdict said the floor only when a
+    region fell under it."""
+    GATE = "fdm.bridge_span"
+
+    def _set(self, name: str, mesh) -> dict:
+        return dict(_single(_baseline()), mesh_paths={
+            name: self._stl(name, mesh),
+            "clamp": os.path.join(PACK, "selftest", "baseline_part.stl")})
+
+    def test_a_sets_overhang_verdict_states_the_tolerance(self):
+        if self._skipped_here():
+            return
+        v = self._run(self._set("lip45", self._prism(_lip(45.02))), gate="fdm.overhang")
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertIn("worst of 2", v.detail)
+        self.assertIn("+0.5 deg tessellation tolerance", v.detail)
+        v = self._run(self._set("lip60", self._prism(_lip(60.0))), gate="fdm.overhang")
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("+0.5 deg tessellation tolerance", v.detail)
+
+    def test_a_bridge_pass_with_nothing_under_the_floor_states_it(self):
+        if self._skipped_here():
+            return
+        v = self._run(dict(_single(_baseline()),
+                           mesh_path=self._stl("arch", self._prism(ARCH))))
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertIn("BRIDGE", v.detail)
+        self.assertNotIn("region(s) under one bead's footprint", v.detail)
+        self.assertIn(FLOOR, v.detail)
+        v = self._run(self._set("arch", self._prism(ARCH)))
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertIn(FLOOR, v.detail)
+
+    def test_a_stated_floor_is_named_as_stated(self):
+        if self._skipped_here():
+            return
+        v = self._run(dict(_single(_baseline()), min_ceiling_area_mm2=0.5,
+                           mesh_path=self._stl("arch", self._prism(ARCH))))
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertIn("a region under 0.500 mm^2 (min_ceiling_area_mm2) is not judged",
+                      v.detail)
 
 
 # --------------------------------------------------------------------------- #
@@ -382,6 +476,23 @@ class TheSingleNumberGatesTakeASet(_Case):
         self.assertIn("part housing", v.detail)
         self.assertIn("the 2 part(s) in `bbox_by_part_mm` state no thinnest wall of "
                       "their own", v.detail)
+
+    def test_layer_alignment_says_the_set_it_is_not_about(self):
+        """A load case is one load axis and one utilisation: one part. Before, its
+        verdict named no part beside a stated set."""
+        for extra in ({}, {"utilisation": None}):
+            params = self._set(part_name="housing", **extra)
+            params = {k: v for k, v in params.items() if v is not None}
+            with self.subTest(utilisation="utilisation" in params):
+                v = self._run(params, gate="fdm.layer_alignment")
+                self.assertIn(v.outcome, ("pass", "fail"), v.render())
+                self.assertIn("part housing", v.detail)
+                self.assertIn("one load case is stated, not one per part, so this "
+                              "verdict is about one part and not the rest of the 2 in "
+                              "`bbox_by_part_mm`", v.detail)
+        # With no set, nothing is said about one.
+        v = self._run(_single(_baseline()), gate="fdm.layer_alignment")
+        self.assertNotIn("load case", v.detail)
 
     def test_the_guard_runs_on_a_set_with_no_single_box(self):
         """Before, it read part_bbox_mm alone and skipped, and so did every gate
@@ -461,6 +572,36 @@ class EachGateHasATagOfItsOwn(unittest.TestCase):
             carried = {t for spec in registry.specs() for t in spec.claims}
             with self.subTest(pack=name):
                 self.assertEqual(carried - set(manifest.claim_classes), set())
+
+    def test_each_pack_md_tag_table_names_exactly_the_gates(self):
+        """PACK.md's tag table is held to the gates' own tags. What slipped through:
+        cad-solid's said `geometry` and `cad` bind every gate here, and
+        `cad.clearance` carries neither (nor did the table list `clearance`)."""
+        import re                                   # noqa: PLC0415
+
+        for name, registry, section, guard in (
+                ("fdm-print", self.fdm, "## Claim tags", "fdm.process_model_valid"),
+                ("cad-solid", self.cad, "## Claim vocabulary", None)):
+            gates = {s.id: set(s.claims) for s in registry.specs()}
+            with open(os.path.join(REPO, "packs", name, "PACK.md"), encoding="utf-8") as fh:
+                text = fh.read().split(section, 1)[1].split("\n## ", 1)[0]
+            table: dict = {}
+            for line in text.splitlines():
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                if len(cells) != 3 or not cells[0].startswith("`"):
+                    continue
+                named = set(re.findall(r"`([a-z]+\.[a-z_]+)`", cells[2]))
+                if cells[2].startswith("every gate"):
+                    bound = set(gates) - named
+                else:
+                    bound = named | ({guard} if "the guard" in cells[2] else set())
+                for tag in re.findall(r"`([^`]+)`", cells[0]):
+                    table[tag] = bound
+            with self.subTest(pack=name):
+                self.assertEqual(set(table), set().union(*gates.values()))
+            for tag, bound in table.items():
+                with self.subTest(pack=name, tag=tag):
+                    self.assertEqual(bound, {g for g, c in gates.items() if tag in c})
 
     def test_mesh_validity_selects_closure_without_the_process_wall(self):
         closure = {"cad.watertight", "cad.is_volume", "cad.degenerate_faces"}

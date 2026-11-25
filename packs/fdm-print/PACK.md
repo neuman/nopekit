@@ -27,7 +27,7 @@ worst part's number, that part named, how many were checked and how many are pas
 the limit, a locator per offending part, and a per-part table in the evidence.
 `fdm.min_wall` and `fdm.print_time_est` do the same from a per-part map, and the
 guard checks every part the projection describes. `fdm.layer_alignment` judges one
-part. See [Many parts](#many-parts).
+part, and with a set stated its verdict says so. See [Many parts](#many-parts).
 
 ## What this pack settles
 
@@ -102,9 +102,11 @@ Read this section before you trust a green sweep from this pack.
   is not watertight or is wound inside out. They say nothing about sliver triangles,
   a tessellation too coarse to represent the real chamfer angle, or a mesh that is
   watertight and still self-intersecting in a way `is_watertight` does not see. Two
-  allowances stand in for quality and are stated in every verdict: a face counts
-  past the overhang limit only beyond a 0.5 deg tessellation tolerance, and a
-  ceiling region smaller than one bead's footprint is listed and not judged.
+  allowances stand in for quality, and each is stated in every verdict that judges
+  a face or a ceiling region, one part or a set, pass or fail: a face counts past
+  the overhang limit only beyond a 0.5 deg tessellation tolerance, and a ceiling
+  region smaller than one bead's footprint is listed and not judged, the floor and
+  where it came from said.
 - **A support statement is not checked against the slicer.** `supports_by_part`
   tells `fdm.overhang` and `fdm.bridge_span` that a part prints on support.
   `fdm.slice` reads its own preset groups, and nothing here checks that the preset
@@ -345,6 +347,12 @@ by hand, and no verdict named it. `fdm.print_time_est` estimates each part as it
 own print and gives the set's total if they are printed one after another; that is
 not a plate's time.
 
+`fdm.layer_alignment` has no map: a load case is one load axis and one
+utilisation, about one part. With a set stated, its verdict names the part
+(`part_name`) and says the set it is not about: *"one load case is stated, not one
+per part, so this verdict is about one part and not the rest of the 13 in
+`mesh_paths`"*.
+
 The guard checks every part the projection describes — each box, each volume
 against its own box, each wall against one bead, each floor against one layer —
 and names the part in each problem. Its evidence lists every problem in full,
@@ -573,6 +581,10 @@ design. State it:
   reason, a key other than `supports` and `reason`, an entry that is not a mapping.
   Exact names only: a pattern states support for parts nobody named. `none` says
   what the default is.
+- **A set of boxes and one mesh.** A part set with no mesh in it hands these two
+  gates back to the one `mesh_path`. A statement may still name every part of the
+  set; only the mesh's entry is used, and the verdict says which entries were not:
+  *"supports_by_part for lid not used (no mesh)"*.
 - **Not checked against the slicer.** `fdm.slice` reads its preset groups; nothing
   here checks that a part stated to print on support slices on a preset with
   support on. Name both in one place in your model.

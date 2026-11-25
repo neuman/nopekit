@@ -1102,6 +1102,7 @@ by every geometry gate in every installed pack, so a wall-thickness failure make
 | `envelope` | the part fitting inside a stated bounding volume | `cad.bounding` |
 | `packaging` | what has to fit around or inside what, at assembly level | `cad.bounding` |
 | `wall` | a minimum or maximum material thickness | `cad.wall_thickness` |
+| `clearance` | declared pairs of parts at least the claim's distance apart, at one pose | `cad.clearance` |
 | `interference` | two named parts sharing material | `cad.clash` |
 | `connectivity` | every part being held by something, and two named parts being in contact | `cad.assembly_connected` |
 | `linkage` | a DECLARED drive or control chain being continuous end to end | `cad.assembly_connected` (only where the chain is declared) |
@@ -1111,13 +1112,16 @@ by every geometry gate in every installed pack, so a wall-thickness failure make
 | `mesh` | the exported triangle mesh as a file: closure, winding, degeneracy | `cad.watertight`, `cad.is_volume`, `cad.degenerate_faces` |
 | `manufacturability` | a process being able to make the thing as exported | `cad.watertight`, `cad.is_volume`, `cad.degenerate_faces`, `cad.wall_thickness` |
 | `mechanical` | a physical-arrangement assertion that is not purely geometric | `cad.bounding`, `cad.clash`, `cad.assembly_connected` |
-| `geometry` | broad; prefer a narrower tag above whenever one fits | every gate here |
-| `cad` | broad; the domain, not a quantity. Prefer a narrower tag | every gate here |
+| `geometry` | broad; prefer a narrower tag above whenever one fits | every gate here but `cad.clearance` |
+| `cad` | broad; the domain, not a quantity. Prefer a narrower tag | every gate here but `cad.clearance` |
 
-`geometry` and `cad` are listed last on purpose. They are the vocabularies every
-gate in this pack claims, so a claim carrying one of them is covered by every gate
-here — useful on a deliberately broad claim ("the exported geometry is sound"),
-wrong on anything specific.
+`geometry` and `cad` are listed last on purpose. Every gate in this pack claims
+them but `cad.clearance`, so a claim carrying one of them is covered by the other
+seven — useful on a deliberately broad claim ("the exported geometry is sound"),
+wrong on anything specific. `cad.clearance` carries `clearance` alone and reads
+its limit from the claim tagged `clearance`. A claim tagged only `geometry` or
+`cad` does not bind it, so that claim says nothing about a gap; a claim on a gap
+carries `clearance`.
 
 **The move for an older claim (cad-solid 0.4.0).** `cad.wall_thickness` carried
 `mesh` beside the three closure gates, so no tag selected closure without the

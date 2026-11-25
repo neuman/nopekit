@@ -274,7 +274,7 @@ def _skip(gate_id: str, names: Sequence[str], what: str,
     )
 
 
-def _set_note(ctx: GateContext, what: str, map_key: str) -> str:
+def _set_note(ctx: GateContext, what: str, map_key: str | None = None) -> str:
     """What a single-number verdict adds when the projection also states a set.
 
     ``fdm.bed_fit`` has said this since the set landed. The single-number gates
@@ -284,6 +284,11 @@ def _set_note(ctx: GateContext, what: str, map_key: str) -> str:
     named when the model names it (``part_name``), and a stated set that this
     number is not about is said. Only ``part_name`` names the part here: ``part``
     and ``name`` are words a project may use for something else.
+
+    ``map_key`` is the per-part map the set could state instead. ``None`` is a
+    quantity with no per-part map: ``fdm.layer_alignment``'s load case, one load
+    axis and one utilisation. What slipped through in review of the holdout fixes:
+    that gate judged one part with no word on which, beside thirteen in the set.
     """
     note = ""
     name = _look(ctx, ("part_name",), None)
@@ -291,9 +296,14 @@ def _set_note(ctx: GateContext, what: str, map_key: str) -> str:
         note = f"; part {_PARTS.sanitise(name)}"
     parts = _PARTS.part_set(ctx)
     if parts and not parts.problem:
-        note += (f"; the {len(parts)} part(s) in `{parts.source}` state no {what} of "
-                 f"their own ({map_key}), so this verdict is about the one number "
-                 f"above and not about them")
+        if map_key:
+            note += (f"; the {len(parts)} part(s) in `{parts.source}` state no {what} "
+                     f"of their own ({map_key}), so this verdict is about the one "
+                     f"number above and not about them")
+        else:
+            note += (f"; one {what} is stated, not one per part, so this verdict is "
+                     f"about one part and not the rest of the {len(parts)} in "
+                     f"`{parts.source}`")
     return note
 
 
@@ -927,7 +937,8 @@ def layer_alignment(ctx: GateContext) -> Verdict:
             units="deg from layer plane",
             detail=f"load at {phi:.0f} deg to the layer plane ({build_note}), "
                    f"knockdown {knock:.2f}x; ANGLE ONLY — no 'utilisation' in the "
-                   f"projection, so the derating was not applied to a margin",
+                   f"projection, so the derating was not applied to a margin"
+                   + _set_note(ctx, "load case"),
         )
 
     util = float(util)
@@ -940,7 +951,7 @@ def layer_alignment(ctx: GateContext) -> Verdict:
         units="derated utilisation",
         detail=f"load at {phi:.0f} deg to the layer plane ({build_note}): "
                f"{kind} utilisation {util:.2f} ({util_key}) / knockdown {knock:.2f} "
-               f"= {derated:.2f} vs 1.00 ({ratio_note})",
+               f"= {derated:.2f} vs 1.00 ({ratio_note})" + _set_note(ctx, "load case"),
     )
 
 
