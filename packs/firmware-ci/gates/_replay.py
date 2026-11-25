@@ -385,22 +385,23 @@ def _ran_in(runs_on: str) -> str:
 #: ``firmware-ci-replay.lock``, the system's temp root keyed by the uid, so every
 #: process of this user on this machine queues on one lock, whatever ``HOME`` or
 #: ``TMPDIR`` says. What slipped through F1 and F2: the lock was
-#: ``~/.cache/nopekit/firmware-ci/replay.lock``, so a test's temporary home beside
-#: a person's check, or two test runs, took two locks, and the collision above
-#: came back (measured on the merged branch: one replay's container removed
+#: ``~/.cache/nopekit/firmware-ci/replay.lock``, so a test's temporary home
+#: beside a person's check, or two test runs, took two locks, and the collision
+#: above came back (measured on the merged branch: one replay's container removed
 #: mid-build, the other read "RWLayer ... unexpectedly nil"). *Rejected:*
 #: ``tempfile.gettempdir()`` (it reads ``TMPDIR``, which a test run sets to its
 #: own directory: two runs, two locks); ``$XDG_RUNTIME_DIR`` (an environment
-#: variable too, which a test's clean environment drops, and absent on WSL and
-#: on CI); one lock for the whole machine (a file one user creates, another
-#: cannot open). The directory is made ``0700`` and used only while it is a
-#: directory this uid owns, never a link: ``/tmp`` is everyone's, and a path
-#: another user made first is not a lock of ours. Then, or where the temp root
-#: cannot be written, the lock falls back to ``HOME_LOCK``, the old place. The
-#: limits: there, and between two users of one Docker daemon, two replays can
-#: still collide, and the collision reads errored by the signal rule in
-#: ``judge``, never as a verdict. The lock waits as long as the replay ahead of
-#: it runs; each replay's own ``TIMEOUT_S`` bounds that.
+#: variable too: a login session sets it, and a process started outside one, by
+#: cron, a system service or ``env -i``, has none, so two processes of this uid
+#: can read two values, or none, and take two locks); one lock for the whole
+#: machine (a file one user creates, another cannot open). The directory is made
+#: ``0700`` and used only while it is a directory this uid owns, never a link:
+#: ``/tmp`` is everyone's, and a path another user made first is not a lock of
+#: ours. Then, or where the temp root cannot be written, the lock falls back to
+#: ``HOME_LOCK``, the old place. The limits: there, and between two users of one
+#: Docker daemon, two replays can still collide, and the collision reads errored
+#: by the signal rule in ``judge``, never as a verdict. The lock waits as long as
+#: the replay ahead of it runs; each replay's own ``TIMEOUT_S`` bounds that.
 LOCK_ROOT = "/tmp"
 LOCK_NAME = "firmware-ci-replay.lock"
 HOME_LOCK = os.path.join("~", ".cache", "nopekit", "firmware-ci", "replay.lock")

@@ -8,7 +8,7 @@ actually read.
 A mature project's decision log runs to thousands of lines, newest first, and the lines
 that earn their keep are the negative ones:
 
-    the wider trace was tried first and the router could not close that net
+    a 4.0 mm plate was tried first and deflected 3.75 mm, 7.5x the limit
     PLA was tried and rejected — it creeps under a load it holds all day
     do not fit the shorter screw: it strips the boss at the first service
 
@@ -115,9 +115,9 @@ def _coerce_rejected(items: Iterable[Any] | None) -> list[Rejection]:
 
     The tuple and dict forms exist so the CLI and a pack can hand over what they
     parsed without importing the model, but every form goes through the same
-    gate: **a rejected alternative with no reason is refused.** "the wider trace
-    was tried" is worthless; "the wider trace was tried and the router could not
-    close that net" is the whole reason this log exists. Letting the reasonless
+    gate: **a rejected alternative with no reason is refused.** "a 4.0 mm plate
+    was tried" is worthless; "a 4.0 mm plate was tried and deflected 3.75 mm, 7.5x
+    the limit" is the whole reason this log exists. Letting the reasonless
     form through would fill the log with lines that look like provenance and
     answer nothing, and the next agent would re-try it anyway.
     """

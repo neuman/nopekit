@@ -4166,7 +4166,7 @@ def init(root: str, meta: ProjectMeta) -> Ledger:
     command.
 
     Refusal is the point. The records hold provenance that exists nowhere else —
-    `the wider trace was tried first and the router could not close that net` is
+    `PLA was tried and rejected — it creeps under a load it holds all day` is
     not recoverable from the CAD, the git history, or anyone's memory. So a
     second `init` on a live project raises instead of "re-initialising" it.
 
