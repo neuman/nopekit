@@ -106,7 +106,7 @@ def _runs(steps: list) -> tuple:
 #: refusing every script (a build in a script is sound, and
 #: ``firmware_ci_step`` exists for it).
 _SCRIPT = re.compile(r"(?:^|(?<=[\s;&|(]))(?:(?:python[\d.]*|bash|sh|zsh|node|perl|ruby)"
-                     r"(?:\s+-\S+)*\s+([\w./-]+\.(?:py|sh|bash|js|pl|rb))"
+                     r"(?:\s+(?:-[A-Za-z]*[oO]\s+\w+|-\S+))*\s+([\w./-]+\.(?:py|sh|bash|js|pl|rb))"
                      r"|([\w.-]*/[\w./-]*\.(?:sh|bash|py))(?=\s|$|;))")
 
 
@@ -129,12 +129,19 @@ def _scripts(run: str) -> tuple:
 #: interpreter with its options (``bash -e x.sh``, ``python3 x.py``), or run by
 #: a path with a ``/`` in it (``./x.sh``, ``ci/x.sh``: its ``#!`` line chooses
 #: the shell). The guard reads such a file when the build step's own lines hold
-#: no build command (:func:`_search`).
+#: no build command (:func:`_search`). An option cluster that ends in ``o`` (or
+#: bash's ``O``) takes the next word as its argument: ``bash -eo pipefail x.sh``
+#: and ``bash -euo pipefail x.sh`` are calls through bash with those options.
+#: What slipped through ``-o NAME`` alone (review of J3): ``bash -eo pipefail
+#: ci/build.sh`` did not match as a call through bash, matched as a file run by
+#: its path, and was judged under its ``#!`` line (none: no ``-e``), so a sound
+#: CI failed.
 _CALL = re.compile(
     r"(?:^|(?<=[\s;&|(]))(?:"
     r"(?:\.|source)\s+(?P<src>[\w./-]+)"
     r"|(?P<interp>python[\d.]*|bash|sh|dash|zsh|node|perl|ruby)"
-    r"(?P<flags>(?:\s+(?:-o\s+\w+|[-+][\w-]+))*)\s+(?P<ifile>[\w./-]+\.(?:py|sh|bash|js|pl|rb))"
+    r"(?P<flags>(?:\s+(?:[-+][A-Za-z]*[oO]\s+\w+|[-+][\w-]+))*)"
+    r"\s+(?P<ifile>[\w./-]+\.(?:py|sh|bash|js|pl|rb))"
     r"|(?P<pfile>[\w.-]*/[\w./-]*\.(?:sh|bash|py))"
     r")(?=\s|$|[;&|)])")
 
@@ -211,67 +218,152 @@ def _script(repo: str, workdir: str, name: str, how: str, called: str,
 
 @dataclass
 class _Found:
-    """What :func:`_search` found: the build command and the script that holds
-    it, the scripts it read, and the calls it could not read, with why."""
+    """What :func:`_search` found: the first build command and the script that
+    holds it, the scripts it read, the calls it could not read, with why, and
+    for each of those a judge of the line that runs it (:func:`_blind_masked`).
+    ``sets`` is the text a sourced file leaves in force in its caller's shell:
+    its own lines, with the files it sources in their places."""
     command: str = ""
     read: list = field(default_factory=list)
     unread: list = field(default_factory=list)
+    lines: list = field(default_factory=list)
+    sets: str = ""
 
 
 def _search(repo: str, workdir: str, text: str, shell: str, where: str, step: str,
-            seen: set) -> _Found | Fail:
+            seen: dict, before: str = "") -> _Found | Fail:
     """The build in the shell scripts ``text`` runs, each read and judged by the
     masking rules, as are the lines that run it: :class:`Fail` when one masks.
 
     The build step's own lines hold no build command this pack knows, so the
     guard reads the shell scripts they run (and the scripts those run), in the
     repository, under the shell each runs in: ``./build.sh`` under its ``#!``
-    line, ``bash -e x.sh`` under ``bash -e``, a sourced file under the step's own
-    shell. Each script is read once. A call that cannot be read is named with
-    why (:func:`_script`). What slipped through a pass over such a step (holdout
-    review round 2, a console's and a watch's upstream workflows): "no masking in
-    the step's own lines; <script>.py is not read" was a pass over a build the
-    guard never read. *Rejected:* following a ``cd`` to resolve a later call (the
-    directory may be a variable; a call that does not resolve from the step's
-    working directory is named, never guessed); reading a Python script or a
-    local action (each is a program, not a shell's documented behaviour)."""
+    line, ``bash -e x.sh`` under ``bash -e``, a sourced file in its caller's own
+    shell, with the options the caller's lines (``before``, then ``text`` up to
+    the call) and the files it sourced before it left in force. Every call is
+    read, after a build too. A script is read once for each shell and options it
+    runs under. A call that cannot be read is named with why (:func:`_script`).
+
+    What slipped through a pass over such a step (holdout review round 2, a
+    console's and a watch's upstream workflows): "no masking in the step's own
+    lines; <script>.py is not read" was a pass over a build the guard never
+    read. And then (review of J3): the search stopped at the first script that
+    built, so a second build script piped into ``tee`` was never read, nor named;
+    and a sourced file was judged under the step's starting shell, so ``set +e``
+    and then ``. ci/build.sh`` passed a build that real bash runs on past, and
+    ``set -e`` there failed a sound one. *Rejected:* following a ``cd`` to
+    resolve a later call (the directory may be a variable; a call that does not
+    resolve from the step's working directory is named, never guessed); reading
+    a Python script or a local action (each is a program, not a shell's
+    documented behaviour)."""
     found = _Found()
+    lines = _lines(text)
+    script = "\n".join(lines)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line) + 1)
+    #: (offset in ``script`` after a sourced call, what that file left in force)
+    spliced: list[tuple[int, str]] = []
     for name, at, start, end, how, called in _script_calls(text):
+        call = [(name, at, start, end)]
         path, script_shell, why = _script(repo, workdir, name, how, called, shell)
         if why:
             found.unread.append((name, why))
+            found.lines.append((name, why, text, call, shell, where, before, list(spliced)))
             continue
         rel = os.path.relpath(path, repo).replace(os.sep, "/")
-        if rel in seen:
-            continue
-        seen.add(rel)
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            body = fh.read()
-        found.read.append(rel)
-        inner = f"{rel} (run by step {step!r})"
-        if _DOCKER_RUN.search(body):
-            raise Refused(f"{rel}, which step {step!r} runs, runs docker inside the job; the "
-                          f"replay mounts no docker socket into jobs. Run the build in a "
-                          f"container job instead (references/ci-templates.md)")
-        commands = _build_commands(body)
-        if commands:
-            problem = _masked(body, commands, script_shell, inner)
-            command = f"{commands[0][0]} in {rel}"
+        # A sourced file runs in this shell: the options in force at the call are
+        # its own at its start. A script run by its path or an interpreter is a new
+        # shell, and starts from its own command line (bash(1), "COMMAND EXECUTION").
+        head = (_joined(before, _in_force(script, starts[at] + start, spliced))
+                if how == "source" else "")
+        key = (rel, script_shell, _options(script_shell, head)[:2])
+        if key in seen:
+            command, sets = seen[key]
         else:
-            sub = _search(repo, workdir, body, script_shell, inner, step, seen)
-            if isinstance(sub, Fail):
-                return sub
-            found.read += [r for r in sub.read if r not in found.read]
-            found.unread += sub.unread
-            if not sub.command:
-                continue
-            problem, command = None, sub.command
-        problem = problem or _masked(text, [(name, at, start, end)], shell, where)
+            seen[key] = ("", "")    # being read: a file that runs itself adds nothing
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+            if rel not in found.read:
+                found.read.append(rel)
+            inner = f"{rel} (run by step {step!r})"
+            if _DOCKER_RUN.search(body):
+                raise Refused(f"{rel}, which step {step!r} runs, runs docker inside the job; "
+                              f"the replay mounts no docker socket into jobs. Run the build "
+                              f"in a container job instead (references/ci-templates.md)")
+            commands = _build_commands(body)
+            if commands:
+                problem = _masked(body, commands, script_shell, inner, head)
+                if problem:
+                    return Fail(problem)
+                command, sets = f"{commands[0][0]} in {rel}", "\n".join(_lines(body))
+            else:
+                sub = _search(repo, workdir, body, script_shell, inner, step, seen, head)
+                if isinstance(sub, Fail):
+                    return sub
+                found.read += [r for r in sub.read if r not in found.read]
+                found.unread += [u for u in sub.unread if u not in found.unread]
+                found.lines += sub.lines
+                command, sets = sub.command, sub.sets
+            seen[key] = (command, sets)
+        # The call of a sourced file returns its last command's status under the
+        # options its own lines left in force: its line is judged under those.
+        at_call = spliced + ([(starts[at] + start, sets)] if how == "source" else [])
+        if how == "source":
+            spliced.append((starts[at] + end, sets))
+        if not command:
+            continue
+        problem = _masked(text, call, shell, where, before, at_call)
         if problem:
             return Fail(problem)
-        found.command = command
-        return found
+        found.command = found.command or command
+    found.sets = _in_force(script, len(script), spliced)
     return found
+
+
+def _joined(*texts: str) -> str:
+    """The texts that are not empty, one after the other, a newline between."""
+    return "\n".join(t for t in texts if t)
+
+
+def _in_force(script: str, offset: int, spliced: list) -> str:
+    """``script`` up to ``offset``, with what each file it sourced before there
+    left in force (``spliced``) after the call that ran it: the text whose
+    ``set`` lines decide the options at ``offset``."""
+    out, pos = [], 0
+    for at, sets in sorted(spliced):
+        if at > offset:
+            break
+        out += [script[pos:at], sets]
+        pos = at
+    out.append(script[pos:offset])
+    return _joined(*out)
+
+
+def _blind_masked(found: _Found) -> str | None:
+    """Why a line that runs a file the guard cannot read reads green whatever
+    that file does, when no script the guard read holds the build, or ``None``.
+
+    The step is the one ``firmware_ci_step`` names as the build step, and the
+    build is in none of its lines nor in any script the guard read: it runs in a
+    file the guard could not read, or behind a command it does not know. A call
+    to such a file whose own list falls back to a command that succeeds (``||
+    true``), or that is piped under a shell with no pipefail, then reads green
+    on a failed build. What slipped through (review of J3): ``python3
+    tools/build.py || true`` was a skip that said the guard "cannot say whether a
+    failed build reads green there", and fw.build replayed a CI whose green
+    says nothing. *Rejected:* the rules that read the commands after the call
+    (no ``-e``, a command before the last ``&&``): ``. /opt/env.sh &&
+    python3 build.py`` and then another line would read the environment's line
+    as the build; judging these lines beside a build the guard read (the pass
+    names each file as not read, as it does beside a build in the step's own
+    lines)."""
+    for name, why, text, call, shell, where, before, spliced in found.lines:
+        problem = _masked(text, call, shell, where, before, spliced, after=False)
+        if problem:
+            return (f"{problem}; no script this gate read holds the build, and {name} "
+                    f"{why}, so the build may run there")
+    return None
 
 
 def _act_ids(steps: list) -> tuple:
@@ -330,11 +422,60 @@ _FAILS = re.compile(r"(?<![\w.$-])(?:exit(?!\s+0(?:\s|$|;))(?=\s|$|;)|false(?=\s
 #: A test command: under ``-e`` a failed test stops the step.
 _TEST = re.compile(r"(?:\[\[?|test)\s")
 
-#: ``set -e`` and its kin, and ``set -o errexit``: the last before a build decides
-#: whether its failure stops the script; ``set -o pipefail`` the same for a pipe.
-_ERREXIT = re.compile(r"(?:^|[;&|(\s])set\s+(?:([+-])[A-Za-z]*e[A-Za-z]*(?![\w-])"
-                      r"|([+-])o\s+errexit\b)")
-_PIPEFAIL = re.compile(r"(?:^|[;&|(\s])set\s+([+-])[A-Za-z]*o\s+pipefail\b")
+#: A ``set`` command and its words: ``set -e``, ``set +e``, ``set -o errexit``,
+#: ``set -euo pipefail``, ``set -e -o pipefail``. The last that sets ``errexit``
+#: before a build decides whether its failure stops the script; the last that sets
+#: ``pipefail`` the same for a pipe. Its words are read as bash reads them
+#: (:func:`_option_changes`). What slipped through a pattern for each form (review
+#: of J3): ``set -e -o pipefail`` was no ``pipefail``, and a pipe after it failed
+#: a sound CI.
+_SET = re.compile(r"(?:^|[;&|(\s])set((?:[ \t]+[^\s;&|)]+)*)")
+
+
+def _option_changes(words: list) -> dict:
+    """``{"errexit": on, "pipefail": on}`` for each of the two that these option
+    words set (``-e``, ``+e``, ``-o errexit``, ``-o pipefail``, in clusters such
+    as ``-euo pipefail``), as bash(1) reads ``set`` and its own command line: an
+    ``o`` (or bash's ``O``) in a cluster takes the next word as its option's name.
+    A long option (``--noprofile``) is passed over; the first word that is not an
+    option (a script, ``{0}``, ``--``) ends them."""
+    out: dict = {}
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word.startswith("--") and len(word) > 2:
+            continue
+        if not re.fullmatch(r"[-+][A-Za-z]+", word):
+            break
+        on = word[0] == "-"
+        for letter in word[1:]:
+            if letter == "e":
+                out["errexit"] = on
+            elif letter in "oO":
+                option = words[i] if i < len(words) else ""
+                i += 1
+                if letter == "o" and option in ("errexit", "pipefail"):
+                    out[option] = on
+    return out
+
+
+def _options(shell: str, before: str) -> tuple[bool, bool, bool, bool]:
+    """``(errexit, pipefail, errexit set by a set line, pipefail set by one)`` in
+    force after ``before``: the shell's own command line (its words after the
+    interpreter), then each ``set`` in ``before``, in order. What slipped through
+    a test for ``-e`` alone (review of J3): ``bash -o errexit ci/build.sh`` read
+    as "no -e", and a sound CI failed."""
+    first = _option_changes(shell.split()[1:])
+    errexit, pipefail = first.get("errexit", False), first.get("pipefail", False)
+    by_set_e = by_set_pipe = False
+    for m in _SET.finditer(before):
+        change = _option_changes(m.group(1).split())
+        if "errexit" in change:
+            errexit, by_set_e = change["errexit"], True
+        if "pipefail" in change:
+            pipefail, by_set_pipe = change["pipefail"], True
+    return errexit, pipefail, by_set_e, by_set_pipe
 
 #: What a step that runs docker inside the job looks like. The replay mounts no
 #: docker socket into jobs (``--container-daemon-socket -``), so such a step cannot
@@ -549,13 +690,16 @@ def choose(wf: Workflow, job: str | None = None, step: str | None = None):
     # and a watch's upstream workflows): "no masking in the step's own lines;
     # <script>.py is not read", a pass over a build the guard never read.
     workdir = str(build.get("working-directory", defaults.get("working-directory")) or "")
-    search = _search(wf.repo, workdir, run, shell, f"step {name!r}", name, set())
+    search = _search(wf.repo, workdir, run, shell, f"step {name!r}", name, {})
     if isinstance(search, Fail):
         return search
     unread = tuple(dict.fromkeys(n for n, _why in search.unread))
     if search.command:
         return Job(rel, jid, at, name, search.command, shell, image, runs_on, _matrix(body),
                    _act_ids(steps), _runs(steps), unread, tuple(search.read))
+    problem = _blind_masked(search)
+    if problem:
+        return Fail(problem)
     said = [f"{n} {why}" for n, why in search.unread]
     said += [f"{r} runs no build command this pack knows" for r in search.read]
     first = next((ln for ln in _lines(run) if ln and not ln.startswith("#")), "")
@@ -775,10 +919,15 @@ def _checked(later: list, errexit: bool, pipe: bool) -> bool:
     return status.search(first) is not None and _stops(later, 0, errexit)
 
 
-def _masked(run: str, found: list, shell: str, where: str) -> str | None:
+def _masked(run: str, found: list, shell: str, where: str, before: str = "",
+            spliced: list = (), after: bool = True) -> str | None:
     """Why a failed build in this step can read green, or ``None``. Every build
     command in the step is read, each with the commands after it: those later in
-    its line (after a ``;``) and on the lines below.
+    its line (after a ``;``) and on the lines below. ``before`` is the text in
+    force before ``run`` starts (the caller's lines, for a sourced file), and
+    ``spliced`` what the files ``run`` sources left in force (:func:`_search`):
+    their ``set`` lines count. With ``after`` false, only the rules that mask the
+    build whatever comes after it are read (:func:`_blind_masked`).
 
     What slipped through reading the first build command's line alone (review of
     F1): a second ``west build`` piped into ``tee`` on the next line, and ``idf.py
@@ -790,17 +939,21 @@ def _masked(run: str, found: list, shell: str, where: str) -> str | None:
     for line in lines:
         starts.append(starts[-1] + len(line) + 1)
     for _cmd, at, start, _end in found:
-        problem = _masked_at(script, starts[at] + start, lines[at], shell, where)
+        offset = starts[at] + start
+        head = _joined(before, _in_force(script, offset, list(spliced)))
+        problem = _masked_at(script[offset:], head, lines[at], shell, where, after)
         if problem:
             return problem
     return None
 
 
-def _masked_at(script: str, offset: int, line: str, shell: str, where: str) -> str | None:
-    """The masking rules for the build command at ``offset`` in ``script``;
-    ``where`` names what holds it in the reason (``step 'Build'``, or a script
-    and the step that runs it)."""
-    pieces = _pieces(script[offset:])
+def _masked_at(rest: str, before: str, line: str, shell: str, where: str,
+               after: bool = True) -> str | None:
+    """The masking rules for the build command that starts ``rest``, with
+    ``before`` the text in force before it (its ``set`` lines count); ``where``
+    names what holds it in the reason (``step 'Build'``, or a script and the step
+    that runs it)."""
+    pieces = _pieces(rest)
     if not pieces:
         return None
     end = _and_or(pieces, 0)
@@ -808,16 +961,12 @@ def _masked_at(script: str, offset: int, line: str, shell: str, where: str) -> s
     if any(sep == "||" and _OR_MASK.match(nxt) for (_c, sep), (nxt, _s) in zip(own, own[1:])):
         return (f"{where}: {line!r} falls back to a command that succeeds, so the "
                 f"step reads green whatever the build did")
-    errexit = re.search(r"(?:^|\s)-\w*e", shell) is not None
-    before = script[:offset]
-    set_e = [m.group(1) or m.group(2) for m in _ERREXIT.finditer(before)]
-    if set_e:
-        errexit = set_e[-1] == "-"
+    errexit, pipefail, by_set_e, by_set_pipe = _options(shell, before)
     checked = _checked(later, errexit, pipe=False) or any(
         sep == "||" and _FAILS.search(_bare(nxt))
         for (_c, sep), (nxt, _s) in zip(own, own[1:]))
-    if not errexit and later and not checked:
-        why = "after `set +e`" if set_e else f"under {shell!r}, which has no -e"
+    if after and not errexit and later and not checked:
+        why = "after `set +e`" if by_set_e else f"under {shell!r}, which has no -e"
         return (f"{where} runs the build {why} and then {later[0][0]!r}, with no "
                 f"status check that fails the step: the step's status is the last "
                 f"command's, so a failed build reads green")
@@ -827,19 +976,18 @@ def _masked_at(script: str, offset: int, line: str, shell: str, where: str) -> s
     # built`, then another command, runs on after a failed build, and the step reads
     # the last command's status. Found in review of F1, beyond the design's four
     # forms: the same documented behaviour as the default shell's missing pipefail.
-    if any(sep == "&&" for _c, sep in own[:-1]) and later and not checked:
+    if after and any(sep == "&&" for _c, sep in own[:-1]) and later and not checked:
         return (f"{where} runs the build before an `&&` ({line!r}) and then "
                 f"{later[0][0]!r}: -e does not stop the shell on a command before the "
                 f"last `&&`, so the step's status is the last command's and a failed "
                 f"build reads green")
     if pieces[0][1] in ("|", "|&"):
-        signs = [m.group(1) for m in _PIPEFAIL.finditer(before)]
-        pipefail = signs[-1] == "-" if signs else "pipefail" in shell
         # PIPESTATUS holds the build's status only up to the next command: after
         # `| tee log && echo ok` it is echo's, and `| tee log || exit 1` reads tee's.
         piped = all(sep in ("|", "|&") for _c, sep in pieces[:end])
         if not pipefail and not (piped and _checked(later, errexit, pipe=True)):
-            return (f"{where} pipes the build ({line!r}) under {shell!r}, which has "
-                    f"no pipefail: the pipeline's status is its last command's, so a "
-                    f"failed build reads green")
+            why = ("after `set +o pipefail`" if by_set_pipe else
+                   f"under {shell!r}, which has no pipefail")
+            return (f"{where} pipes the build ({line!r}) {why}: the pipeline's status "
+                    f"is its last command's, so a failed build reads green")
     return None

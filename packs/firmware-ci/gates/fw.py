@@ -198,13 +198,16 @@ def ci_job(ctx: GateContext) -> Verdict:
     ``continue-on-error: true``, ``|| true``, ``set +e`` (or a shell with no
     ``-e``) before more commands, the build before an ``&&`` and then more
     commands, or a pipe under a shell with no pipefail. Where the step's own
-    lines hold no build command, the shell scripts of the repository it runs are
-    read by the same rules.
+    lines hold no build command, every shell script of the repository it runs is
+    read by the same rules, a sourced one under the options in force where it is
+    sourced.
 
     A shape the replay cannot run, and a job or step this gate cannot choose, is
     errored: the CI may be sound, and the pack cannot say. A build this gate
     cannot read (inside an action, a Python script, or a command it does not
-    know) is skipped, naming what it could not read: never a pass."""
+    know) is skipped, naming what it could not read: never a pass. But a line
+    that runs such a file with ``|| true``, or pipes it under no pipefail, fails
+    when no script the gate read holds the build (``_ci._blind_masked``)."""
     gid = "fw.ci_job"
     path = _workflow(ctx)
     if path is None:

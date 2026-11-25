@@ -47,16 +47,21 @@ whose build the guard could not read, where the guard skips. The three readers n
   `${PIPESTATUS[0]}`; under `-e`, a bare test on it counts too. `echo "exited $?"`
   does not. An unspecified shell runs `bash -e {0}` (or `sh -e
   {0}`), which has no pipefail. `shell: bash` has it. When the step's own lines
-  hold no build command, it reads the shell scripts of the repository the step
-  runs (`./build.sh` under its `#!` line, `bash -e ci/x.sh` under `bash -e`, a
-  sourced file under the step's own shell), and the scripts those run, by the same
-  rules, and the line that runs each one too. Its pass says what it read: `no
-  masking in the step's own lines`, then the scripts it read, and it names each
-  other repository file the step runs as not read. It **skips**, and never
-  passes, when it cannot read the build: inside an action (`uses:`), in a Python
-  or other non-shell script, in a file that is not in the repository, or behind a
-  command this pack does not know. The skip names what it could not read, and
-  `fw.build`'s replay still judges the build's own result. It is
+  hold no build command, it reads every shell script of the repository the step
+  runs, after a build too (`./build.sh` under its `#!` line, `bash -eo pipefail
+  ci/x.sh` under those options, a sourced file in the step's own shell, with the
+  options that the step's lines and the files sourced before it set), and the
+  scripts those run, by the same rules, and the line that runs each one that
+  builds. Its pass says what it read: `no masking in the step's own lines`, then
+  the scripts it read, and it names each other repository file the step runs as
+  not read. It **skips**, and never passes, when it cannot read the build: inside
+  an action (`uses:`), in a Python or other non-shell script, in a file that is
+  not in the repository, or behind a command this pack does not know. The skip
+  names what it could not read, and `fw.build`'s replay still judges the build's
+  own result. But where no script it read holds the build, a line that runs a
+  file it cannot read **fails** when it falls back to a command that succeeds
+  (`python3 tools/build.py || true`) or pipes under a shell with no pipefail: the
+  build may run in that file, and its failure then reads green. It is
   **errored**, never failed,
   on a shape the replay cannot run: a Windows, macOS or self-hosted runner with no
   container, docker inside the job (`espressif/esp-idf-ci-action`), a shell that is
@@ -76,8 +81,9 @@ whose build the guard could not read, where the guard skips. The three readers n
   `log.txt`, holds each step's own output on every outcome the replay reached, an
   errored one too, and an errored reason quotes the failing step's first cause line
   (`CMake Error`, apt's `E:`, `error:`). For `CMake Error at <file>:<line>
-  (message):`, that is the message under it, joined into one line, with the
-  location after it. A step that runs a composite action is read with the
+  (message):`, that is the message under it (its indented lines, across blank
+  lines, up to the call stack), joined into one line, with the location after
+  it. A step that runs a composite action is read with the
   action's own steps: their output holds the design lines and the cause, and an
   errored reason quotes the action's own last error line (its last `::error`
   annotation) and then the first cause line in the output of its step that failed.
@@ -231,7 +237,7 @@ lock and what it replays, and then waits. Each replay ends within its own
 in the shell you run it in. Where act, docker or git is not on PATH, the resolver
 applies that shell's missing tool (a missing tool is a skip, never a pass), so a
 pass a check recorded reads `[skip] fw.build : requires act (not on PATH)`, and
-`runnable here` says NO on the line above. This is the spine's rule, not a lost
+`runnable here`, a few lines above it in the same block, says NO. This is the spine's rule, not a lost
 verdict: the pass is still in `.nopekit/verdicts/fw.build/`. Run `gate show` in a
 shell that has act, docker and git to see it. The three readers read the same way.
 

@@ -241,20 +241,28 @@ CAUSE_LINE = re.compile(r"CMake Error|^E: |(?:^|[\s:])(?:fatal )?error:|FATAL[ _
 
 #: CMake's location header, ``CMake Error at <file>:<line> (<command>):`` or
 #: ``CMake Error in <file>:``. It says where the error was raised, not what
-#: failed: the message is the paragraph under it, each line indented two spaces
-#: and wrapped at 80 columns by CMake's formatter, up to the first line that is
-#: blank or not indented (``Call Stack (most recent call first):``). Measured:
+#: failed: the message is the indented lines under it, each indented two spaces
+#: or more and wrapped at 80 columns by CMake's formatter, across blank lines, up
+#: to the first line that is not blank and not indented (``Call Stack (most
+#: recent call first):``, ``-- Configuring incomplete``, the next error). Measured:
 #: tests/fw_logs/act_esp_cmake_missing_file.jsonl, ESP-IDF v5.5.6's
 #: ``SDKCONFIG_DEFAULTS '<repo>/sdkconfig.release' does not exist.`` over three
 #: lines under ``CMake Error at /opt/esp/idf/tools/cmake/project.cmake:683
-#: (message):``. What slipped through quoting the header (holdout review round 2,
-#: an NCS watch): the reason read ``CMake Error at <repo>/zephyr/cmake/modules/
-#: kconfig.cmake:318 (message):``, a line in a Zephyr module, and the missing file
-#: CMake named on the next line was only in log.txt. The reason quotes the
-#: paragraph joined into one line, then the location in brackets. *Rejected:* the
-#: first indented line alone (CMake wraps, so it was ``SDKCONFIG_DEFAULTS``, one
-#: word of the message); the header alone (above); every indented line to the
-#: end of the log (the call stack and the next error join it).
+#: (message):``; and tests/fw_logs/cmake_include_missing.log, CMake 3.30.2 in the
+#: same image on ``include(nosuchfile)`` from a neutral two-line project:
+#: ``include could not find requested file:``, a blank line, then the file,
+#: indented four spaces, then the call stack. What slipped through quoting the
+#: header (holdout review round 2, an NCS watch): the reason read ``CMake Error
+#: at <repo>/zephyr/cmake/modules/kconfig.cmake:318 (message):``, a line in a
+#: Zephyr module, and the missing file CMake named on the next line was only in
+#: log.txt. And then (review of J3): the message stopped at its first blank
+#: line, so the include error's reason never named the file. The reason quotes
+#: the message joined into one line, then the location in brackets. *Rejected:*
+#: the first indented line alone (CMake wraps, so it was ``SDKCONFIG_DEFAULTS``,
+#: one word of the message); the header alone (above); the first paragraph alone
+#: (above); every indented line to the end of the log (the call stack and the
+#: next error join it: the stack's header is not indented, so it ends the
+#: message).
 _CMAKE_AT = re.compile(r"CMake Error (?:at|in) (.+?)(?: \([^()]*\))?:\s*$")
 
 #: An action's own words for its failure: GitHub's ``::error`` workflow command,
@@ -1227,7 +1235,9 @@ def _first_cause(log: str) -> str:
         if header:
             said = []
             for under in lines[at + 1:]:
-                if not under.strip() or not under[:1].isspace():
+                if not under.strip():
+                    continue
+                if not under[:1].isspace():
                     break
                 said.append(under.strip())
             if said:
@@ -1280,16 +1290,28 @@ def image_names(result: dict) -> list[str]:
 
 #: How many images a detail names besides the ones ``firmware_image`` and
 #: ``firmware_elf`` name: past it, it counts them and points at
-#: ``images.json``, which lists each. Four is what the baseline's ESP-IDF build
-#: writes (its app's ``.bin`` and ``.elf``, the bootloader's and the partition
-#: table's ``.bin``); an NCS sysbuild wrote 185 (holdout review, an NCS watch:
-#: images.json 185 rows, 352 MB). What slipped through naming every image, sorted
-#: (holdout review round 2, that watch): a test vector ``west update`` fetched
-#: sorted first, and the spine cut the detail at 500 characters before the
-#: signed app image the readers judge. *Rejected:* every image (above); none
-#: (a small build's other images are the context a person reads); putting the
-#: files a fetch wrote last (no rule here tells a fetched file from a built one:
-#: both are new in the workspace).
+#: ``images.json``, which lists each. Four is the number of other images the
+#: baseline's ESP-IDF build writes (its images.json, from the fw.build.good
+#: control's replay, 2026-11-24: six rows; ``build/sleeper.bin`` and
+#: ``build/sleeper.elf`` are the declared two, and the other four are
+#: ``build/bootloader/bootloader.bin``, ``build/bootloader/bootloader.elf``,
+#: ``build/ota_data_initial.bin``, written because its partition table has an
+#: ``otadata`` row, and ``build/partition_table/partition-table.bin``). So the
+#: margin is zero: one more image in that build (a ULP program's, for one) and
+#: its pass counts the others instead of naming them. Nothing is lost
+#: then: the declared images still come first, and images.json still lists
+#: each. An NCS sysbuild wrote 185 (holdout review, an NCS watch: images.json 185
+#: rows, 352 MB). What slipped through naming every image, sorted (holdout
+#: review round 2, that watch): a test vector ``west update`` fetched sorted
+#: first, and the spine cut the detail at 500 characters before the signed app
+#: image the readers judge. (Review of J3: this note first said the four were
+#: the app's two and two others, which left two, not four, other images.)
+#: *Rejected:* every image (above); none (a small build's other images are the
+#: context a person reads); a cap with a margin over the baseline (each name
+#: adds some 35 characters to a detail the spine cuts at 500, which a matrix
+#: entry's label and the later steps not judged share; past the cap only the
+#: names go); putting the files a fetch wrote last (no rule here tells a
+#: fetched file from a built one: both are new in the workspace).
 NAMED_IMAGES = 4
 
 

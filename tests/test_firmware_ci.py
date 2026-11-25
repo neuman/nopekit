@@ -199,6 +199,14 @@ class TheGuardReadsTheWorkflow(unittest.TestCase):
         self._passes(_workflow("set -eo pipefail\nidf.py build | tee b.log"))
         self._passes(_workflow("idf.py build | tee b.log\nexit ${PIPESTATUS[0]}"))
         self._passes(_workflow("yes | idf.py build"), )
+        # Review of J3: `set -e -o pipefail` was read as no pipefail (a pattern for
+        # each form, where bash reads the words), and a shell's own `-o errexit`
+        # as no -e.
+        self._passes(_workflow("set -e -o pipefail\nidf.py build | tee b.log"))
+        self._passes(_workflow("idf.py build\necho done",
+                               step_extra="shell: bash -o errexit {0}\n"))
+        self._fails(_workflow("set +o pipefail\nidf.py build | tee b.log",
+                              step_extra="shell: bash\n"), "after `set +o pipefail`")
 
     def test_errexit_off_then_another_command_fails(self):
         self._fails(_workflow("set +e\nidf.py build\necho done"), "after `set +e`")
@@ -461,6 +469,143 @@ class TheGuardSaysWhatItRead(unittest.TestCase):
                 if ok and "outer" in run:
                     self.assertIn("or in ci/outer.sh, ci/build.sh, which it runs", v.detail)
 
+    def _build(self, run: str, files: dict | None = None, shell: str | None = None):
+        """The guard on a step named Build whose ``run:`` is ``run`` (its lines),
+        in a repository that holds ``files`` and nothing else of the earlier calls."""
+        shutil.rmtree(self.repo, True)
+        os.makedirs(self.repo)
+        steps = ("      - name: Build\n" + (f"        shell: {shell}\n" if shell else "")
+                 + "        run: |\n" + textwrap.indent(run.rstrip("\n") + "\n", " " * 10))
+        return self._guard(steps, files, firmware_ci_step="Build")
+
+    def _bash(self, script: str, files: dict) -> int:
+        """Real bash's exit status for ``script`` over ``files``: the documented
+        behaviour each rule rests on, where bash is on PATH."""
+        here = tempfile.mkdtemp(prefix="fw-bash-")
+        self.addCleanup(shutil.rmtree, here, True)
+        for rel, text in files.items():
+            _write(here, rel, text)
+        return _env.run(["bash", "-c", script], cwd=here).returncode
+
+    def test_a_sourced_file_runs_under_the_options_its_caller_set(self):
+        """Review of J3: a sourced file was judged under the step's starting
+        shell, never under the ``set`` lines the step ran before it. ``set +e``
+        and then ``. ci/build.sh`` passed a build that bash runs on past, and
+        ``set -e`` or ``set -o pipefail`` there failed a sound one. A file the
+        step sourced before it counts too: its ``set`` lines stay in force."""
+        then = {"ci/build.sh": "make -j4\necho done\n"}
+        piped = {"ci/build.sh": "make -j4 | tee build.log\necho done\n"}
+        env_off = {"ci/env.sh": "set +e\nexport BOARD=x\n"}
+        cases = (("set +e\n. ci/build.sh", then, None, False),
+                 ("set +e; . ci/build.sh", then, None, False),
+                 ("set -e\n. ci/build.sh", then, "bash {0}", True),
+                 ("set -o pipefail\n. ci/build.sh", piped, None, True),
+                 (". ci/build.sh", piped, None, False),
+                 (". ci/env.sh\n. ci/build.sh", {**env_off, **then}, None, False),
+                 (". ci/env.sh\nbash -e ci/build.sh", {**env_off, **then}, None, True),
+                 # The call returns under the options the file's own lines left.
+                 (". ci/build.sh\necho done", {"ci/build.sh": "set -e\nmake -j4\n"},
+                  "bash {0}", True),
+                 (". ci/build.sh\necho done", {"ci/build.sh": "set +e\nmake -j4\n"}, None,
+                  False))
+        for run, files, shell, ok in cases:
+            with self.subTest(run=run, shell=shell):
+                v = self._build(run, files, shell)
+                self.assertEqual(v.outcome, "pass" if ok else "fail", v.render())
+        v = self._build("set +e\n. ci/build.sh", then)
+        self.assertIn("ci/build.sh (run by step 'Build') runs the build after `set +e` and "
+                      "then 'echo done'", v.detail)
+        if shutil.which("bash"):
+            failing = {"ci/build.sh": "false\necho done\n", "ci/pipe.sh":
+                       "false | tee /dev/null\necho done\n", "ci/strict.sh": "set -e\nfalse\n",
+                       "ci/loose.sh": "set +e\nfalse\n", **env_off}
+            for script, status in (("set -e; set +e; . ci/build.sh", 0),
+                                   ("set -e; . ci/build.sh", 1),
+                                   ("set -e -o pipefail; . ci/pipe.sh", 1),
+                                   ("set -e; . ci/env.sh; . ci/build.sh", 0),
+                                   (". ci/strict.sh; echo done", 1),
+                                   ("set -e; . ci/loose.sh; echo done", 0)):
+                with self.subTest(bash=script):
+                    self.assertEqual(self._bash(script, failing), status,
+                                     "the documented behaviour the rule rests on")
+
+    def test_every_script_the_step_runs_is_read(self):
+        """Review of J3: the search stopped at the first script that built, so a
+        second build script, piped into ``tee`` under no pipefail, was never read
+        nor named, and the pass said "no masking". Every call is read, after a
+        build too, and each file the guard cannot read is named."""
+        files = {"ci/app.sh": "#!/bin/bash -e\nwest build -b x app\n",
+                 "ci/boot.sh": "#!/bin/bash\nwest build -b x boot | tee boot.log\n"}
+        v = self._build("./ci/app.sh\n./ci/boot.sh", files)
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("ci/boot.sh (run by step 'Build') pipes the build ('west build -b x "
+                      "boot | tee boot.log') under 'bash', which has no pipefail", v.detail)
+        files["ci/boot.sh"] = "#!/bin/bash -e\nwest build -b x boot\n"
+        v = self._build("python3 tools/gen.py\n./ci/app.sh\n./ci/boot.sh\n"
+                        "python3 tools/sign.py || true", files)
+        self.assertTrue(v.passed, v.render())
+        self.assertTrue(v.detail.endswith("; no masking in the step's own lines or in "
+                                          "ci/app.sh, ci/boot.sh, which it runs; "
+                                          "tools/gen.py, tools/sign.py are not read"), v.detail)
+        # A script run twice is read once, and the line of each call is judged.
+        v = self._build("./ci/app.sh\n./ci/app.sh | tee again.log", files)
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("pipes the build ('./ci/app.sh | tee again.log')", v.detail)
+
+    def test_options_on_the_interpreters_command_line_are_read(self):
+        """Review of J3: ``bash -o errexit x.sh`` read as "no -e", and ``bash -eo
+        pipefail x.sh`` and ``bash -euo pipefail x.sh`` did not read as a call
+        through bash at all: each was judged under the script's ``#!`` line (none:
+        no ``-e``), and a sound CI failed. Bash reads an ``o`` in a cluster as
+        taking the next word."""
+        then = {"ci/build.sh": "make -j4\necho done\n"}
+        piped = {"ci/build.sh": "make -j4 | tee build.log\necho done\n"}
+        for run, files, ok in (("bash -o errexit ci/build.sh", then, True),
+                               ("bash -eo pipefail ci/build.sh", then, True),
+                               ("bash -euo pipefail ci/build.sh", then, True),
+                               ("bash -e -o pipefail ci/build.sh", piped, True),
+                               ("bash -eo pipefail ci/build.sh", piped, True),
+                               ("bash -e ci/build.sh", piped, False),
+                               ("bash -o pipefail ci/build.sh", then, False),
+                               ("bash +o errexit ci/build.sh", then, False)):
+            with self.subTest(run=run, files=files):
+                v = self._build(run, files)
+                self.assertEqual(v.outcome, "pass" if ok else "fail", v.render())
+        if shutil.which("bash"):
+            failing = {"ci/build.sh": "false\necho done\n"}
+            for flags in ("-o errexit", "-eo pipefail", "-euo pipefail"):
+                with self.subTest(bash=flags):
+                    self.assertEqual(self._bash(f"bash {flags} ci/build.sh", failing), 1,
+                                     "the documented behaviour the rule rests on")
+
+    def test_a_line_that_masks_a_file_it_cannot_read_fails(self):
+        """Review of J3: where no script the guard read holds the build, it runs in
+        a file the guard cannot read, and a line that discards that file's status
+        was a skip that said the guard "cannot say whether a failed build reads
+        green there"; fw.build then replayed a CI whose green says nothing. Only
+        the rules that mask the call whatever follows it are read there: a line
+        that sources an environment before the build is not the build."""
+        for run, files in (("python3 tools/build.py || true", {}),
+                           ("./ci/build.sh || true", {}),
+                           ("python3 tools/build.py 2>&1 | tee build.log", {}),
+                           ("./ci/env.sh\n./ci/build.py || :",
+                            {"ci/env.sh": "#!/bin/bash\nexport X=1\n"})):
+            with self.subTest(run=run):
+                v = self._build(run, files)
+                self.assertEqual(v.outcome, "fail", v.render())
+                self.assertIn("no script this gate read holds the build, and ", v.detail)
+                self.assertIn(", so the build may run there", v.detail)
+        v = self._build("python3 tools/build.py || true")
+        self.assertTrue(v.detail.startswith(
+            "step 'Build': 'python3 tools/build.py || true' falls back to a command that "
+            "succeeds, so the step reads green whatever the build did; no script this gate "
+            "read holds the build, and tools/build.py is a Python script, which this gate "
+            "does not read"), v.detail)
+        self._skips(self._build(". /opt/env.sh && python3 tools/build.py\nls build"),
+                    "/opt/env.sh is outside the repository; tools/build.py is a Python "
+                    "script, which this gate does not read")
+        self._skips(self._build("python3 tools/build.py"), "tools/build.py is a Python script")
+
     def test_a_script_beside_the_build_command_is_named_as_not_read(self):
         v = self._guard("      - name: Build\n        run: ./ci/env.sh && west build -b x\n")
         self.assertTrue(v.passed, v.render())
@@ -501,6 +646,9 @@ class ThePackSaysWhatEachReaderShows(unittest.TestCase):
         for words in ("`nopekit gate show fw.build` prints `last verdict` as the spine's "
                       "resolver reads it in the shell you run it in",
                       "`[skip] fw.build : requires act (not on PATH)`",
+                      # Review of J3: "on the line above" it was not: the
+                      # prerequisite, context and control lines come between.
+                      "`runnable here`, a few lines above it in the same block, says NO",
                       "This is the spine's rule, not a lost verdict"):
             with self.subTest(words=words):
                 self.assertIn(words, self.text)
@@ -745,6 +893,29 @@ class TheBuildIsJudgedOnItsOwnLines(unittest.TestCase):
         # A header with nothing under it is quoted as it is.
         self._raises(_step_result("CMake Error at x.cmake:3 (message):\nnext\n"),
                      "design fault: CMake Error at x.cmake:3 (message):")
+
+    def test_a_cmake_message_is_read_across_its_blank_lines(self):
+        """Review of J3: CMake puts the subject of ``include could not find
+        requested file:`` in a second indented paragraph, after a blank line, and
+        the reason stopped at the blank line, so it never named the file.
+        Recorded: CMake 3.30.2 in the pinned ESP-IDF image, on a neutral project
+        whose ``cmake/sub.cmake`` runs ``include(nosuchfile)``
+        (cmake_include_missing.log): the call stack under the message, whose
+        header is not indented, stays out."""
+        log = _log("cmake_include_missing.log")
+        self.assertIn("  include could not find requested file:\n\n    nosuchfile\n"
+                      "Call Stack (most recent call first):\n", log)
+        self.assertEqual(R._first_cause(log), "include could not find requested file: "
+                                              "nosuchfile (CMake Error at cmake/sub.cmake:1)")
+        self._raises(_step_result(log), "design fault: include could not find requested "
+                                        "file: nosuchfile (CMake Error at cmake/sub.cmake:1)")
+        # The same error at the top level, recorded the same way: no call stack,
+        # two blank lines, then CMake's own line, not indented.
+        top = ("CMake Error at CMakeLists.txt:3 (include):\n"
+               "  include could not find requested file:\n\n    nosuchfile\n\n\n"
+               "-- Configuring incomplete, errors occurred!\n")
+        self.assertEqual(R._first_cause(top), "include could not find requested file: "
+                                              "nosuchfile (CMake Error at CMakeLists.txt:3)")
 
     def test_a_composite_action_is_read_with_its_own_steps(self):
         """Holdout review round 2 (a watch): a build step that runs a composite
@@ -2959,6 +3130,17 @@ class TheRealReplay(unittest.TestCase):
                 if gid == "fw.tx_power":
                     self.assertEqual((good.measured, bad.measured), (6.0, 9.0),
                                      "the stated +6 dBm, and ESP-IDF's default +9 dBm")
+                if gid == "fw.build":
+                    # Review of J3: NAMED_IMAGES's note miscounted the baseline's
+                    # other images. It counts these four, with no margin: a fifth
+                    # turns this list into a count, and the note says so.
+                    others = ["build/bootloader/bootloader.bin",
+                              "build/bootloader/bootloader.elf", "build/ota_data_initial.bin",
+                              "build/partition_table/partition-table.bin"]
+                    self.assertEqual(len(others), R.NAMED_IMAGES)
+                    self.assertTrue(good.detail.endswith(
+                        "; wrote build/sleeper.bin, build/sleeper.elf; other images it "
+                        "wrote: " + ", ".join(others)), good.detail)
 
 
 if __name__ == "__main__":
