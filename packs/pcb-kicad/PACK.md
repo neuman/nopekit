@@ -53,7 +53,9 @@ what the gate read: a control run under KiCad 9 and one under KiCad 10 are two
 qualifications, never two outcomes of one (`gates/kicad-cli/`, one record per
 release this pack was measured on: 9.0.9 and 10.0.8). A file newer than the
 running kicad-cli reads (a KiCad 10 board under kicad-cli 9) is a skip that
-names the release, as a missing tool is. `pcb.spice` runs `ngspice -b` the same way, `pcb.enclosure_fit` runs
+names the release, as a missing tool is. The line keeps the count and the
+release within the spine's 500 characters, and cuts the findings' own words
+first. `pcb.spice` runs `ngspice -b` the same way, `pcb.enclosure_fit` runs
 `kicad-cli pcb export step` and then OpenCascade (through CadQuery) in a child
 process, and `pcb.antenna_keepout` refills the board's zones with KiCad's own
 `pcbnew` in a child process before its two DRC runs. They read inside
@@ -385,11 +387,23 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   Skipped on the tier-0 gates, the power rules, `pcb.fab_rules`'s service guard,
   `pcb.enclosure_fit` and `pcb.antenna_keepout` ("this reader was checked through
   board format 20260206 (KiCad 10.0)"), never Checked and never Failing, until a
-  board that KiCad saved is committed and read the same way. The gates that run
-  kicad-cli are KiCad's own answer, and run only with a kicad-cli that reads the
-  file: kicad-cli 9.0.9 prints "Failed to load board" on a KiCad 10 file and
-  exits 3, and the gate reads Skipped, naming the release and the format it
-  reads through. The KiCad 10 schematic (format 20260306) is read the same way.
+  board that KiCad saved is committed and read the same way. The five gates that
+  run kicad-cli for its report (`pcb.drc`, `pcb.unconnected`, `pcb.erc`,
+  `pcb.parity`, `pcb.fab_rules`) are KiCad's own answer, and run only with a
+  kicad-cli that reads the file: kicad-cli 9.0.9 prints "Failed to load board" on
+  a KiCad 10 file and exits 3, and the gate reads Skipped, naming the release and
+  the format it reads through. The KiCad 10 schematic (format 20260306) is read
+  the same way.
+- **A KiCad 10 board in the fit and the keep-out.** `pcb.enclosure_fit` (its STEP
+  export) and `pcb.antenna_keepout` (its zone refill, in `pcbnew`) hand the board
+  to KiCad's own tool with no check of what the running release reads, and were
+  never run on a KiCad 10 board. They skip one ("this gate was checked through
+  board format 20241229 (KiCad 9.0)"), under any release. Without that skip,
+  under KiCad 9's tools, both errored on a KiCad 10 board (measured: kicad-cli
+  9.0.9 exits 3 in the export; pcbnew 9.0.9's refill raises an AttributeError).
+  The move: run each on a KiCad 10 board under kicad-cli and pcbnew 10, send its
+  tool failure through a tool-limit check, and then drop
+  `_kicad.TOOL_RUN_VERSION`.
 - **What KiCad's library checks compare with.** `lib_footprint_mismatch`,
   `lib_footprint_issues` (DRC) and `lib_symbol_issues`, `lib_symbol_mismatch`,
   `footprint_link_issues` (ERC) compare the design with the library each table

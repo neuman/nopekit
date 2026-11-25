@@ -1301,13 +1301,65 @@ def _disagree(code: int, found: list, counted: list) -> bool:
     return (code == EXIT_CLEAN and bool(counted)) or (code != EXIT_CLEAN and not found)
 
 
-#: How much of the first findings' own words ``pcb.erc``'s line quotes: 200
-#: characters, so the waivers, the libraries and the release still fit in the
-#: spine's 500 (``gates._DETAIL_MAX``). Three findings of two items each ran to
-#: 260 on a real schematic. Rejected: no cut (the spine then cuts the line's end,
-#: the release with it); fewer findings (the first one alone often names only a
-#: power flag, and its partner is the clue).
-WHERE_CHARS = 200
+#: The room a KiCad gate's detail line has: the spine keeps a detail to 500
+#: characters (``gates._DETAIL_MAX``) and cuts the end past them, so what a line
+#: says last is what it loses. :func:`_line` builds every kicad-cli gate's line
+#: inside it. Not read from the spine: the spine's name is private, and a gate
+#: that read it would move with an edit there that no test of this pack sees.
+DETAIL_ROOM = 500
+
+#: The fewest characters :func:`_line` cuts a part to, before its "...": a kind
+#: with its count and severity ("120x power_pin_not_driven (error)" is 33), or
+#: the first library and the table it is in. Rejected: dropping a part whole
+#: when it cannot keep more (a cut that is not marked is quoted as if it were
+#: complete); 20 (a library note then names only its table).
+CUT_KEEPS = 40
+
+
+def _flat(text: str) -> str:
+    """``text`` as the spine flattens a detail: a line break is " | ", a run of
+    blanks one space. A length counted before that is off by every break."""
+    return re.sub(r"\s+", " ", re.sub(r"\s*\n\s*", " | ", str(text)))
+
+
+def _line(*parts) -> str:
+    """A detail line of at most :data:`DETAIL_ROOM` characters, from ``parts`` in
+    order. A part is a string, kept whole, or ``(text, n)`` or ``(text, n, open,
+    close)``: while the line is too long, the parts with an ``n`` are cut, the
+    lowest ``n`` first, each from its end, marked "...", to no fewer than
+    :data:`CUT_KEEPS` characters. ``open`` and ``close`` wrap the text and are
+    not cut. A part with no text is left out, its wrap with it.
+
+    The parts kept whole are the count and the release, short in any case; the
+    room left goes to the rest, cut from the one least needed (the findings'
+    own words) to the one most needed (the libraries the stage could not take).
+    What slipped through, in the review of the holdout fixes: ``pcb.erc`` cut the
+    findings it quotes to 200 characters and put the libraries and the release
+    after them, and on a report of five kinds the line reached the spine's cap
+    before either: the verdict named no library and no release, on the design
+    whose missing libraries were the reason to name them. Rejected: a fixed cut
+    per part (the 200 left room only when the other parts were short); the
+    release first (it reads as what the line is about)."""
+    rows = []
+    for part in parts:
+        if isinstance(part, str):
+            rows.append([_flat(part), None, "", ""])
+        else:
+            text, order, *wrap = part
+            rows.append([_flat(text), order, *(wrap or ["", ""])])
+
+    def size() -> int:
+        return sum(len(o) + len(t) + len(c) for t, _n, o, c in rows if t)
+
+    for row in sorted((r for r in rows if r[1] is not None), key=lambda r: r[1]):
+        over = size() - DETAIL_ROOM
+        if over <= 0:
+            break
+        keep = max(len(row[0]) - over - 3, CUT_KEEPS)
+        if keep < len(row[0]) - 3:
+            row[0] = row[0][:keep].rstrip() + "..."
+    return "".join(o + t + c for t, _n, o, c in rows if t)
+
 
 #: The order a detail line names KiCad's severities in: errors first. The words
 #: are the ones kicad-cli 9.0.9 and 10.0.8 write in a report's ``severity``; one
@@ -1412,18 +1464,21 @@ def drc(ctx: GateContext) -> Verdict:
         return Verdict(gate=gid, passed=False, evidence=ev,
                        error=f"kicad-cli exited {code} but its report lists "
                              f"{len(counted)} item(s): the two disagree")
-    detail = (f"KiCad DRC at {severity} severities: "
-              + (f"{len(counted)} finding(s), {_kinds(counted)}" if counted
-                 else "nothing found") + _waived_note(_waived(found)))
     dead: list[str] = []
+    note = ""
     if os.path.isfile(_stem(path) + ".kicad_dru"):
         probed = _probe_rules(ctx, gid, path)
         if isinstance(probed, Verdict):
             return probed
         dead, note, probe_ev = probed
         ev += probe_ev
-        detail += f"; {note}"
-    detail += _libraries_note(libraries) + f"; {_release(ctx, doc)}"
+    # Within the spine's 500 characters (_line): the release kept, the kinds,
+    # the rules' probe and the libraries cut last.
+    found_parts = ([f"{len(counted)} finding(s), ", (_kinds(counted), 2)] if counted
+                   else ["nothing found"])
+    detail = _line(f"KiCad DRC at {severity} severities: ", *found_parts,
+                   (_waived_note(_waived(found)), 1), (note, 3, "; ", ""),
+                   (_libraries_note(libraries), 4), f"; {_release(ctx, doc)}")
     # A dead rule beside a clean run is an error: the run cannot show what the
     # rule was written to hold. Beside a finding it stays a fail, because a
     # finding KiCad made is real, and the detail names the dead rule too.
@@ -1580,9 +1635,10 @@ def unconnected(ctx: GateContext) -> Verdict:
     items = _counted(listed)
     nets = sorted({i.get("description", "").split("[", 1)[-1].split("]", 1)[0]
                    for v in items for i in v.get("items", []) if "[" in i.get("description", "")})
-    detail = (f"{len(items)} unconnected item(s) on {', '.join(nets[:6]) or '?'}"
-              if items else "every connection the netlist asks for is made")
-    detail += _waived_note(_waived(listed)) + f"; {_release(ctx, doc)}"
+    found_parts = ([f"{len(items)} unconnected item(s) on ", (', '.join(nets[:6]) or '?', 2)]
+                   if items else ["every connection the netlist asks for is made"])
+    detail = _line(*found_parts, (_waived_note(_waived(listed)), 1),
+                   f"; {_release(ctx, doc)}")
     return Verdict(gate=gid, passed=not items, measured=len(items), limit=0,
                    comparator="<=", units="items", detail=detail, evidence=ev)
 
@@ -1663,14 +1719,13 @@ def erc(ctx: GateContext) -> Verdict:
     where = "; ".join(f"{v.get('type', '?')}: "
                       + ", ".join(i.get("description", "?") for i in v.get("items", [])[:2])
                       for v in first)
-    # Cut, and said cut, so the line keeps room for what follows it (the spine
-    # keeps a detail to 500 characters).
-    where = where if len(where) <= WHERE_CHARS else where[:WHERE_CHARS - 3].rstrip() + "..."
-    detail = (f"KiCad ERC at {severity} severities over {len(doc.get('sheets', []))} "
-              f"sheet(s): " + (f"{len(counted)} finding(s), {_kinds(counted)} ({where})"
-                               if counted else "nothing found"))
-    detail += (_waived_note(_waived(found)) + _libraries_note(libraries)
-               + f"; {_release(ctx, doc)}")
+    # Within the spine's 500 characters, the release and the libraries kept and
+    # the findings' own words cut first (_line).
+    found_parts = ([f"{len(counted)} finding(s), ", (_kinds(counted), 3),
+                    (where, 1, " (", ")")] if counted else ["nothing found"])
+    detail = _line(f"KiCad ERC at {severity} severities over {len(doc.get('sheets', []))} "
+                   f"sheet(s): ", *found_parts, (_waived_note(_waived(found)), 2),
+                   (_libraries_note(libraries), 4), f"; {_release(ctx, doc)}")
     return Verdict(gate=gid, passed=not counted, measured=len(counted), limit=0,
                    comparator="<=", units="findings", detail=detail, evidence=ev)
 
@@ -1794,29 +1849,28 @@ def parity(ctx: GateContext) -> Verdict:
     left = {id(v) for v in agreed + board_only}
     items = [v for v in items if v.get("type") in PARITY_COUNTED and id(v) not in left]
     where = "; ".join(f"{v.get('description', '?')}" for v in items[:3])
-    detail = (f"{len(items)} difference(s) between board and schematic: {where}"
-              if items else "the board matches its schematic: every part, value, "
-                            "footprint and pad net")
     said = [f"{n}x {t} ({PARITY_APART[t]})" for t, n in apart.most_common()]
     if board_only:
         refs = sorted({K.footprint_ref(footprints[K.kiid(i.get("uuid"))])[0] or "no reference"
                        for v in board_only for i in v.get("items", [])})
         said.append(f"{len(board_only)}x board-only drawing not marked 'Not in schematic' "
                     f"({', '.join(refs[:3])}{', ...' if len(refs) > 3 else ''})")
-    if said:
-        detail += f"; said apart, not counted: {', '.join(said)}"
-    if agreed:
-        detail += f"; {len(agreed)} open pin(s) sit on pads with no net"
-    detail += _waived_note(_waived(listed))
     kinds = ", ".join(f"{n}x {t}" for t, n in unknown.most_common())
     if unknown and not items:
         return Verdict(gate=gid, passed=False, evidence=ev,
                        error=f"{kinds}: parity of a type this pack does not know, so whether "
                              f"it is a difference in what is built is not known here "
                              f"({_release(ctx, doc)})")
-    if unknown:
-        detail += f"; of a type this pack does not know, not counted: {kinds}"
-    detail += f"; {_release(ctx, doc)}"
+    # Within the spine's 500 characters (_line): the count and the release kept,
+    # the differences' own words cut first, a type this pack does not know last.
+    found_parts = ([f"{len(items)} difference(s) between board and schematic: ", (where, 1)]
+                   if items else ["the board matches its schematic: every part, value, "
+                                  "footprint and pad net"])
+    detail = _line(*found_parts, (", ".join(said), 3, "; said apart, not counted: ", ""),
+                   f"; {len(agreed)} open pin(s) sit on pads with no net" if agreed else "",
+                   (_waived_note(_waived(listed)), 2),
+                   (kinds, 4, "; of a type this pack does not know, not counted: ", ""),
+                   f"; {_release(ctx, doc)}")
     return Verdict(gate=gid, passed=not items, measured=len(items), limit=0,
                    comparator="<=", units="differences", detail=detail, evidence=ev)
 
@@ -2031,7 +2085,13 @@ def fab_rules(ctx: GateContext) -> Verdict:
     if table is None:
         return _skip(gid, f"{who}'s {service['name']} service publishes no limits for a "
                           f"{layers}-layer board at {oz:g} oz in {fab_path}")
-    staged = _stage(ctx, gid, path, board=True, schematic=False, libraries=True)
+    # The notes too: a library the stage could not take is named here as at
+    # pcb.drc. (What slipped through, in the review of the holdout fixes: the
+    # stage made the notes and this gate dropped them, while kicad-cli.md said
+    # each one is named in the verdict.)
+    libraries: list[str] = []
+    staged = _stage(ctx, gid, path, board=True, schematic=False, libraries=True,
+                    notes=libraries)
     if isinstance(staged, Verdict):
         return staged
     stem, stage = staged
@@ -2063,41 +2123,48 @@ def fab_rules(ctx: GateContext) -> Verdict:
     # Grouped by type with the fab rule's name, never the first descriptions: on a
     # real board those were "Silkscreen overlap" three times over, and a person
     # could not read from the line that nothing past the fab's limits was copper.
-    detail = (f"{who} {service['name']} ({table['name']}{oz_note}, read "
-              f"{fab.get('read', '?')}): "
-              + (f"{len(fab_found)} finding(s) past its limits: "
-                 f"{K.fab_kinds(fab_found, table)}" if fab_found
-                 else f"inside every limit of {len(table['rules'])} rule(s)"))
-    if guessed:
-        detail += (f"; {guessed} silk overlap(s) counted although no pad is named in "
-                   f"them: {pads[1]} pad(s) on the board get a random id from "
-                   f"KiCad, so silk on silk cannot be told from silk on a pad")
+    found_parts = ([f"{len(fab_found)} finding(s) past its limits: ",
+                    (K.fab_kinds(fab_found, table), 6)] if fab_found
+                   else [f"inside every limit of {len(table['rules'])} rule(s)"])
+    guessed_note = (f"; {guessed} silk overlap(s) counted although no pad is named in "
+                    f"them: {pads[1]} pad(s) on the board get a random id from "
+                    f"KiCad, so silk on silk cannot be told from silk on a pad"
+                    if guessed else "")
     # The project's own custom rules are left out of this run, and one of them
     # may waive (severity ignore) what pcb.drc then never reports: with such a
     # file, the rest is said to be not the fab's, never pcb.drc's. (What slipped
     # through, in review: it was called pcb.drc's.)
     if others and os.path.isfile(_stem(path) + ".kicad_dru"):
-        detail += (f"; {others} other finding(s) in the same run are not the fab's: "
-                   f"pcb.drc judges them under the project's own rules and severities")
+        others_note = (f"; {others} other finding(s) in the same run are not the fab's: "
+                       f"pcb.drc judges them under the project's own rules and severities")
     elif others:
-        detail += f"; {others} other finding(s) in the same run are pcb.drc's"
+        others_note = f"; {others} other finding(s) in the same run are pcb.drc's"
+    else:
+        others_note = ""
+    waived_note = ""
     if waived:
         kinds = ", ".join(f"{n}x {k}" for k, n in waived.most_common())
-        detail += (f"; {sum(waived.values())} other finding(s) of a type the project "
-                   f"ignores ({kinds}), raised for this run only: pcb.drc does not "
-                   f"see them")
+        waived_note = (f"; {sum(waived.values())} other finding(s) of a type the project "
+                       f"ignores ({kinds}), raised for this run only: pcb.drc does not "
+                       f"see them")
     # A finding of the fab's the project excludes still counts: an exclusion is
     # a person's waiver of the project's own rule (pcb.drc counts it apart), and
     # the fab's published minimum is not the project's to waive. Said, so the
     # count is not read as the exclusion going unseen.
     excluded = len(_waived(fab_found))
-    if excluded:
-        detail += (f"; {excluded} of the fab's finding(s) the project excludes, counted: "
-                   f"an exclusion waives the project's own rule, not the fab's")
-    detail += f"; {_release(ctx, doc)}"
-    # What the service was chosen against, said last: a pass on a board read as
-    # KiCad's default stackup says so, never as if the board had stated FR4.
-    detail += f"; the board: {', '.join(built)}"
+    excluded_note = (f"; {excluded} of the fab's finding(s) the project excludes, counted: "
+                     f"an exclusion waives the project's own rule, not the fab's"
+                     if excluded else "")
+    # Within the spine's 500 characters (_line): the release and what the board
+    # is built of kept, the notes about other findings cut first, the fab's own
+    # findings last. What the service was chosen against is said last: a pass on
+    # a board read as KiCad's default stackup says so, never as if the board had
+    # stated FR4.
+    detail = _line(f"{who} {service['name']} ({table['name']}{oz_note}, read "
+                   f"{fab.get('read', '?')}): ", *found_parts, (guessed_note, 2),
+                   (others_note, 1), (waived_note, 3), (excluded_note, 5),
+                   (_libraries_note(libraries), 4), f"; {_release(ctx, doc)}",
+                   f"; the board: {', '.join(built)}")
     return Verdict(gate=gid, passed=not fab_found, measured=len(fab_found), limit=0,
                    comparator="<=", units="findings", detail=detail, evidence=ev)
 
@@ -2849,7 +2916,7 @@ def _read_board(ctx: GateContext, gid: str, fit: _Fit) -> str | None:
     version, problems = K.board_problems(tree)
     if version is None:
         raise _FitError(f"{label}{problems[0]}")
-    ceiling = K.reader_ceiling(version)
+    ceiling = K.reader_ceiling(version) or K.tool_ceiling(version)
     if ceiling:
         return (f"{label}{ceiling}: a newer format is a limit of this reader, not a "
                 f"defect in the board, so nothing on it is judged here")
@@ -3459,8 +3526,9 @@ def _antenna_board(ctx: GateContext, path: str, label: str):
     except (K.KicadFormatError, UnicodeDecodeError) as exc:
         raise P.RecordError(f"the board {name} does not parse: {exc}") from None
     version, problems = K.board_problems(tree)
-    if K.reader_ceiling(version):
-        raise P.ReaderLimit(f"the board {name}: {K.reader_ceiling(version)}")
+    ceiling = K.reader_ceiling(version) or K.tool_ceiling(version)
+    if ceiling:
+        raise P.ReaderLimit(f"the board {name}: {ceiling}")
     if problems:
         raise P.RecordError(f"the board {name} is not one this reader can vouch for: "
                             f"{'; '.join(problems)}")

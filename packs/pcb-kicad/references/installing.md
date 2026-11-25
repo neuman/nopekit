@@ -99,13 +99,23 @@ measured here). Only `pcb.enclosure_fit` reads models; no other gate needs them.
 The keep-out gate refills the board's zones with KiCad's own filler before its
 DRC, and asks KiCad which holes carry no copper, in a child process run by the
 same Python as nopekit (`sys.executable`), so that Python must import `pcbnew`. Check: `python3 -c "import pcbnew;
-print(pcbnew.Version())"` prints `9.0.x`.
+print(pcbnew.Version())"` prints `9.0.x` or `10.0.x`.
+
+The `pcbnew` that Python imports must read the board's format: pcbnew 9 does
+not read a board KiCad 10 saved (measured: 9.0.9's refill raises an
+AttributeError on one), so a KiCad 10 board needs pcbnew 10. The gate was not
+yet run on a KiCad 10 board under pcbnew 10, so for now it skips a KiCad 10
+board under any `pcbnew`, saying "this gate was checked through board format
+20241229 (KiCad 9.0)" (PACK.md, "A KiCad 10 board in the fit and the keep-out").
+`pcb.enclosure_fit` skips one too, for its STEP export.
 
 | Platform | How |
 |---|---|
-| Ubuntu / Debian, Fedora | the distribution's KiCad package installs `pcbnew` for the system `python3`: run nopekit with that Python, not a virtual environment that hides it |
+| Ubuntu / Debian | the KiCad package installs `pcbnew` for the system `python3`: KiCad 10's from `ppa:kicad/kicad-10.0-releases` (the `kicad` package, as in the kicad-cli table), KiCad 9's from `ppa:kicad/kicad-9.0-releases`. Run nopekit with that Python, not a virtual environment that hides it |
+| Fedora | the distribution's KiCad package installs `pcbnew` for the system `python3`, of the release the distribution ships |
 | macOS | run nopekit with KiCad's bundled Python, `/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3` |
-| Windows | run nopekit with KiCad's bundled Python, in `C:\Program Files\KiCad\9.0\bin\` (Windows is untested with nopekit) |
+| Windows | run nopekit with KiCad's bundled Python, in `C:\Program Files\KiCad\10.0\bin\` (KiCad 10) or `C:\Program Files\KiCad\9.0\bin\` (KiCad 9) (Windows is untested with nopekit) |
+| Any host with Docker | the `kicad/kicad:10.0` image's `python3` (3.13) imports pcbnew 10.0.8 (checked), and nopekit needs only the standard library, so it can run there with the project mounted. A `kicad-cli` wrapper alone does not give `pcbnew`. This route is not yet measured on a gate |
 
 The gate imports nothing from KiCad in nopekit's own process: availability looks
 for the module without importing it, and only the child loads it.

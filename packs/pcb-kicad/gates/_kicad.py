@@ -439,16 +439,55 @@ NET_CODES_DROPPED = 20251028
 VIA_TYPES_SPLIT = 20250926
 
 
+#: The newest board format a gate that hands the board itself to KiCad's own
+#: tool, with no check of the formats the running release reads, was run on:
+#: KiCad 9.0's. Two gates do: ``pcb.enclosure_fit`` (``kicad-cli pcb export
+#: step``) and ``pcb.antenna_keepout`` (pcbnew's zone refill, in a child). The
+#: gates that run kicad-cli through ``pcb._kicad_cli`` ask the release what it
+#: reads when it fails (``pcb._tool_limit``), and need no ceiling of their own.
+#: What slipped through, in the review of the holdout fixes: raising
+#: :data:`MAX_BOARD_VERSION` to KiCad 10's let a KiCad 10 board past the one
+#: check these two gates make, and under the KiCad 9 tools, which were never run
+#: on anything newer, both errored where they had skipped (measured: kicad-cli
+#: 9.0.9 exits 3, "Failed to load board", in the STEP export; pcbnew 9.0.9's
+#: refill raises an AttributeError on a KiCad 10 board). An error is never a
+#: pass, and here it is louder than the missing release that caused it.
+#: Rejected: :data:`MAX_BOARD_VERSION` back at KiCad 9's for every gate (the
+#: readers were shown on KiCad 10 boards, and the tier-0 gates and the power
+#: rules judge them); the two gates' own tool-limit check in this change (they
+#: are another change's to edit, and neither was run on a KiCad 10 board under
+#: KiCad 10's tools). The move is to run each on a KiCad 10 board under kicad-cli
+#: and pcbnew 10, send its tool failure through a tool-limit check, and then
+#: drop this ceiling.
+TOOL_RUN_VERSION = 20241229
+
+#: The KiCad release that writes :data:`TOOL_RUN_VERSION`, for the words.
+TOOL_RUN_RELEASE = "KiCad 9.0"
+
+
 def reader_ceiling(version: int | None) -> str:
     """Why this reader will not judge a board of file format ``version``, or ""
     when it was checked through that format. The one place the words are made:
     ``pcb.board_readable`` skips on them, and so do the power rules on a board a
     record names, ``pcb.fab_rules`` before its service guard reads the stackup,
-    and ``pcb.enclosure_fit`` before it reads a part's model or courtyard."""
+    and ``pcb.enclosure_fit`` and ``pcb.antenna_keepout`` before they read the
+    board (with :func:`tool_ceiling` beside it)."""
     if version is None or version <= MAX_BOARD_VERSION:
         return ""
     return (f"this reader was checked through board format {MAX_BOARD_VERSION} "
             f"({MAX_BOARD_RELEASE}); the file is format {version}")
+
+
+def tool_ceiling(version: int | None) -> str:
+    """Why a gate that hands the board to KiCad's own tool with no check of the
+    release (:data:`TOOL_RUN_VERSION`) will not run on a board of format
+    ``version``, or "". Asked after :func:`reader_ceiling`, so a file newer than
+    the reader reads in the reader's words. The words are as short as the
+    reader's: a skip reason keeps 200 characters, and the gates add their own."""
+    if version is None or version <= TOOL_RUN_VERSION:
+        return ""
+    return (f"this gate was checked through board format {TOOL_RUN_VERSION} "
+            f"({TOOL_RUN_RELEASE}); the file is format {version}")
 
 
 def board_problems(tree: list) -> tuple[int | None, list[str]]:

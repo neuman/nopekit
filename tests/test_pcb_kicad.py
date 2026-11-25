@@ -6943,6 +6943,21 @@ class TheStageTakesTheProjectsLibraries(_StandIn):
         self.assertEqual(self.seen(erc), ["../libs/SOT.pretty", "../libs/sym.kicad_sym"])
         self.assertNotIn("stock", erc.detail, "a library of the host is not the stage's")
 
+    def test_the_fab_run_names_them_too(self):
+        """pcb.fab_rules stages the footprint table's libraries as pcb.drc does,
+        and names each one it could not take. (What slipped through, in the
+        review of H1: the stage made the notes and pcb.fab_rules dropped them,
+        while kicad-cli.md said each one is named in the verdict.)"""
+        self.board = self.project(
+            ["sym=${KIPRJMOD}/../libs/sym.kicad_sym"],
+            ["sot=${KIPRJMOD}/../libs/SOT.pretty", "gone=${KIPRJMOD}/../missing/x.pretty"])
+        _stand_in(self.bin, "kicad-cli", self.SEES)
+        fab = self.gate("pcb.fab_rules")
+        self.assertEqual(fab.outcome, "pass", fab.render())
+        self.assertEqual(self.seen(fab), ["../libs/SOT.pretty"])
+        self.assertIn("; not staged with the board: fp-lib-table gone (${KIPRJMOD}/../missing/"
+                      "x.pretty): nothing there; kicad-cli 9.0.9; the board: ", fab.detail)
+
     @unittest.skipIf(shutil.which("kicad-cli") is None, "needs the real kicad-cli")
     def test_kicad_finds_a_library_one_directory_up(self):
         hw = os.path.join(self.root, "hw")
@@ -7008,6 +7023,172 @@ class InstallingNamesKiCad10(unittest.TestCase):
                      "KICAD6_3DMODEL_DIR", "KICAD10_3DMODEL_DIR"):
             with self.subTest(said=said):
                 self.assertIn(said, text)
+
+
+# --------------------------------------------------------------------------- #
+# The review of H1: the fit and the keep-out on a KiCad 10 board, a line that
+# keeps its release and its libraries, the fab run's library notes, and
+# installing.md's pcbnew for a KiCad 10 board.
+# --------------------------------------------------------------------------- #
+#: What the two gates that hand the board to KiCad's tool unchecked say of a
+#: KiCad 10 board.
+TOOL_WORDS = ("this gate was checked through board format 20241229 (KiCad 9.0); the file "
+              "is format 20260206")
+
+
+class TheFitAndTheKeepoutKeepKiCad9sCeiling(unittest.TestCase):
+    """pcb.enclosure_fit and pcb.antenna_keepout hand the board to KiCad's own
+    tool with no check of what the release reads, and were never run on a KiCad
+    10 board: they skip one. (What slipped through: when the reader's ceiling
+    moved to KiCad 10, both errored on a KiCad 10 board under KiCad 9's tools,
+    where they had skipped: kicad-cli 9.0.9 exits 3 in the STEP export, and
+    pcbnew 9.0.9's refill raises an AttributeError, measured.) No tool runs here:
+    each skip comes before the board is staged."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-pcb-tool10-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def test_the_ceiling_is_the_kicad_9_baselines_format(self):
+        self.assertEqual(K.TOOL_RUN_VERSION, K.header_version(BOARD))
+        self.assertEqual(K.tool_ceiling(K.TOOL_RUN_VERSION), "")
+        self.assertEqual(K.tool_ceiling(None), "")
+        self.assertEqual(K.tool_ceiling(K.header_version(K10_BOARD)), TOOL_WORDS)
+        self.assertEqual(K.reader_ceiling(K.header_version(K10_BOARD)), "",
+                         "the reader itself still reads a KiCad 10 board")
+
+    def test_the_fit_skips_a_kicad_10_board(self):
+        fn = _registry().get("pcb.enclosure_fit")[1]
+        v = fn(_fit_ctx(self.root, dict(_baseline(), pcb_board=K10_BOARD)))
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertIn(TOOL_WORDS, v.skip_reason)
+        self.assertLessEqual(len(v.skip_reason), 200, v.skip_reason)
+
+    def test_the_keepout_skips_a_kicad_10_board(self):
+        board = _radio_copy(self.root, lambda t: K.child(t, "version").__setitem__(1, "20260206"))
+        v = _keepout_gate()[1](_keepout_ctx(self.root, _radio_record(board)))
+        self.assertTrue(v.skipped, v)
+        self.assertIn(TOOL_WORDS, v.skip_reason)
+
+    def test_a_file_newer_than_the_reader_keeps_the_readers_words(self):
+        board = _radio_copy(self.root, lambda t: K.child(t, "version").__setitem__(1, "20991231"))
+        v = _keepout_gate()[1](_keepout_ctx(self.root, _radio_record(board)))
+        self.assertIn("this reader was checked through board format 20260206 (KiCad 10.0)",
+                      v.skip_reason)
+        self.assertNotIn("this gate", v.skip_reason)
+
+
+class ALineKeepsItsReleaseAndLibraries(_StandIn):
+    """A KiCad gate's line keeps the count, the libraries the stage could not take
+    and the release within the spine's 500 characters, and cuts the findings'
+    own words first. (What slipped through: pcb.erc cut its quoted findings to
+    200 characters and put the libraries and the release after them; on a
+    report of five kinds the spine's cap cut both off, and a design whose
+    library checkout was empty read no library and no release.)"""
+
+    #: Seven symbol libraries in a checkout that is not there.
+    LIBRARIES = [f"Lib{n}=${{KIPRJMOD}}/kicad-library/Symbols/Library_number_{n}.kicad_sym"
+                 for n in range(7)]
+
+    def setUp(self):
+        super().setUp()
+        for table, head in (("sym-lib-table", "sym_lib_table"), ("fp-lib-table", "fp_lib_table")):
+            rows = self.LIBRARIES if table == "sym-lib-table" else [
+                r.replace("Symbols", "Footprints").replace(".kicad_sym", ".pretty")
+                for r in self.LIBRARIES]
+            with open(os.path.join(self.root, table), "w", encoding="utf-8") as fh:
+                fh.write(f"({head}\n\t(version 7)\n" + "".join(
+                    f'\t(lib (name "{n}")(type "KiCad")(uri "{u}")(options "")(descr ""))\n'
+                    for n, u in (r.split("=", 1) for r in rows)) + ")\n")
+
+    @staticmethod
+    def findings() -> list:
+        """237 findings of seven kinds, each item in the words KiCad writes."""
+        rows = [("power_pin_not_driven", "error", 61), ("pin_not_connected", "error", 52),
+                ("pin_not_driven", "error", 40), ("lib_symbol_issues", "warning", 38),
+                ("footprint_link_issues", "warning", 25), ("label_dangling", "warning", 12),
+                ("lib_symbol_mismatch", "warning", 9)]
+        return [dict(_item(kind, severity), items=[
+            {"description": f"Symbol IC{400 + n} Pin {n % 40 + 1} [VDD_SENSOR_SUPPLY, Power "
+                            f"input, Line]", "uuid": "x"},
+            {"description": f"Symbol U{n} [Regulator_Linear_LDO_Low_Noise]", "uuid": "y"}])
+            for kind, severity, count in rows for n in range(count)]
+
+    def check(self, verdict, table: str):
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertLessEqual(len(verdict.detail), 500)
+        self.assertIn(f"; not staged with the board: {table} Lib0 (${{KIPRJMOD}}/kicad-library/",
+                      verdict.detail)
+        self.assertIn("61x power_pin_not_driven (error)", verdict.detail)
+        self.assertIn("...", verdict.detail, "a cut part is marked")
+
+    def test_erc(self):
+        report = {"kicad_version": "9.0.9", "sheets": [{"path": "/", "violations":
+                                                         self.findings()}]}
+        _report_cli(self.bin, report, 5)
+        verdict = self.gate("pcb.erc")
+        self.check(verdict, "sym-lib-table")
+        self.assertIn("and 12 more; kicad-cli 9.0.9", verdict.detail)
+        self.assertTrue(verdict.detail.endswith("; kicad-cli 9.0.9"), verdict.detail)
+
+    def test_drc_with_a_release_it_has_no_record_of(self):
+        _report_cli(self.bin, _drc_report(self.findings(), version="10.0.9"), 5)
+        verdict = self.gate("pcb.drc")
+        self.check(verdict, "fp-lib-table")
+        self.assertTrue(verdict.detail.endswith(
+            "; kicad-cli 10.0.9 (no record of it in this pack: measured 9.0.9, 10.0.8)"),
+            verdict.detail)
+
+    def test_parity_and_unconnected(self):
+        long = [dict(_item("net_conflict", uuid="x"), description=(
+            f"Pad {n} of IC{n} is on net /power_tree/sensor_rail/VDD_SENSOR_SUPPLY_{n} but "
+            f"the schematic names /power_tree/sensor_rail/filters/VDD_SENSOR_SUPPLY_"
+            f"FILTERED_AFTER_THE_FERRITE_{n}")) for n in range(9)]
+        _report_cli(self.bin, _drc_report(parity=long), 5)
+        verdict = self.gate("pcb.parity")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 9), verdict.render())
+        self.assertTrue(verdict.detail.endswith("; kicad-cli 9.0.9"), verdict.detail)
+        report = _drc_report()
+        report["unconnected_items"] = [
+            dict(_item("unconnected_items", "error"), items=[
+                {"description": f"Track [/sheet_{n}/net_{n}] on F.Cu", "uuid": "x"}],
+                excluded=True, comment="a test point reached by a probe, never by copper")
+            for n in range(40)] + [
+            dict(_item("unconnected_items", "error"), items=[
+                {"description": f"Pad 1 [/power_tree/sensor_rail/filters/after_the_ferrite/"
+                                f"VDD_SENSOR_{n}] of U{n}", "uuid": "x"}]) for n in range(6)]
+        _report_cli(self.bin, report, 5)
+        verdict = self.gate("pcb.unconnected")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 6), verdict.render())
+        self.assertTrue(verdict.detail.endswith("; kicad-cli 9.0.9"), verdict.detail)
+
+    def test_the_cut(self):
+        line = _registry().get("pcb.erc")[1].__globals__["_line"]
+        self.assertEqual(line("a", ("b", 1, " (", ")"), ("", 2, "; x: ", ""), "; c"),
+                         "a (b); c", "under the room nothing is cut; an empty part is left out")
+        long = line("H", ("1" * 300, 1, "(", ")"), ("2" * 300, 2), "; end")
+        self.assertEqual(len(long), 500)
+        self.assertTrue(long.endswith("2" * 300 + "; end"), "the lower n is cut first")
+        self.assertTrue(long.startswith("H(" + "1" * 150) and "...)" in long)
+        least = line("H", ("1" * 600, 1), ("2" * 600, 2), "; end")
+        self.assertEqual(least, "H" + "1" * 40 + "..." + "2" * (500 - 1 - 43 - 8) + "...; end")
+
+
+class InstallingNamesPcbnewForAKiCad10Board(unittest.TestCase):
+    """installing.md's pcbnew section says a KiCad 10 board needs pcbnew 10, how
+    to get it, and that the keep-out skips a KiCad 10 board for now. (What
+    slipped through: it checked for pcbnew 9.0.x and named KiCad 9's path
+    alone, and a person who followed the new KiCad 10 route kept pcbnew 9.)"""
+
+    def test_the_pcbnew_section(self):
+        with open(os.path.join(PACK, "references", "installing.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        section = text.split("## pcbnew", 1)[1].split("\n## ", 1)[0]
+        for said in ("`10.0.x`", "a KiCad 10 board needs pcbnew 10",
+                     "ppa:kicad/kicad-10.0-releases", "KiCad\\10.0\\bin",
+                     "imports pcbnew 10.0.8", "20241229 (KiCad 9.0)"):
+            with self.subTest(said=said):
+                self.assertIn(said, " ".join(section.split()))
 
 
 if __name__ == "__main__":
