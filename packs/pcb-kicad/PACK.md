@@ -6,15 +6,18 @@ the library's pin names against the board's nets, trace heating per IPC-2221, a
 fab's published limits, a measurement ngspice makes on the project's circuit
 deck, the populated boards' fit in their enclosure, each footprint's land against
 its vendor's drawing, four rules for a board that charges or carries a cell, the
-wrong ways its connectors can meet, and each USB-C receptacle's termination.
+wrong ways its connectors can meet, each USB-C receptacle's termination, and the
+tracks, vias, pads and pours in each radio module's antenna keep-out.
 
 **Before you trust a Checked claim from this pack,** know what it is: a board that
 breaks none of KiCad's rules, with every connection made, no part shorting two of
 its own nets, no named track running hotter than you allowed, drawn from a
 schematic that breaks none of KiCad's electrical rules and that it matches, inside
-the fab's limits, with a simulated value inside its band and every part clear of
-the enclosure. It is not a
-circuit that works. Nothing here has seen the board powered.
+the fab's limits, with a simulated value inside its band, every part clear of
+the enclosure, and no track, via, other part's pad or pour in an antenna's
+keep-out (a copper drawing or text there is not judged). It is not a
+circuit that works. Nothing here has seen the board powered, and nothing here
+has heard its radio.
 
 ## What this pack settles
 
@@ -37,17 +40,20 @@ circuit that works. Nothing here has seen the board powered.
 | `pcb.discharge_cutoff` | 0 | sourced | the highest per-cell cutoff that senses the cell (directly, through a named chain, or across a mating) and opens a switch in its path, or sits in the pack, is at or above the cell's minimum voltage |
 | `pcb.mismate` | 0 | model-only | no wrong way a mating's record states (a reversed plug, a narrower cable, an offset header, a rotated header, the other FFC type, a plug slid in, a plug that bridges contacts), nor its own map, joins a source to its return or to another source; a reversed cell is blocked or limited; every connector that carries a source is named by a mating |
 | `pcb.usbc_receptacle` | 0 | sourced | each USB-C receptacle's CC pins are terminated apart, as its role asks (one Rd or Rp each, in the Type-C specification's band, or a named controller), a source switches VBUS through a part with a control pin, each USB 2.0 data pin is on a net with D+ apart from D-, and, where `pcb.pin_names` cannot see them, the VBUS, GND, A6/B6 and A7/B7 pins are each bussed |
+| `pcb.antenna_keepout` | 1 | sourced | no track, via, other part's pad or zone sits on any copper layer in a radio module's antenna keep-out, as the board is stored and as KiCad's next refill pours it (the module's own footprint area, a vendor drawing registered by its pads, or a rule area the designer drew); a module with no keep-out and no record skips by name |
 
 The tier-0 gates read the board with this pack's own reader (`gates/_kicad.py`,
 standard library only), so they run without KiCad, CI included. The tier-1 gates
 run `kicad-cli` on a copy of the board or schematic (every sheet, the project file
 and the library tables with it) under the gate's out directory: the verdict
 is KiCad's exit code and its report's count, and if the two disagree the gate
-errors. `pcb.spice` runs `ngspice -b` the same way, and `pcb.enclosure_fit` runs
+errors. `pcb.spice` runs `ngspice -b` the same way, `pcb.enclosure_fit` runs
 `kicad-cli pcb export step` and then OpenCascade (through CadQuery) in a child
-process. They read inside subprocesses the trace cannot see into, so they are
-**opaque**: they re-run on every check where their tools exist (about a second
-each on a small board; the fit about 4 s) and skip where they do not.
+process, and `pcb.antenna_keepout` refills the board's zones with KiCad's own
+`pcbnew` in a child process before its two DRC runs. They read inside
+subprocesses the trace cannot see into, so they are **opaque**: they re-run on every check where their tools exist (about a second
+each on a small board; the fit about 4 s, the keep-out about 2 s a board) and
+skip where they do not.
 
 `pcb.pin_names`, `pcb.net_width` and `pcb.land_pattern` need `pcb.board_readable`:
 on a board this reader cannot vouch for they are not run, and read Skipped,
@@ -74,6 +80,10 @@ tables). Each has a known-bad control it fails on: `split_pin_pair`,
 2.5 V), `ground_beside_vbus` (GND moved beside VBUS on both FFC housings: 1
 hazard against 0) and `shared_cc` (one CC net for both pins: 1 violation against
 0). Each control makes one change, and moves only its own rule.
+`pcb.antenna_keepout`'s findings are KiCad's (its DRC and its zone filler); this
+pack's code picks which of a footprint's rule areas is the antenna's and
+registers a vendor drawing on its pads. Its control is `pour_under_antenna` (1
+item against 0).
 
 **The battery rules read records, bound to the design.** `pcb_batteries`,
 `pcb_protectors`, `pcb_conductors` and `pcb_matings` are each an object keyed by
@@ -104,6 +114,41 @@ netted, not routed), which only these six rules read, and its schematic
 `power_board.kicad_sch` sits beside it (`make_power_schematic.py`), where
 `pcb.charge_temperature` reads the NTC's symbol. `references/battery.md`,
 `references/mismate.md` and `references/usb-c.md` hold every field.
+
+**The antenna's keep-out, on every copper layer.** `pcb.antenna_keepout` finds
+each radio module by itself: every footprint from KiCad's `RF_Module` library on
+`pcb_board`, or on a board a `pcb_antennas` record names (57 modules in KiCad
+9.0.9: BLE, Wi-Fi, sub-GHz, LoRa and UWB). Its keep-out is the footprint's own
+rule area, the one that forbids tracks and copper pour. KiCad's own DRC holds that
+area only on the layers the footprint names, and 10 of the 31 stock modules that
+carry one name fewer than every copper layer: the ESP32-S3-WROOM-1 and
+ESP32-WROOM-32 areas cover F.Cu, In1.Cu and B.Cu, so a ground pour on In2.Cu runs under the
+antenna with `pcb.drc` clean. This gate copies the area to every copper layer,
+forbids tracks, vias, pads and pours in it, and runs KiCad's DRC twice: on the board as
+stored, and after KiCad's own zone refill. kicad-cli judges a pour by its stored
+fill, so a pour moved under the antenna and not refilled reads clean until the
+next refill puts the copper there. The module's own pads are its own copper and
+are listed, not counted. So is another part's hole with no copper (a mounting
+hole no wider than its drill, as KiCad's pcbnew reads its pad): KiCad's keep-out
+reports it, and a screw in it is `lenses.md`'s. A hole with a copper ring counts.
+An area's cutouts stay cutouts: the added area carries the outline and each
+cutout, as KiCad saved them, so a feed track cut out of a chip antenna's
+clearance is not a finding. A project that sets `items_not_allowed` to ignore,
+or excludes a finding, does not hide one: the staged copy sets it back.
+
+A record (`{id: {board?, ref, value, keepout, source}}`, held to the board's ref
+and value) brings in what the library does not: a module from a project's own
+library (`"keepout": "footprint"`), a vendor drawing registered on the footprint
+by three or more numbered pads (`{"drawing": path}`), a rule area the designer
+drew and named, such as a chip antenna's clearance on a bare SoC (`{"rule_area":
+name}`), or a module whose antenna is off the board (`"none"`, listed, not
+judged). A found module with no keep-out in its footprint, and no record, skips
+by name, never passes: 26 of the 57 stock modules carry none (the LoRa modules
+among them, whose antenna is on a pad or a connector), and three carry only an
+area that allows tracks or copper pour. The baseline's record names
+`selftest/assets/radio_board.kicad_pcb` (made by `make_radio_board.py`), which
+only this gate reads. `references/antenna-keepout.md` holds every field, the
+survey and the measurements.
 
 ## The proposer: `pcb.autoroute`
 
@@ -212,6 +257,23 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   why: what lies beyond it is not read.
 - **RF, signal integrity, EMC.** Antenna detuning, impedance, crosstalk, return
   paths: not modelled.
+- **The antenna beyond the copper on its board.** `pcb.antenna_keepout` judges
+  tracks, vias, other parts' pads and zone fills in the keep-out, and nothing
+  else. Metal near the antenna once the board is in its case (a battery, a
+  screw, a frame, a display's shield) and a hand around it detune it as surely
+  as copper under it: that is `lenses.md`, "Metal and a hand around the
+  antenna", and a physical claim, a range test in the hand with the case closed
+  and the final battery fitted. Not judged either: whether the antenna sits at
+  the board edge as the vendor asks, the size of the ground plane a chip antenna
+  needs, a part body over the antenna with no copper in the area, copper text or
+  a drawing on a copper layer (KiCad's keep-out does not report graphics:
+  measured with kicad-cli 9.0.9; the pass says so), and what goes in a hole with
+  no copper in the keep-out (listed, not counted). A module from a project's own
+  library is found only by a record. A footprint whose one copper keep-out
+  guards something other than its antenna is read as the antenna's: give a
+  record. And a chip antenna's feed must reach it: draw the rule area around the
+  feed, or cut the feed out of it, as the vendor's drawing does, or the feed
+  track is a finding.
 - **Fit beyond the solids.** `pcb.enclosure_fit` checks the parts' 3D models
   against the enclosure's solid, and against the other boards in it, at one
   placement. A model drawn wrong, a cable's bend radius, a plug's mating
@@ -248,8 +310,9 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   nets by name and no net codes. The reader reads nets by name, but it was
   checked against KiCad 9 boards only: this pack was written where only KiCad
   9.0.9 was installed, and no board saved by KiCad 10 is committed as a fixture.
-  Until one is, a KiCad 10 board reads Skipped on the tier-0 gates and the power
-  rules ("this reader was checked through board format 20241229 (KiCad 9.0)"),
+  Until one is, a KiCad 10 board reads Skipped on the tier-0 gates, the power
+  rules and `pcb.antenna_keepout` ("this reader was checked through board format
+  20241229 (KiCad 9.0)"),
   never Checked and never Failing. `pcb.fab_rules` skips it for the same reason:
   its service guard reads the stackup and vias with this reader, and so does
   `pcb.enclosure_fit`, which reads each part's model and courtyard with it. The
@@ -323,6 +386,7 @@ what it asserts.
 | `deep-discharge` | `pcb.discharge_cutoff` |
 | `mismate`, `connector-keying` | `pcb.mismate` |
 | `usb-c`, `charging-interface` | `pcb.usbc_receptacle` |
+| `antenna-keepout`, `rf-layout` | `pcb.antenna_keepout` |
 | `schematic`, `electrical-rules` | `pcb.erc` |
 | `schematic-parity` | `pcb.parity` |
 | `pin-map`, `short-circuit` | `pcb.pin_names` |
@@ -360,7 +424,10 @@ three protection margins), and volts (`pcb.discharge_cutoff`, the highest
 counted cutoff against the cell's minimum). `pcb.mismate` counts hazards, each
 pair of source nodes once however many wrong ways make it, and
 `pcb.usbc_receptacle` counts violations, each against 0; resistances are in
-ohms, written as a board writes them (5.1k).
+ohms, written as a board writes them (5.1k). `pcb.antenna_keepout` counts the
+items KiCad finds in a keep-out against 0, each once over the stored and the
+refilled copy, in the board's own frame (a footprint's rule area is saved there;
+a drawing is carried there by its pads).
 
 **`pcb.enclosure_fit` judges the populated boards in the enclosure's frame.** A
 board is first as `kicad-cli pcb export step --user-origin 0x0mm` writes it: the
@@ -417,7 +484,13 @@ stated height. `references/enclosure-fit.md` has each in full.
                         "modes": [], "source": "Type-C: both orientations are correct"}},
 "pcb_usbc": {"usb": {"ref": "J1", "value": "USB-C", "role": "sink", "usb2": true,
                      "reads_rp": false, "cc_resistor_tol_pct": 1,
-                     "source": "5.1k 1 % on each CC pin; draws default power only"}}
+                     "source": "5.1k 1 % on each CC pin; draws default power only"}},
+"pcb_antennas": {"lora": {"ref": "U4", "value": "RADIO_MODULE",
+                          "keepout": {"drawing": "hardware/lands/radio_module.json"},
+                          "source": "the module's integration guide, its revision and figure"},
+                 "chip": {"ref": "AE1", "value": "CHIP_ANTENNA",
+                          "keepout": {"rule_area": "AE1 clearance"},
+                          "source": "the antenna's datasheet, its layout figure"}}
 ```
 
 `selftest/baseline.json`'s `_notes` give every key's fields, and its records
@@ -478,8 +551,10 @@ back under 1 C or over 100 C, look at the units first.
   coverage rule, a reversed cell, and what the rule cannot see.
 - `references/usb-c.md`: the roles, the Rd and Rp bands with their tables, and
   what the EU's common-charger rule covers.
+- `references/antenna-keepout.md`: which parts are found, which rule area is the
+  antenna's, the records and drawings, the refill, and the stock library survey.
 - `references/what-slipped-through.md`: the defects the source pipeline's checks
   passed, and which gate here answers each.
 - `references/installing.md`: getting `kicad-cli` (KiCad 9), ngspice, CadQuery,
-  and the proposer's Java and Freerouting.
+  `pcbnew` for the keep-out's refill, and the proposer's Java and Freerouting.
 - `lenses.md`: how to attack a board before anyone orders it.

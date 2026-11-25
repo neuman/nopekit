@@ -2409,9 +2409,9 @@ SLOW_WALK = {
 class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     """(C12, R-4's detector for the mutation clause) The restated aimed walk
     over every bundled pack gate on its own baseline: no conclusive mutation
-    passes an honest bundled gate. The integrated registry has 100 gates.
-    The measured split for 98 of them is 54 conclusive, 11 walked with none,
-    33 with no boundary. The two ccx gates have no measured classification yet;
+    passes an honest bundled gate. The integrated registry has 101 gates.
+    The measured split for 99 of them is 54 conclusive, 11 walked with none,
+    34 with no boundary. The two ccx gates have no measured classification yet;
     they are walked whenever ccx is present and held to the same no-pass rule.
     The total always includes them, available or not.
 
@@ -2470,6 +2470,10 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     That limit is now the claim's, so the baseline's enclosure was redrawn
     with the board 4 mm up: the placement's z lands at x1.5, and the aimed run
     (z 5.52) fails at 0.845 mm against 1.0. The split does not move.
+    pcb.antenna_keepout (general-packs P8) adds one with no boundary, measured
+    alone on 2026-11-24: it counts the items KiCad finds in an antenna's
+    keep-out against 0, and its baseline sits on that limit; its record's
+    leaves are strings (a board, a ref, a value, the keep-out's form).
     Full suite only (~12 s without pcb-kicad's and the OpenFOAM packs' tools,
     about 7.5 min with them before aero-openfoam: their opaque gates re-run
     kicad-cli, ngspice, OpenCascade and OpenFOAM for every rung; cfd-openfoam's
@@ -2498,10 +2502,10 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     def test_no_conclusive_mutation_passes_a_bundled_gate(self):
         kinds = collections.Counter()
         # The branches had each counted only their own additions. Their measured
-        # split covers 98 gates; nobody measured the two ccx walks. They still
+        # split covers 99 gates; nobody measured the two ccx walks. They still
         # run below when available, and a conclusive pass still fails the test.
         # Exclude only their unknown classifications from the pinned split, never
-        # from the walk, its no-pass assertion or the 100-gate inventory.
+        # from the walk, its no-pass assertion or the 101-gate inventory.
         unmeasured = {"simp.displacement", "simp.stress"}
         unmeasured_kinds = collections.Counter()
         unavailable_known = 0
@@ -2559,10 +2563,10 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
                                  (SLOW_WALK[gid].walked, SLOW_WALK[gid].not_walked))
         print(f"\nbundled walk: {len(registered)} registered; "
               f"{dict(kinds)}; {unavailable} unavailable", file=sys.stderr, flush=True)
-        self.assertEqual(sum(kinds.values()) + unavailable, 100, kinds)
+        self.assertEqual(sum(kinds.values()) + unavailable, 101, kinds)
         if not unavailable_known:
             self.assertEqual(dict(kinds - unmeasured_kinds),
-                             {"conclusive": 54, "none-conclusive": 11, "no-boundary": 33})
+                             {"conclusive": 54, "none-conclusive": 11, "no-boundary": 34})
 
     def test_the_planted_drifted_limit_is_one_hit(self):
         spec = GateSpec(id="beam.drifted", claims=["x"], tier=Tier.INSTANT,

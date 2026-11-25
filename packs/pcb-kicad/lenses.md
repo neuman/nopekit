@@ -107,6 +107,31 @@ take to close it. A green DRC answers none of them.
   `pcb.discharge_cutoff` follows the one the record names; a second protector
   nobody recorded is in no rule.
 
+## Metal and a hand around the antenna
+
+- What sits near the antenna once the board is in its case: a battery, a screw,
+  a metal frame, a display's shield, a coin cell? `pcb.antenna_keepout` judges
+  copper on the board, and nothing past it. Metal beside the antenna detunes it as
+  surely as copper under it. Read the clearance the module's integration guide
+  asks for, and measure it in the assembly.
+- Where does the hand go, held or worn as the product is used? A palm over the
+  antenna costs range that no board file shows.
+- Settle both with a physical claim: a range test in the hand, the case closed,
+  the final battery fitted, at the distance the requirement states, recorded with
+  `nopekit claim physical`. A pass on the bench with the board bare says nothing
+  about either.
+- Is the antenna where the vendor asks: at the board edge, or past it, with the
+  board cut away beside and under it? The gate judges what lies in the keep-out,
+  not where the keep-out sits.
+- Is there a part body over the antenna (a connector's housing, a shield can), or
+  copper text or a logo on a copper layer in the keep-out? The gate allows a
+  part with no copper in the area, and KiCad's keep-out does not report text or
+  drawings on copper. Look at each layer.
+- Is there a screw or a metal standoff in a hole under the antenna? The gate
+  lists a hole with no copper in the keep-out ("holes with no copper in a
+  keep-out, not counted") and does not count it: the hole is not copper, and
+  what goes in it is metal near the antenna. Use nylon there, or move the hole.
+
 ## Before the money is spent
 
 - Is `pcb_fab` the fab you will order from, and was its file read recently? A
