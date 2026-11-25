@@ -122,7 +122,11 @@ Three methods, in increasing cost and confidence:
    keeping that ordinary corner exempt. The gate instead groups faces into smooth
    surfaces (joined across edges under 30°) and uses their edge adjacency to
    separate corners from nonadjacent tapered flanks, and it does not cast from a
-   sliver face, whose normal is not known.
+   sliver face, whose normal is not known. Where two surfaces share no edge, it
+   asks a question of the sphere method at one point only, the middle of the ray:
+   the ray is a wall when the two surfaces it joins are the nearest ones there. A
+   third surface nearer (the land under a chamfered edge) means the ray ran past
+   the part's edge, and the face it hit passing close means it ran along that face.
 3. **A medial-axis transform.** The real answer, and the expensive one. Reach for it
    when the thin region is load-bearing and the design has stopped moving.
 

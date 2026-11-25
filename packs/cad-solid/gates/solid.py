@@ -1062,23 +1062,26 @@ def _castable(mesh: Any) -> Any:
     return altitude >= MIN_CAST_ALTITUDE_MM
 
 
-def _wall_hits(mesh: Any, start: Any, hit: Any) -> Any:
+def _wall_hits(mesh: Any, start: Any, hit: Any, surface: Any = None) -> Any:
     """Keep walls; exclude rays across an acute edge between two adjacent surfaces.
 
     A surface is a smooth patch (``SMOOTH_PATCH_DEG`` says what slipped through
     while it was a coplanar group). A hit between two surfaces that share an edge
     is excluded unless they are nearly opposed (``OPPOSED_DEG``): that ray crossed
-    the corner. A hit between surfaces that share no edge counts at every angle,
-    and so does a hit on the start's own surface: a smooth surface that faces
+    the corner. A hit between surfaces that share no edge is judged by
+    ``_edge_rays`` (a ray past a land or along a face is an edge), and a hit on the
+    start's own surface counts: a smooth surface that faces
     itself across material (a rounded rim, a rounded rib) is a section through the
     material, never a corner. Using individual triangle neighbours would miss the
     same corner after subdivision. Rejected as a replacement measure: trimesh's
     shrinking sphere, which reads 0.244 mm at the harmless acute corner of the
     subdivided 10 mm prism. It measures local reach, including that corner.
+    ``surface`` is ``_smooth_patches(mesh)`` when the caller has it already.
     """
     import numpy as np
 
-    surface = _smooth_patches(mesh)
+    if surface is None:
+        surface = _smooth_patches(mesh)
     joined = np.sort(surface[mesh.face_adjacency], axis=1)
     adjacent = {tuple(pair) for pair in joined if pair[0] != pair[1]}
     pairs = np.sort(np.column_stack((surface[start], surface[hit])), axis=1)
@@ -1086,6 +1089,274 @@ def _wall_hits(mesh: Any, start: Any, hit: Any) -> Any:
     normals = np.asarray(mesh.face_normals)
     opposed = (normals[start] * normals[hit]).sum(axis=1) <= -OPPOSED_COS
     return opposed | ~across_edge
+
+
+#: A ray that runs ALONG the surface it hits measures how far it leans, not a
+#: wall. It does when that surface passes nearer the ray's midpoint than
+#: ``sin(GRAZE_DEG)`` times half the reading. When the faces a ray joins are ``a``
+#: from opposed, the midpoint is ``cos(a)`` times half the reading from the plane
+#: of the face it hit, so where that face runs the length of the ray this is
+#: "within 30 deg of grazing" (``a`` over 60 deg). Judged only where
+#: ``_edge_rays`` judges: a hit that is not nearly opposed, on a surface that
+#: shares no edge with the start's.
+#:
+#: What slipped through without it: on a published housing, a top face tilted 4
+#: deg met a vertical face under a web. The ray from a face 0.05 mm from that
+#: vertical face went down beside it, 0.017-0.05 mm away, and hit it 3.7 deg from
+#: grazing: 0.731 mm, where the wall it ran beside goes on down past 1.6 mm. The
+#: third-surface rule keeps it: the nearest surface to its midpoint, 0.034 mm away,
+#: is the one it hit. Half its reading times ``sin(30 deg)`` is 0.183 mm.
+#:
+#: 30 deg is the angle ``OPPOSED_DEG`` and ``SMOOTH_PATCH_DEG`` already use. Every
+#: wall measured on the held-out designs meets its hit face 45 deg or more from
+#: grazing (a 45 deg chamfer against a flat, a groove's flank, a slot's side), and a
+#: rib drafted 16-20 deg per side meets it at 50-58 deg. *Rejected:* the angle at
+#: the hit alone. A ray from a published case bottom's rounded corner left through
+#: the ceiling just past an inside corner, 22 deg from grazing, and read 1.479 mm
+#: across the corner: a real section. That ceiling starts at the corner, 0.73 mm
+#: from the ray's midpoint. With the angle alone, 2113 rays of that part went
+#: uncounted, all 1.48 mm and more; with the distance, 761. Also rejected: a floor
+#: on the midpoint's distance to every surface (a 45 deg wedge gives 0.707 of half
+#: the reading by itself, so that floor is a second angle in disguise); applying it
+#: to a hit on the start's own smooth surface (a rounded rim meets itself at any
+#: angle, and no measured case needs it). The cost: two nonadjacent surfaces more
+#: than 60 deg from opposed (a ridge drafted over 30 deg per side) are not read
+#: across where one of them runs the length of the ray.
+GRAZE_DEG = 30.0
+GRAZE_SIN = math.sin(math.radians(GRAZE_DEG))
+
+#: Two distances that are one point's. A concave edge between the surface a ray hit
+#: and the next one belongs to both, and its distance from the ray's midpoint comes
+#: out of two triangles' arithmetic: a groove's flank and its other flank tie at
+#: the groove's root, and so does a slot's side and its roof. A tie is a wall
+#: (``_edge_rays``), so a third surface counts only when it is nearer by more than
+#: this fraction. 1e-9 is six orders above the float64 round-off on one point
+#: (about 1e-15 relative) and far below any distance a mesh resolves.
+_EDGE_TIE_REL = 1e-9
+
+
+def _edge_rays(mesh: Any, surface: Any, start: Any, hit: Any, length: Any,
+               points: Any = None) -> Any:
+    """Rays that ran past a part's edge or along a face, not across a wall.
+
+    ``start`` and ``hit`` are the face of each ray, ``length`` its reading in mm,
+    ``points`` the point on ``start`` it left from (the face's centre when not
+    given: a ray from a box's points leaves from elsewhere on its face), and
+    ``surface`` is ``_smooth_patches(mesh)``. Only a hit that ``_wall_hits``
+    keeps on another, nonadjacent surface and that is not nearly opposed is judged:
+    two surfaces that face each other are a wall wherever a ray joins them, even
+    beside an edge (a plate is that thick up to its edge), and a smooth surface that
+    faces itself is a section through the material.
+
+    Such a ray is an edge when a THIRD surface is nearer the ray's midpoint than the
+    two surfaces it joins, or when the surface it hit runs along it
+    (``GRAZE_DEG``). Through a wall, the surfaces nearest the middle of a section
+    are the two it joins (the medial sheet runs between them). Beside a part's
+    edge, the nearest one is the land or the face the ray ran past.
+
+    What slipped through before (round 2 of the held-out designs): the acute-edge
+    rule asks only whether two surfaces share an edge, and a narrow land between
+    them breaks that. A published bottom plate, 1.35-1.4 mm thick, ends in a 0.6 mm
+    vertical land under a 45 deg chamfer. A ray from a strip of the flat underside,
+    0.005 mm in from the land, ran up beside it and hit the chamfer (normals 135 deg
+    apart): the part read 0.605 mm. At that ray's midpoint the land is 0.0047 mm
+    away and the two faces it joins 0.298 mm. A housing's 1.0 mm wall read 0.699 mm
+    the same way: a ray from its outer face, 0.2 mm above a 0.5 mm wide bottom land,
+    hit the inner 45 deg chamfer above the land (the land 0.200 mm from the
+    midpoint, the faces 0.247 mm). With this rule the plate reads 0.905 mm (a ray
+    from the chamfer to the underside), and the housing, outside the box over its
+    web (``BOX_SPACING_OF_MIN``), 0.718 mm: a real section, a sloped face against
+    the corner of a slot below it.
+
+    What it keeps, measured on the same designs: a printed top's lip, a 0.71 mm
+    overhang 0.75 mm thick whose tip is a 0.25 mm land under a 45 deg chamfer,
+    reads 0.487 mm: the ray from the middle of its underside has the chamfer
+    0.172 mm from its midpoint and the land 0.237 mm, so it is a wall, and it still
+    fails a 1.2 mm minimum. A V-groove on the inside of a wall (0.475 mm at its
+    root) reads 0.542 mm: the nearest point is the root, which is a point of the
+    flank the ray hit and of the other flank, a tie, so a wall.
+
+    *Rejected:* an angle limit on every hit (``OPPOSED_DEG`` widened to 45 deg or
+    more): the lip's real 0.487 mm and the plate's false 0.605 mm are the same
+    135 deg pair, and the drafted rib's flanks are 140-148 deg apart; the start
+    face's area (the false readings came from faces of 0.0008 to 0.06 mm^2, the
+    lip's from 6 mm^2, and a fine mesh puts small faces on a real wall); the start's
+    distance to its surface's edge as a fraction of the reading (it separates the
+    measured cases only between 0.29 and 0.49: a tuned number); excluding every hit
+    two surfaces apart, as the acute-edge rule excludes one apart (a flat-topped
+    rib is flank, top, flank: the same topology as underside, land, chamfer); the
+    midpoint's distance to every surface as a fraction of half the reading (a
+    45 deg wedge gives 0.707 by itself, so the fraction must sit between 0.57,
+    the plate's false band at 0.84 mm, and 0.69, the groove: tuned). The cost: a
+    chamfered edge over a land reads as an edge out to about 1.55 times the land's
+    height (0.93 mm on the 0.6 mm land), so a minimum above that is judged on the
+    rays further in. A drafted rib loses the rays near its top, where the top is
+    nearer their midpoints than its flanks; its middle still reads.
+    """
+    import numpy as np
+    from trimesh.triangles import closest_point
+
+    start = np.asarray(start, dtype=int)
+    hit = np.asarray(hit, dtype=int)
+    length = np.asarray(length, dtype=float)
+    normals = np.asarray(mesh.face_normals, dtype=float)
+    judged = ((surface[start] != surface[hit])
+              & ((normals[start] * normals[hit]).sum(axis=1) > -OPPOSED_COS))
+    edge = np.zeros(len(start), dtype=bool)
+    rows = np.nonzero(judged)[0]
+    if len(rows) == 0:
+        return edge
+    tri = np.asarray(mesh.triangles, dtype=float)
+    lo, hi = tri.min(axis=1), tri.max(axis=1)
+    if points is None:
+        points = np.asarray(mesh.triangles_center, dtype=float)[start]
+    points = np.asarray(points, dtype=float)
+    half = length[rows] / 2.0
+    middle = points[rows] - normals[start[rows]] * half[:, None]
+    own_s, own_h = surface[start[rows]], surface[hit[rows]]
+    near_s = np.full(len(rows), np.inf)
+    near_h = np.full(len(rows), np.inf)
+    third = np.full(len(rows), np.inf)
+    # The start face is `half` from the midpoint (the ray leaves it along its
+    # normal), so nothing farther than `half` can be the nearest surface: a box
+    # test against each face's bounds keeps the exact distances to the few faces
+    # that can be. The margin is round-off on that one distance.
+    reach = half * (1.0 + 1e-9) + 1e-12
+    chunk = max(1, int(_CAST_CHUNK_RT // max(1, len(tri))))
+    for begin in range(0, len(rows), chunk):
+        m = middle[begin:begin + chunk]
+        gap = np.zeros((len(m), len(tri)))
+        for axis in range(3):
+            out = np.maximum(lo[None, :, axis] - m[:, None, axis],
+                             m[:, None, axis] - hi[None, :, axis])
+            gap += np.maximum(out, 0.0) ** 2
+        ray, face = np.nonzero(gap <= (reach[begin:begin + chunk] ** 2)[:, None])
+        at = begin + ray
+        dist = np.linalg.norm(closest_point(tri[face], middle[at]) - middle[at], axis=1)
+        on_s = surface[face] == own_s[at]
+        on_h = surface[face] == own_h[at]
+        np.minimum.at(near_s, at[on_s], dist[on_s])
+        np.minimum.at(near_h, at[on_h], dist[on_h])
+        np.minimum.at(third, at[~on_s & ~on_h], dist[~on_s & ~on_h])
+    along = near_h < half * GRAZE_SIN
+    past = third < np.minimum(near_s, near_h) * (1.0 - _EDGE_TIE_REL)
+    edge[rows] = along | past
+    return edge
+
+
+#: Inside a ``wall_exceptions`` box, rays also leave from points on the surface no
+#: farther apart than this fraction of the box's ``min_mm``, not only from face
+#: centres. What slipped through with face centres alone (round 2 of the held-out
+#: designs): a housing's box held a web 0.4 mm thick, 1.7 mm by 0.9 mm, between a
+#: top face and an underside that each ran on past it. Every face over the web was
+#: a large triangle whose centre lay over 1.0 mm or 1.7 mm of material, so the 27
+#: rays that started in the box read 1.0 mm, and the box reported 1.0 mm over a
+#: 0.4 mm web. A web under its 0.36 mm minimum would have passed.
+#:
+#: Half the minimum: each piece of a face in the box gets a square grid of points
+#: in its own plane, its cells no wider than this, so every point of the surface is
+#: within about 0.36 of the minimum of a ray (half a cell's diagonal). A wall at
+#: the minimum that reaches as far across as about 0.7 of its own thickness holds
+#: one, and a section narrower than its own thickness reads as an edge anyway
+#: (``_edge_rays``).
+#: *Rejected:* more rays from every face of every part (four per face is four
+#: times the cast, 236 s to 944 s on a 53,706-face part on the fallback caster, for
+#: regions nobody named); rays from each face's corners in the box (a web between
+#: two faces' corners still holds none); the box's own size as the spacing (a box
+#: 17.6 mm long would sample the 0.9 mm web at 8.8 mm).
+BOX_SPACING_OF_MIN = 0.5
+
+#: The most rays a part's boxes may add: this, or the part's face count when that is
+#: larger, so the boxes at most double the cast on a large part. A box that needs
+#: more holds more surface than a thin region has, and is refused, named: a box
+#: drawn around most of a part at a small ``min_mm`` lowers the part's minimum
+#: everywhere in it, which is the silencer the boxes exist to replace. 20,000 rays
+#: cover about 800 mm^2 of surface at a 0.4 mm minimum. *Rejected:* sampling a
+#: large box more coarsely and passing (the spacing would then hide the walls the
+#: box is for); no limit (a box at 0.01 mm over a 100 mm part is a billion rays).
+BOX_RAYS_FLOOR = 20_000
+
+
+def _clip_to_box(polygon: list, lo: Any, hi: Any) -> list:
+    """The part of a convex polygon (a list of 3-vectors) inside a box.
+
+    Sutherland-Hodgman against the box's six planes, kept inclusive, so a face
+    that lies on a box's plane stays in it."""
+    for axis in range(3):
+        for bound, below in ((lo[axis], False), (hi[axis], True)):
+            kept = []
+            for i, p in enumerate(polygon):
+                q = polygon[(i + 1) % len(polygon)]
+                p_in = p[axis] <= bound if below else p[axis] >= bound
+                q_in = q[axis] <= bound if below else q[axis] >= bound
+                if p_in:
+                    kept.append(p)
+                if p_in != q_in:
+                    t = (bound - p[axis]) / (q[axis] - p[axis])
+                    kept.append(p + t * (q - p))
+            polygon = kept
+            if len(polygon) < 3:
+                return []
+    return polygon
+
+
+def _box_points(mesh: Any, lo: Any, hi: Any, spacing: float, limit: int):
+    """``(points, faces, count)``: points on the surface inside a box, each with its
+    face, on a grid no coarser than ``spacing`` (``BOX_SPACING_OF_MIN``).
+
+    Each face's piece inside the box gets a square grid in its own plane, laid from
+    the piece's own corner so the same mesh gives the same rays, and every cell
+    centre inside the piece is a point. A piece that holds none (a strip narrower
+    than a cell) gives its middle. A face wholly inside the box and no larger than
+    one cell gives none: its centre is cast already. ``points`` is ``None`` when the
+    count passes ``limit``, counted on the grids' cells before anything is built.
+    *Rejected:* cutting each piece into ``k x k`` triangles (on the 4 x 20 mm faces
+    of a hinge strip, ``k`` follows the long side, and the cut cost five times the
+    rays of a grid for the same spacing)."""
+    import numpy as np
+
+    tri = np.asarray(mesh.triangles, dtype=float)
+    face_normals = np.asarray(mesh.face_normals, dtype=float)
+    touches = np.all((tri.max(axis=1) >= lo) & (tri.min(axis=1) <= hi), axis=1)
+    pieces = []
+    count = 0
+    for face in np.nonzero(touches)[0]:
+        polygon = _clip_to_box([v for v in tri[face]], lo, hi)
+        if len(polygon) < 3:
+            continue
+        polygon = np.asarray(polygon)
+        first = polygon[1] - polygon[0]
+        if np.linalg.norm(first) <= 0.0:
+            continue
+        e1 = first / np.linalg.norm(first)
+        e2 = np.cross(face_normals[face], e1)
+        flat = (polygon - polygon[0]) @ np.column_stack((e1, e2))
+        low, high = flat.min(axis=0), flat.max(axis=0)
+        cells = np.maximum(1, np.ceil((high - low) / spacing).astype(int))
+        whole = bool(np.all(tri[face] >= lo) and np.all(tri[face] <= hi))
+        if whole and cells[0] * cells[1] == 1:
+            continue
+        pieces.append((face, polygon[0], e1, e2, flat, low, high, cells))
+        count += int(cells[0] * cells[1])
+        if count > limit:
+            return None, None, count
+    points, faces = [], []
+    for face, origin, e1, e2, flat, low, high, cells in pieces:
+        gx = low[0] + (np.arange(cells[0]) + 0.5) * (high[0] - low[0]) / cells[0]
+        gy = low[1] + (np.arange(cells[1]) + 0.5) * (high[1] - low[1]) / cells[1]
+        grid = np.stack(np.meshgrid(gx, gy, indexing="ij"), axis=-1).reshape(-1, 2)
+        # Inside a convex piece wound counter-clockwise about its face's normal:
+        # on the left of every side. The clip keeps the face's winding.
+        edge = np.roll(flat, -1, axis=0) - flat
+        rel = grid[:, None, :] - flat[None, :, :]
+        inside = np.all(edge[None, :, 0] * rel[:, :, 1] - edge[None, :, 1] * rel[:, :, 0]
+                        >= 0.0, axis=1)
+        chosen = grid[inside] if inside.any() else flat.mean(axis=0)[None, :]
+        points.append(origin + chosen[:, :1] * e1 + chosen[:, 1:] * e2)
+        faces.append(np.full(len(chosen), face, dtype=int))
+    if not points:
+        return np.zeros((0, 3)), np.zeros(0, dtype=int), 0
+    return np.vstack(points), np.concatenate(faces), count
 
 
 def _is_mm(value: Any) -> bool:
@@ -1309,19 +1580,26 @@ def wall_thickness(ctx: GateContext) -> Verdict:
 
     Method, stated plainly because its limits matter more than its number: from the
     centroid of EVERY facet a ray is cast along the inward normal, and the distance
-    to the first hit is the local thickness. Only a hit between two adjacent
+    to the first hit is the local thickness. A hit between two adjacent
     surfaces across an acute edge is excluded (opposed thin folds still count),
     where a surface is a smooth patch, so a tessellated chamfer is one surface
     (``SMOOTH_PATCH_DEG``). Tapered flanks that do not share an edge count
-    regardless of their angle. A sliver face, whose normal is not known to a
-    degree, is not cast from (``MIN_CAST_ALTITUDE_MM``); the detail counts them.
+    at any angle, unless the ray ran past the part's edge: a third surface (a
+    land) nearer its midpoint than the two it joins, or the face it hit running
+    along it (``_edge_rays``); the detail counts those. A sliver face, whose normal
+    is not known to a degree, is not cast from (``MIN_CAST_ALTITUDE_MM``); the
+    detail counts them.
 
     Each part is judged against its own minimum: its exact name in
     ``process_min_wall_mm_by_part`` first, then a pattern there that matches it,
     then ``process_min_wall_mm``. A part in ``wall_exempt_parts`` is not cast
     from, and the detail names it; with every part exempt the gate skips. A ray
     that starts inside a ``wall_exceptions`` box of its part is judged against
-    that box's ``min_mm``, and the box and its reason go in the evidence. The gate
+    that box's ``min_mm``, and the box and its reason go in the evidence. Inside a
+    box, rays also leave from a grid of points at half its ``min_mm``
+    (``BOX_SPACING_OF_MIN``), so a thin region between large faces is measured;
+    a box that needs more of them than ``BOX_RAYS_FLOOR`` (or the part's face
+    count) is refused. The gate
     passes only when every judged ray meets its own minimum. A pass reports the
     thinnest wall of every judged part, in mm, against the minimum that wall was
     held to, and the detail also names the wall nearest its own minimum when that
@@ -1362,9 +1640,11 @@ def wall_thickness(ctx: GateContext) -> Verdict:
 
     What this does NOT measure, and nobody should assume it does:
 
-    * It is a LOWER-BOUND SAMPLER, not a proof. It sees thickness only where a facet
-      exists and only along that facet's normal. A thin region whose thinnest
-      direction is not normal to any facet is missed.
+    * It is a LOWER-BOUND SAMPLER, not a proof. It sees thickness only at a facet's
+      centre (and, in a box, at its grid points) and only along that facet's
+      normal. A thin region whose thinnest direction is not normal to any facet is
+      missed, and so is one outside every box that holds no facet's centre: a web
+      between two large faces that each run on past it.
     * On a coarsely tessellated curved wall it UNDER-reports, by roughly
       ``t*(1 - cos(pi/N))`` for a wall of thickness ``t`` across an N-sided
       tessellation of the curve. The chord sits inside the true surface, so a ray
@@ -1431,19 +1711,47 @@ def wall_thickness(ctx: GateContext) -> Verdict:
                 f"escape and thickness is undefined — settle cad.watertight first",
             )
         centres = np.asarray(mesh.triangles_center, dtype=float)
-        normals = np.asarray(mesh.face_normals, dtype=float)
+        face_normals = np.asarray(mesh.face_normals, dtype=float)
         eps = max(1e-6, float(getattr(mesh, "scale", 1.0)) * 1e-8)
-        origins = centres - normals * eps
+        n_faces = len(centres)
         # Which box each ray starts in, -1 for none. Boxes on one part never touch
-        # (refused above), so no ray is in two.
-        box_of = np.full(len(origins), -1, dtype=int)
+        # (refused above), so no ray is in two. One ray leaves every face's centre;
+        # a box adds rays from points of its surface (`BOX_SPACING_OF_MIN` says what
+        # slipped through), each along its own face's normal.
+        box_of = [np.full(n_faces, -1, dtype=int)]
+        start = [np.arange(n_faces)]
+        points = [centres]
+        added = 0
+        limit = max(BOX_RAYS_FLOOR, n_faces)
+        origins = centres - face_normals * eps
         for j, box in enumerate(boxes.get(name, ())):
-            inside = np.all((origins >= box["lo"]) & (origins <= box["hi"]), axis=1)
-            if not inside.any():
+            lo, hi = np.asarray(box["lo"], dtype=float), np.asarray(box["hi"], dtype=float)
+            inside = np.all((origins >= lo) & (origins <= hi), axis=1)
+            spacing = BOX_SPACING_OF_MIN * box["min_mm"]
+            extra, faces, _count = _box_points(mesh, lo, hi, spacing, limit - added)
+            if extra is None:
+                # The count stops where it passes the budget: say the budget, not a total.
+                refusals.append(
+                    f"{box['label']} holds too much of {name!r} to sample: rays every "
+                    f"{spacing:g} mm (half its min_mm) would be more than the "
+                    f"{limit - added} its part's boxes may still add ({limit} in all). "
+                    f"Draw the box around the thin region it is about")
+                continue
+            if not inside.any() and not len(extra):
                 refusals.append(f"{box['label']} holds no face of {name!r}: it judges "
                                 f"nothing. The box is in the assembly frame, in mm")
-            box_of[inside] = j
-        prepared[name] = (origins, normals, eps, box_of)
+            box_of[0][inside] = j
+            box["spacing_mm"] = spacing
+            start.append(faces)
+            points.append(extra)
+            box_of.append(np.full(len(extra), j, dtype=int))
+            added += len(extra)
+        start = np.concatenate(start)
+        points = np.vstack(points)
+        box_of = np.concatenate(box_of)
+        normals = face_normals[start]
+        prepared[name] = (points - normals * eps, normals, eps, box_of, start, points,
+                          n_faces)
 
     if refusals:
         return Verdict(gate=gid, passed=False, measured=float(len(refusals)), limit=0.0,
@@ -1483,14 +1791,17 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     worst = None
     thinnest = None
     slivers = 0
+    edges = 0
+    box_rays = 0
     for name in judged:
         mesh = meshes[name]
-        origins, normals, eps, box_of = prepared[name]
-        n_faces = len(origins)
+        origins, normals, eps, box_of, start, points, n_faces = prepared[name]
+        n_rays = len(origins)
+        box_rays += n_rays - n_faces
         part_min = minimums[name][0]
         own = boxes.get(name, [])
         # Each ray's own minimum: its box's when it starts in one, else its part's.
-        ray_min = np.full(n_faces, part_min, dtype=float)
+        ray_min = np.full(n_rays, part_min, dtype=float)
         for j, box in enumerate(own):
             ray_min[box_of == j] = box["min_mm"]
 
@@ -1498,9 +1809,12 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         if len(index_ray) == 0:
             return _skipped(
                 gid,
-                f"no inward ray hit anything on part {name!r} ({n_faces} rays) — the "
+                f"no inward ray hit anything on part {name!r} ({n_rays} rays) — the "
                 f"ray engine returned nothing, so no thickness was measured",
             )
+        index_ray = np.asarray(index_ray, dtype=int)
+        index_tri = np.asarray(index_tri, dtype=int)
+        from_face = start[index_ray]
         # The ray origin is pushed eps ALONG THE INWARD direction, i.e. eps below
         # the surface it starts from (trimesh face normals point outward and the
         # origin is centre - normal*eps). The wall runs surface to surface, so the
@@ -1513,16 +1827,26 @@ def wall_thickness(ctx: GateContext) -> Verdict:
             np.asarray(locations, dtype=float) - origins[index_ray], axis=1)
         castable = _castable(mesh)
         slivers += int((~castable).sum())
-        real = ((travel > 10.0 * eps) & _wall_hits(mesh, index_ray, index_tri)
-                & castable[index_ray])
+        surface = _smooth_patches(mesh)
+        real = ((travel > 10.0 * eps) & _wall_hits(mesh, from_face, index_tri, surface)
+                & castable[from_face])
+        # A ray past a land or along a face is the part's edge, not a wall
+        # (`_edge_rays` says what slipped through). Judged only on the rays the
+        # filters above keep, so the count is of rays that would have counted.
+        part_edges = np.zeros(len(real), dtype=bool)
+        part_edges[real] = _edge_rays(mesh, surface, from_face[real], index_tri[real],
+                                      travel[real] + eps, points[index_ray[real]])
+        real &= ~part_edges
+        edges += int(part_edges.sum())
         if not real.any():
             return _skipped(
                 gid,
                 f"no inward ray on part {name!r} crossed a wall after excluding "
-                "acute-edge hits and sliver faces — the sampler measured nothing",
+                "acute-edge hits, sliver faces and rays past an edge — the sampler "
+                "measured nothing",
             )
         distances = travel[real] + eps
-        hit_rows = np.asarray(index_ray)[real]
+        hit_rows = index_ray[real]
         # The part's worst ray is the one thinnest FOR ITS OWN minimum: a 0.45 mm
         # hinge held to 0.4 mm is better off than a 1.3 mm wall held to 1.2 mm.
         # It decides the pass. Its thinnest ray is the one a "minimum wall
@@ -1538,6 +1862,7 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         t_source = where_from(name, int(box_of[hit_rows[t]]))
         rows.append({"part": name, "min_mm": float(distances[t]),
                      "sliver_faces_not_cast": int((~castable).sum()),
+                     "edge_rays_not_counted": int(part_edges.sum()),
                      "min_minimum_mm": float(ray_min[hit_rows[t]]), "min_from": t_source,
                      "at_mm": t_point,
                      "minimum_mm": part_min, "minimum_from": minimums[name][1],
@@ -1545,13 +1870,14 @@ def wall_thickness(ctx: GateContext) -> Verdict:
                      "worst_minimum_mm": float(ray_min[hit_rows[k]]),
                      "worst_from": source, "worst_ratio": float(ratio[k]),
                      "worst_at_mm": point,
-                     "rays": int(n_faces), "hits": int(len(distances)),
-                     "faces": int(n_faces)})
+                     "rays": int(n_rays), "hits": int(len(distances)),
+                     "faces": int(n_faces), "box_rays": int(n_rays - n_faces)})
         for j, box in enumerate(own):
             in_box = box_of[hit_rows] == j
             box_rows.append({
                 "entry": box["label"], "part": name, "box_mm": [box["lo"], box["hi"]],
                 "min_mm": box["min_mm"], "reason": box["reason"],
+                "spacing_mm": box["spacing_mm"],
                 "rays": int((box_of == j).sum()), "hits": int(in_box.sum()),
                 "thinnest_mm": float(distances[in_box].min()) if in_box.any() else None})
         if worst is None or float(ratio[k]) < worst[0]:
@@ -1572,6 +1898,8 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         "thinnest": summary(thinnest), "nearest_its_minimum": summary(worst),
         "parts": rows, "boxes": box_rows, "exempt": dict(sorted(exempted.items())),
         "sliver_faces_not_cast": slivers, "min_cast_altitude_mm": MIN_CAST_ALTITUDE_MM,
+        "edge_rays_not_counted": edges, "graze_deg": GRAZE_DEG,
+        "box_rays": box_rays, "box_spacing_of_min": BOX_SPACING_OF_MIN,
         "minimums": {name: {"mm": minimums[name][0], "from": minimums[name][1]}
                      for name in judged}})]
     sampled = sum(r["hits"] for r in rows)
@@ -1604,7 +1932,8 @@ def wall_thickness(ctx: GateContext) -> Verdict:
                     kind="point", position=list(worst_point),
                     value=round(worst_value, 4),
                     label=f"{worst_value:.3f} mm wall vs {worst_limit:.3f} mm minimum "
-                          f"[{worst_from}] ({cast} rays, one per face)")
+                          f"[{worst_from}] ({cast} rays, one per face"
+                          + (f" and {box_rays} in boxes" if box_rays else "") + ")")
         ]
 
     # With one minimum over every judged ray, the worst wall IS the thinnest one,
@@ -1631,8 +1960,11 @@ def wall_thickness(ctx: GateContext) -> Verdict:
                f"({', '.join(f'{c:g}' for c in value_point)}) vs {value_limit:.3f} mm "
                f"minimum [{value_from}] "
                f"({sampled}/{cast} inward face-normal rays hit, one per face"
+               + (f" and {box_rays} more in wall_exceptions boxes" if box_rays else "")
                + (f", {slivers} sliver face(s) under {MIN_CAST_ALTITUDE_MM:.4f} mm "
                   f"altitude not cast from" if slivers else "")
+               + (f", {edges} ray(s) past an edge or along a face not counted"
+                  if edges else "")
                + "; a ray sampler, not a proof)"
                + nearest
                + (f"; exempt, not judged: {', '.join(shown[:4])}"

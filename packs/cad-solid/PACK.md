@@ -179,8 +179,9 @@ assume, and the assumptions are expensive.
   (It was a coplanar group until a revolved 45° chamfer on a ledge read a 0.188 mm
   wall: the chamfer's second strip of triangles was a group of its own that shared
   no edge with the ledge, and its rays across the feather edge counted.)
-  Nonadjacent flanks count at every draft angle, and so does a smooth surface that
-  faces itself across material (a rounded rim). The old 30-degree normal filter
+  Nonadjacent flanks count at every draft angle, unless the ray ran past the
+  part's edge (two items down), and so does a smooth surface that faces itself
+  across material (a rounded rim). The old 30-degree normal filter
   discarded a 0.2-1.2 mm rib drafted 16-20 degrees per side and passed at its
   supporting block's 5 mm. That angle now applies only to the thin-fold exception
   at a shared edge: nearly opposed surfaces still count. A rib whose peak is two
@@ -202,6 +203,24 @@ assume, and the assumptions are expensive.
   `atan(1e-4 / altitude)`), and its ray goes anywhere: a face of 5.9e-7 mm² on an
   edge read 0.126 mm where 2.57 mm of material lay. It is not cast from, and the
   detail counts it. Its neighbours still measure the wall it lies on.
+- **`cad.wall_thickness` does not count a ray that ran past a part's edge.** Two
+  surfaces that share no edge and do not face each other (a flat and a chamfer, a
+  rib's two drafted flanks) are judged at the middle of the ray. The ray is a wall
+  when the two surfaces it joins are the nearest ones there, as they are across a
+  section. It ran past the part's edge when a third surface is nearer, and it ran
+  along a face when the face it hit passes within half its reading times
+  sin 30° of that middle. Neither is counted, and the detail counts them. (Until
+  round 3 of the held-out designs, a 1.35-1.4 mm plate whose edge is a 0.6 mm land
+  under a 45° chamfer read 0.605 mm: a ray from the underside 0.005 mm in from the
+  land ran up beside it to the chamfer. A 1.0 mm wall over a 0.5 mm land read
+  0.699 mm, and a ray from a top tilted 4° read 0.731 mm beside the vertical face
+  it leaned into.) Two surfaces that face each other still count up to an edge, so
+  a plate is its thickness to its edge, and a tie at a concave corner (a groove's
+  root) is a wall. A lip that is thin all the way across still reads thin: a
+  0.75 mm lip with a 0.25 mm land under a 45° chamfer reads 0.487 mm. The cost: a
+  chamfered edge over a land reads as an edge out to about 1.55 times the land's
+  height, and a ridge drafted over 30° per side is not read across where one flank
+  runs the length of the ray.
 - **`cad.wall_thickness` does not judge an exempt part, and a box judges the rays
   that START in it.** A part in `wall_exempt_parts` is not cast from at all; nothing
   here checks its thickness, and the detail names it so a reader sees the gap. A
@@ -209,7 +228,14 @@ assume, and the assumptions are expensive.
   box's `min_mm`. A ray that starts outside the box and crosses the boxed material is
   judged against the part's minimum. That is a false alarm, never a false pass, when
   the box is the looser rule (a hinge). A box with a STRICTER minimum holds only the
-  faces inside it, so draw it around every face of the region it is about.
+  faces inside it, so draw it around every face of the region it is about. Inside a
+  box, rays also leave from a square grid on each face, its cells half the box's
+  `min_mm` wide, so a thin region between two large faces is measured. (Until round
+  3, a housing's box held a 0.4 mm web whose faces each ran on past it, so no face
+  centre lay over it: the box's 27 rays read 1.0 mm, and a web under its 0.36 mm
+  minimum would have passed. The grid reads 0.395 mm.) The boxes of one part may add
+  at most 20,000 rays, or the part's face count when that is larger; a box that
+  needs more holds more than a thin region and is refused, named.
 - **`cad.degenerate_faces` is not a sliver-quality check.** It finds duplicate
   vertices and numerically zero-area triangles. A 1e-6 mm² needle with a 10,000:1
   aspect ratio passes every gate here and will still wreck a mesher.
@@ -237,7 +263,7 @@ assume, and the assumptions are expensive.
 | `cad.watertight` | 1 | open + non-manifold edges | 0, by definition of a solid | `selftest/bad_meshes.py:holed_box` — +Z facet deleted, 4 open edges |
 | `cad.is_volume` | 1 | parts that are not volumes | 0, by definition | `selftest/bad_meshes.py:flipped_facet` — one triangle wound backwards, still watertight |
 | `cad.degenerate_faces` | 1 | repairs needed (welds + drops) | 0 | `selftest/bad_meshes.py:sliver_pair` — one corner of a closed box emitted twice 1e-6 mm apart, a subset of its faces repointed at the copy, one face spanning the two |
-| `cad.wall_thickness` | 1 | the thinnest wall on a pass, and on a fail the wall furthest below its own minimum; one inward ray from every face of every part not exempt, except a sliver face, mm. Claim tag `wall`, not `mesh` | each part's own minimum: `process_min_wall_mm_by_part`, else `process_min_wall_mm` (or `min_wall_mm`); a `wall_exceptions` box's `min_mm` for a ray that starts in it | `selftest/bad_meshes.py:thin_plate` — a plate at a quarter of `process_min_wall_mm` |
+| `cad.wall_thickness` | 1 | the thinnest wall on a pass, and on a fail the wall furthest below its own minimum; one inward ray from every face of every part not exempt, except a sliver face, and a grid of rays in each `wall_exceptions` box; a ray past an edge or along a face not counted, mm. Claim tag `wall`, not `mesh` | each part's own minimum: `process_min_wall_mm_by_part`, else `process_min_wall_mm` (or `min_wall_mm`); a `wall_exceptions` box's `min_mm` for a ray that starts in it | `selftest/bad_meshes.py:thin_plate` — a plate at a quarter of `process_min_wall_mm` |
 | `cad.clash` | 1 | interfering pairs | 0 pairs; per-pair volume **and** depth tolerance; a seated layer, depth only | `selftest/bad_meshes.py:overlapping_pair` — two valid boxes sharing 800 mm³ |
 | `cad.clearance` | 1 | least distance over the declared `clearance_pairs`, by manifold3d's `min_gap`, capped at a 10 mm search, mm. Claim tag `clearance` only | the claim tagged `clearance` (`>=`, in mm), read through `ctx.acceptance` | `selftest/bad_meshes.py:carriage_under_cover` — the carriage made taller, its top 0.01 mm under the cover; `cad.clash` passes it |
 | `cad.assembly_connected` | 1 | parts in no contact at all, groups not joined to the assembly, and the surface-to-surface gap on every DECLARED contact, mm | `max_mating_gap_mm` (or a per-entry `tol_mm`); coverage falls back to the pack's 0.05 mm tessellation floor when the projection states none | `selftest/bad_meshes.py:broken_chain` — the cover 3 mm off the rim it seats on, nothing else changed |
@@ -766,9 +792,10 @@ and judges each part against its own minimum:
    exempts parts nobody named.
 3. **`wall_exceptions`**, `[{part, box_mm, min_mm, reason}]`. `box_mm` is
    `[[x0, y0, z0], [x1, y1, z1]]` in mm in the assembly frame, low corner first. A
-   ray that starts inside the box is judged against `min_mm`. The box and its reason
-   go in the evidence (`wall_thickness.json`), and in the detail when the box holds
-   the reported wall.
+   ray that starts inside the box is judged against `min_mm`, and inside it rays
+   leave from a grid at half `min_mm` as well as from face centres. The box, its
+   reason, its grid spacing and its thinnest ray go in the evidence
+   (`wall_thickness.json`), and in the detail when the box holds the reported wall.
 
 The gate passes only when every judged ray meets its own minimum. What it reports:
 
@@ -819,8 +846,9 @@ exempt and with a minimum or a box; a pattern that matches only exempt parts (it
 judges nothing, so the minimum written for them would be dropped); two patterns that
 disagree on one part; an exemption with no reason or written as a pattern; a box
 entry with any key but `part`, `box_mm`, `min_mm` and `reason` (the nearest one is
-suggested), a missing key, a malformed box, two boxes on one part that touch, or a
-box that holds no face of its part.
+suggested), a missing key, a malformed box, two boxes on one part that touch, a
+box that holds no face of its part, or a box that holds more surface than its grid
+of rays may sample (see "a box judges the rays that START in it").
 
 `max_mating_gap_mm` is a design decision in exactly the way `process_min_wall_mm` is
 — how far apart two parts that are supposed to touch may be before the joint is not a
@@ -941,7 +969,7 @@ A scoped key always beats an unscoped one.
 | Volume budget | `assembly_volume_limit_mm3` | `volume_limit_mm3` | optional |
 | Centre of mass | `assembly_com_mm` | `com_mm` | `[X, Y, Z]`, assembly frame |
 | CoM target / tolerance | `assembly_com_target_mm`, `assembly_com_tol_mm` | `com_target_mm`, `com_tol_mm` | optional pair |
-| Minimum wall | `process_min_wall_mm` | `min_wall_mm` | the thinnest wall the PROCESS allows — a limit. `fdm-print`'s `min_wall_mm` is the thinnest wall MEASURED across a part's layer plane, which is the opposite kind of number: publish a measurement under this name and the gate compares the geometry against a threshold nobody chose |
+| Minimum wall | `process_min_wall_mm` | `min_wall_mm` | the thinnest wall the PROCESS allows — a limit. `fdm-print`'s `min_wall_mm` is the thinnest wall MEASURED across a part's layer plane, which is the opposite kind of number: publish a measurement under this name and the gate compares the geometry against a threshold nobody chose. For FDM, the thinnest wall the process can lay is one bead: state the line width (about 0.4-0.45 mm on a 0.4 mm nozzle). A count of perimeters (two or three beads) is a strength rule, and `fdm-print`'s `fdm.min_wall` judges it across the layer plane. State it there, not here: this gate measures in every direction, so a perimeter count here also fails a floor or a web that prints as a few layers |
 | Minimum per part | `process_min_wall_mm_by_part` | — | `{part or pattern: mm}`, a part's own minimum before `process_min_wall_mm` |
 | Parts not judged | `wall_exempt_parts` | — | `{part: reason}`, exact names |
 | Thin regions | `wall_exceptions` | — | `[{part, box_mm, min_mm, reason}]`, a box in the assembly frame; a ray that starts in it is judged at `min_mm` |
