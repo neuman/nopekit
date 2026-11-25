@@ -1,10 +1,12 @@
 # The antenna's keep-out: `pcb.antenna_keepout`
 
-The rule: no copper on any layer sits in a radio module's antenna keep-out. That
-is tracks and arcs, vias, the pads of other parts and the fill of every zone, as
-the board is stored and as KiCad's next refill pours it. KiCad decides each item:
-its DRC and its zone filler. This pack decides which parts have an antenna, which
-area is the keep-out, and, for a vendor drawing, where it sits on the board.
+The rule: no copper on any layer sits in a radio module's antenna keep-out. The
+gate judges what KiCad's keep-out reports: tracks and arcs, vias, the pads of
+other parts and the fill of every zone, as the board is stored and as KiCad's
+next refill pours it. It does not judge a copper drawing or text (below, "What
+it cannot see"), and its pass says so. KiCad decides each item: its DRC and its
+zone filler. This pack decides which parts have an antenna, which area is the
+keep-out, and, for a vendor drawing, where it sits on the board.
 
 ## Where the rule comes from
 
@@ -14,7 +16,8 @@ area is the keep-out, and, for a vendor drawing, where it sits on the board.
   it cannot extend past the edge, "cut off the base board on both sides of the
   antenna and below it ... and provide a sufficiently large clearance area for
   the PCB antenna". A board cut away holds no copper on any layer. A clearance
-  area left in its place is held here to the same: nothing on any copper layer.
+  area left in its place is held here to the same: no track, via, pad or pour
+  on any copper layer.
   The ESP32-S3-WROOM-1 datasheet (v1.8, Figure 3-1's note) points to that section
   for the keep-out zone.
 - The module's footprint: a KiCad stock module carries its keep-out as a rule
@@ -61,6 +64,16 @@ others, on F.Cu beside a pad, keep a feature clear on their own layers, and
 `pcb.drc` judges them there. KiCad saves a footprint's zones in the board's own
 frame, so each polygon is used as written.
 
+A rule area's cutouts stay cutouts. KiCad saves a zone's outline as its first
+polygon and each cutout as a further polygon of the same zone, and reads them
+back so (the first an outline, the rest holes). The gate adds one area per
+source area, with all of its polygons in that order, so KiCad reads the added
+area as it reads the source. The evidence gives each area's outline
+(`polygons_board_mm`) and its cutouts (`holes_board_mm`). (What slipped through,
+review of P8: each polygon became a solid area of its own, so a track in a
+cutout was a finding. Measured with KiCad 9.0.9: a GND track in a rule area's
+cutout, plain DRC clean, the gate 1 item.)
+
 ## The records
 
 `pcb_antennas` is an object keyed by id, each record:
@@ -79,7 +92,8 @@ frame, so each polygon is used as written.
 - `{"rule_area": name}`: a keep-out rule area the designer drew on the board and
   named in KiCad (Rule Area Properties, Name): a chip antenna's clearance on a
   bare SoC, from its datasheet. Its polygon is copied to every copper layer, so
-  draw it around the feed line where the vendor lets the feed in.
+  draw it around the feed line where the vendor lets the feed in, or cut the
+  feed out of it (a cutout stays a cutout).
 - `{"drawing": path}`: the vendor's drawing, below.
 
 An unknown key is refused, naming the nearest known one. A record whose part is
@@ -144,7 +158,17 @@ directory:
 4. **The count.** Each `items_not_allowed` item that names one of the gate's
    areas, once over both copies (by its id and its words), with which copy found
    it. An item of the area's own part ("Pad 1 [GND] of U1") is its own copper,
-   listed and never counted.
+   listed and never counted. So is a hole with no copper: the added area forbids
+   pads, so KiCad reports another part's non-plated hole ("NPTH pad of H1"), and
+   the refill's child asks KiCad which of the board's non-plated pads it flashes
+   on no copper layer (`PAD::FlashLayer`). The stock `MountingHole_2.2mm_M2` (pad
+   no wider than its drill) flashes none, and is listed
+   (`holes_no_copper_left_out`); the same hole with a 3.0 mm pad has a copper ring
+   on every layer, and counts (measured with pcbnew 9.0.9). A screw in a hole is
+   metal near the antenna: `lenses.md`. (What slipped through, review of P8: the
+   hole counted, and a mounting hole for a plastic standoff failed a sound board.
+   Rejected: counting a hole on purpose, since the rule is copper; reading the
+   pad's size against its drill here, since KiCad decides copper, not this pack.)
 
 The verdict is that count against 0. A fail counts beside a part not judged;
 a part not judged beside no fail is a skip. A refill or DRC past
@@ -154,7 +178,14 @@ a part not judged beside no fail is a skip. A refill or DRC past
 
 - Copper text and drawings on a copper layer: KiCad's keep-out does not report
   them (measured with kicad-cli 9.0.9: a filled rectangle on B.Cu and text on
-  In2.Cu in the area, no finding).
+  In2.Cu in the area, no finding; a filled polygon on In2.Cu with net GND under
+  the antenna, which pcbnew reads as copper on its net, passes). So the pass and
+  the title name tracks, vias, other parts' pads and zone fills, never "copper",
+  and the pass says "copper drawings and text not judged". (What slipped
+  through, review of P8: the pass read "nothing on any copper layer" over that
+  polygon.)
+- What goes in a hole with no copper in the keep-out: the hole is listed, not
+  counted.
 - A part body over the antenna with no copper in the area: the area allows
   footprints, since the rule judges copper.
 - Where the keep-out sits: at the board edge or in the middle, with the board cut

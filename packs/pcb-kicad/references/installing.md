@@ -55,8 +55,8 @@ models kept beside the board as `${KIPRJMOD}/...`.
 ## pcbnew (for `pcb.antenna_keepout`)
 
 The keep-out gate refills the board's zones with KiCad's own filler before its
-DRC, in a child process run by the same Python as nopekit (`sys.executable`), so
-that Python must import `pcbnew`. Check: `python3 -c "import pcbnew;
+DRC, and asks KiCad which holes carry no copper, in a child process run by the
+same Python as nopekit (`sys.executable`), so that Python must import `pcbnew`. Check: `python3 -c "import pcbnew;
 print(pcbnew.Version())"` prints `9.0.x`.
 
 | Platform | How |

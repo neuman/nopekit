@@ -12,7 +12,7 @@
     pcb.fab_rules        tier 1  KiCad's DRC with the fab's published minimums for the board's service
     pcb.spice            tier 1  one .meas of ngspice on the project's deck, against a band
     pcb.enclosure_fit    tier 1  the populated boards' 3D models against the enclosure and each other
-    pcb.antenna_keepout  tier 1  no copper on any layer in a radio module's antenna keep-out, stored or refilled
+    pcb.antenna_keepout  tier 1  no track, via, pad or pour on any layer in a radio module's antenna keep-out
 
     (gates/power.py holds the four battery rules: pcb.charge_temperature,
     pcb.charge_limits, pcb.fault_current, pcb.discharge_cutoff.)
@@ -2930,9 +2930,11 @@ ANTENNA_DRAWN = ("drawing", "rule_area")
 ANTENNA_AREA = "nopekit_antenna_"
 
 #: What the added area forbids, as KiCad's keep-out flags: every kind of copper
-#: (tracks and arcs, vias, pads, a zone's fill). ``footprints`` stays allowed: the
-#: rule judges copper, and a part's pads in the area are reported anyway; a part
-#: body over the antenna with no copper in the area is ``lenses.md``'s.
+#: its keep-out judges (tracks and arcs, vias, pads, a zone's fill; it has no
+#: flag for a copper drawing or text, and does not report one). ``footprints``
+#: stays allowed: the rule judges copper, and a part's pads in the area are
+#: reported anyway; a part body over the antenna with no copper in the area is
+#: ``lenses.md``'s.
 #: (Measured with kicad-cli 9.0.9: an area that forbids footprints reports a
 #: capacitor in it as "Footprint C1" beside its two pads.) Rejected: the source
 #: area's own flags (NINA-B111's stock area forbids only footprints; a weakened
@@ -3163,10 +3165,23 @@ def _polygon_points(zone: list) -> list[list[float]]:
     return [[float(p[1]), float(p[2])] for p in K.children(pts, "xy")]
 
 
-def _antenna_zone(ref: str, n: int, copper: list[str], polygon: list) -> list:
-    """The rule area this gate adds for ``ref``: every copper layer, every kind
-    of copper forbidden (:data:`ANTENNA_FORBIDS`), named for the part, its id a
-    ``uuid5`` so the bytes repeat."""
+def _zone_holes(zone: list) -> list[list[list[float]]]:
+    """A zone's cutouts, for the evidence: each ``polygon`` after its first.
+    KiCad saves a zone's outline as its first polygon and each cutout as a
+    further one, and reads them back so (``ZONE::AddPolygon``: the first an
+    outline, the rest holes). Measured with pcbnew 9.0.9: a rule area with one
+    cutout saves as two polygons."""
+    return [[[float(p[1]), float(p[2])] for p in K.children(K.child(poly, "pts") or [], "xy")]
+            for poly in K.children(zone, "polygon")[1:]]
+
+
+def _antenna_zone(ref: str, n: int, copper: list[str], polygons: list) -> list:
+    """The rule area this gate adds for ``ref`` over one source keep-out: every
+    copper layer, all the copper KiCad's keep-out judges forbidden
+    (:data:`ANTENNA_FORBIDS`), named for the part, its id a ``uuid5`` so the
+    bytes repeat. ``polygons`` are the source's own, in its order (the outline,
+    then each cutout), so KiCad reads the added area as it reads the source: a
+    cutout stays a cutout."""
     name = f"{ANTENNA_AREA}{ref}"
     return ["zone", ["net", "0"], ["net_name", K.Q("")], ["layers", *[K.Q(c) for c in copper]],
             ["uuid", K.Q(str(uuid.uuid5(uuid.NAMESPACE_URL, f"nopekit:{name}:{n}")))],
@@ -3176,7 +3191,7 @@ def _antenna_zone(ref: str, n: int, copper: list[str], polygon: list) -> list:
             ["keepout", *[[k, v] for k, v in ANTENNA_FORBIDS]],
             ["placement", ["enabled", "no"], ["sheetname", K.Q("")]],
             ["fill", ["thermal_gap", "0.5"], ["thermal_bridge_width", "0.5"]],
-            polygon]
+            *polygons]
 
 
 def _without_keepouts(tree: list) -> list:
@@ -3248,9 +3263,11 @@ def _judging_project(path: str) -> None:
 
 
 def _refill(ctx: GateContext, gid: str, board: str, out: str, log: str):
-    """``_keepout_fill.py`` on the staged ``board``, writing ``out``: None, or a
-    skip/error Verdict. A timeout is a skip (nothing was shown); a crash, a
-    refill that did not finish or a run that wrote nothing is an error."""
+    """``_keepout_fill.py`` on the staged ``board``, writing ``out``: the ids of
+    the board's holes with no copper (``bare_holes``, as KiCad's pcbnew decides
+    them), or a skip/error Verdict. A timeout is a skip (nothing was shown); a
+    crash, a refill that did not finish or a run that wrote nothing is an error.
+    A report with no list names no hole, so every item counts: never quieter."""
     timeout = float(ctx.param("pcb_drc_timeout_s", DEFAULT_DRC_TIMEOUT_S) or
                     DEFAULT_DRC_TIMEOUT_S)
     try:
@@ -3268,19 +3285,29 @@ def _refill(ctx: GateContext, gid: str, board: str, out: str, log: str):
         return Verdict(gate=gid, passed=False, evidence=[log],
                        error=f"the zone refill (KiCad's pcbnew, in a child) failed (exit "
                              f"{proc.returncode}): {tail[0][:200]}")
-    if not json.loads(lines[-1]).get("filled"):
+    report = json.loads(lines[-1])
+    if not report.get("filled"):
         return Verdict(gate=gid, passed=False, evidence=[log],
                        error="the zone refill (KiCad's pcbnew) did not finish: no refilled "
                              "copy to judge")
-    return None
+    bare = report.get("bare_holes")
+    return {u for u in bare if isinstance(u, str) and u} if isinstance(bare, list) else set()
 
 
-def _antenna_findings(doc: dict, owners: dict[str, str]) -> tuple[list, list]:
-    """``(findings, own items)`` of one DRC report: each item KiCad reports in an
-    added area, as ``((uuid, words), ref, words)``. An item of the area's own
-    part (its pads: "Pad 1 [GND] of U1") is the part's own copper, and is listed
-    apart, never counted."""
-    found, own = [], []
+def _antenna_findings(doc: dict, owners: dict[str, str],
+                      bare: frozenset | set = frozenset()) -> tuple[list, list, list]:
+    """``(findings, own items, bare holes)`` of one DRC report: each item KiCad
+    reports in an added area, as ``((uuid, words), ref, words)``. An item of the
+    area's own part (its pads: "Pad 1 [GND] of U1") is the part's own copper, and
+    is listed apart, never counted. So is an item whose id is in ``bare``, a hole
+    KiCad gives no copper (``_keepout_fill.py``): the added area forbids pads, so
+    KiCad reports another part's mounting hole ("NPTH pad of H1"), and a hole
+    holds no copper. What goes in it, a metal screw, is ``lenses.md``'s. (What
+    slipped through, review of P8: it counted, and a stock M2 hole for a plastic
+    standoff under the antenna failed a sound board. Rejected: counting it on
+    purpose, since the rule is copper; matching KiCad's words, which do not say
+    whether the pad has a ring.)"""
+    found, own, holes = [], [], []
     for v in doc.get("violations", []):
         if v.get("type") != "items_not_allowed":
             continue
@@ -3293,9 +3320,11 @@ def _antenna_findings(doc: dict, owners: dict[str, str]) -> tuple[list, list]:
             row = ((str(item.get("uuid", "")), words), ref, words)
             if re.search(rf"(?<!\w)of {re.escape(ref)}(?!\w)", words):
                 own.append(row)
+            elif row[0][0] in bare:
+                holes.append(row)
             else:
                 found.append(row)
-    return found, own
+    return found, own, holes
 
 
 def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
@@ -3305,7 +3334,8 @@ def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
     after KiCad's own refill (run on the staged board with its project and rules
     beside it, before any area is added: an area present during the refill knocks
     the pour out, and DRC then sees nothing, measured with pcbnew 9.0.9).
-    ``({key: finding}, [own items], evidence)`` or a skip/error Verdict."""
+    ``({key: finding}, [own items], [bare holes], evidence)`` or a skip/error
+    Verdict."""
     staged = _stage(ctx, f"{gid}.{n}", path, board=True, schematic=False)
     if isinstance(staged, Verdict):
         return staged
@@ -3318,12 +3348,13 @@ def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
     refilled = os.path.join(stage, "refilled", name)
     os.makedirs(os.path.dirname(refilled), exist_ok=True)
     log = os.path.join(stage, "refill.log")
-    failed = _refill(ctx, gid, os.path.join(stage, name), refilled, log)
-    if failed is not None:
-        return failed
+    bare = _refill(ctx, gid, os.path.join(stage, name), refilled, log)
+    if isinstance(bare, Verdict):
+        return bare
     owners = {f"{ANTENNA_AREA}{ref}": ref for ref in areas}
     found: dict = {}
     own: dict = {}
+    holes: dict = {}
     ev = [log]
     # pcbnew wrote a project file and local settings beside its copy: the
     # copies take the staged project, set by _judging_project, never those.
@@ -3336,8 +3367,8 @@ def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
         judged = _without_keepouts(source)
         if copy == "stored":
             _fills_judged(judged)
-        for ref, polygons in sorted(areas.items()):
-            judged.extend(_antenna_zone(ref, i, copper, poly) for i, poly in enumerate(polygons))
+        for ref, zones in sorted(areas.items()):
+            judged.extend(_antenna_zone(ref, i, copper, polys) for i, polys in enumerate(zones))
         with open(os.path.join(where, name), "w", encoding="utf-8") as fh:
             fh.write(K.dump(judged) + "\n")
         for f in side:
@@ -3354,12 +3385,14 @@ def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
             return Verdict(gate=gid, passed=False, evidence=ev,
                            error=f"kicad-cli exited {code} on the {copy} copy but its report "
                                  f"lists {len(everything)} item(s): the two disagree")
-        hits, mine = _antenna_findings(doc, owners)
+        hits, mine, open_holes = _antenna_findings(doc, owners, bare)
         for key, ref, words in hits:
             found.setdefault(key, {"ref": ref, "item": words, "copies": []})["copies"].append(copy)
         for key, ref, words in mine:
             own.setdefault(key, {"ref": ref, "item": words})
-    return found, list(own.values()), ev
+        for key, ref, words in open_holes:
+            holes.setdefault(key, {"ref": ref, "item": words})
+    return found, list(own.values()), list(holes.values()), ev
 
 
 @gate(
@@ -3371,8 +3404,14 @@ def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
     #    fab's numbers. The area selection and a drawing's registration are this
     #    pack's own glue.
     basis="sourced",
-    title=("No copper on any layer sits in a radio module's antenna keep-out, as the "
-           "board is stored and as the next refill pours it"),
+    # The title and the pass name what KiCad's keep-out reports, never "copper":
+    # it does not report a copper drawing or text (measured with kicad-cli
+    # 9.0.9), so a filled gr_poly on In2.Cu under the antenna passes. What
+    # slipped through (review of P8): the title read "No copper on any layer" and
+    # the pass "nothing on any copper layer" over that board.
+    title=("No track, via, other part's pad or zone fill on any copper layer sits in a "
+           "radio module's antenna keep-out, as the board is stored and as the next "
+           "refill pours it"),
     claims=["pcb", "antenna-keepout", "rf-layout"],
     tier=Tier.BUILD,
     settles="copper in a radio module's antenna keep-out",
@@ -3388,10 +3427,12 @@ def _antenna_runs(ctx: GateContext, gid: str, n: int, path: str, tree: list,
     ),
 )
 def antenna_keepout(ctx: GateContext) -> Verdict:
-    """Nothing on any copper layer in a radio module's antenna keep-out: tracks,
-    vias, other parts' pads and zones, as the board is stored and as KiCad's next
+    """No track, via, other part's pad or zone fill on any copper layer in a
+    radio module's antenna keep-out, as the board is stored and as KiCad's next
     refill pours them. KiCad's DRC decides each item, on a staged copy with a
-    rule area this gate adds over the keep-out on every copper layer.
+    rule area this gate adds over the keep-out on every copper layer. Not judged:
+    a copper drawing or text (KiCad's keep-out does not report one), and the pass
+    says so. A hole KiCad gives no copper is listed, never counted.
 
     **Which parts.** Every footprint from KiCad's ``RF_Module`` library
     (:data:`ANTENNA_LIBRARIES`) on ``pcb_board`` or on a board a record names,
@@ -3480,14 +3521,15 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
                     continue
                 if kind == "drawing":
                     poly, fit = _drawing_area(ctx, tree, fps[ref], ref, where, rec["label"])
-                    areas[ref] = [poly]
+                    areas[ref] = [[poly]]
                     judged.append({"board": bname, "ref": ref, "value": fp.value,
                                    "keepout": f"the drawing {where}, registered on "
                                               f"{len(fit['pairs'])} pads "
                                               f"(RMS {fit['rms_mm']:g} mm)",
                                    "short": f"drawing, RMS {fit['rms_mm']:g} mm",
                                    "registration": fit,
-                                   "polygons_board_mm": [fit["polygon_board_mm"]]})
+                                   "polygons_board_mm": [fit["polygon_board_mm"]],
+                                   "holes_board_mm": [[]]})
                     continue
                 if kind == "rule_area":
                     zones = [z for z in K.children(tree, "zone")
@@ -3507,18 +3549,31 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
                     if not zones:
                         unkept.setdefault(bname, []).append(f"{ref} ({fp.lib_id})")
                         continue
-                areas[ref] = [K.parse(K.dump(p)) for z in zones for p in K.children(z, "polygon")]
+                # One added area per source zone, with all of its polygons: the
+                # outline first, then each cutout, as KiCad wrote them. What
+                # slipped through (review of P8): each polygon was made an area
+                # of its own, so a cutout read as solid keep-out, and the feed
+                # track a designer cut out of a chip antenna's clearance failed
+                # a sound board (measured with KiCad 9.0.9: plain DRC clean, the
+                # gate 1 item). The evidence showed the outline only.
+                areas[ref] = [[K.parse(K.dump(p)) for p in K.children(z, "polygon")]
+                              for z in zones]
+                cutouts = [_zone_holes(z) for z in zones]
+                cut = sum(len(h) for h in cutouts)
                 judged.append({"board": bname, "ref": ref, "value": fp.value,
                                "keepout": what + (f" ({len(zones)} areas)"
                                                   if len(zones) > 1 else ""),
-                               "short": short,
-                               "polygons_board_mm": [_polygon_points(z) for z in zones]})
+                               "short": short + (f", {cut} cutout{'s' if cut > 1 else ''}"
+                                                 if cut else ""),
+                               "polygons_board_mm": [_polygon_points(z) for z in zones],
+                               "holes_board_mm": cutouts})
             if areas:
                 plans.append((n, path, bname, tree, copper, areas))
     except P.RecordError as exc:
         return Verdict(gate=gid, passed=False, error=str(exc))
     findings: list[dict] = []
     own: list[dict] = []
+    holes: list[dict] = []
     ev: list[str] = []
     errors: list[Verdict] = []
     layers: dict[str, list[str]] = {}
@@ -3533,12 +3588,13 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
             else:
                 errors.append(run)
             continue
-        found, mine, run_ev = run
+        found, mine, bare, run_ev = run
         ev += run_ev
         layers[bname] = copper
         findings += [{"board": bname, **row} for _key, row in sorted(
             found.items(), key=lambda kv: (kv[1]["ref"], kv[1]["item"], kv[0]))]
         own += [{"board": bname, **row} for row in mine]
+        holes += [{"board": bname, **row} for row in bare]
     # A part with no keep-out is said once per board, with the remedy once, its
     # refs first: a skip reason is cut at 200 characters and a detail line at
     # 500, and a reason that names its parts past the cut names none of them.
@@ -3548,7 +3604,8 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
                         f"\"none\", for an antenna off the board)")
     ev = _evidence(ctx, "antenna_keepout", {
         "judged": judged, "findings": findings, "own_items_left_out": own,
-        "listed": listed, "not_judged": unjudged, "copper_layers": layers}) + ev
+        "holes_no_copper_left_out": holes, "listed": listed, "not_judged": unjudged,
+        "copper_layers": layers}) + ev
     on_board: dict[str, list[str]] = {}
     for j in judged:
         on_board.setdefault(j["board"], []).append(f"{j['ref']} ({j['short']})")
@@ -3557,6 +3614,11 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
     notes = []
     if own:
         notes.append(f"the part's own pads in its keep-out, left out: {len(own)}")
+    if holes:
+        named = ", ".join(f"{h['item']} ({h['ref']})" for h in holes[:3])
+        more = f" and {len(holes) - 3} more" if len(holes) > 3 else ""
+        notes.append(f"holes with no copper in a keep-out, not counted: {named}{more} (a metal "
+                     f"screw in one is lenses.md's)")
     if listed:
         notes.append("listed, not judged: " + ", ".join(f"{r['ref']} ({r['short']})"
                                                         for r in listed))
@@ -3591,7 +3653,8 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
                           + ", ".join(os.path.basename(p) for p in boards)
                           + ": no footprint from " + ", ".join(ANTENNA_LIBRARIES)
                           + " and no pcb_antennas record")
-    detail = (f"nothing on any copper layer in an antenna's keep-out, as stored and as refilled: "
+    detail = (f"no track, via, other part's pad or zone fill on any copper layer in an antenna's "
+              f"keep-out, as stored and as refilled (copper drawings and text not judged): "
               f"{parts}")
     return Verdict(gate=gid, passed=True, measured=0, limit=0, comparator="<=",
                    units="findings", detail="; ".join([detail, *notes]), evidence=ev)

@@ -4705,7 +4705,8 @@ S3_KEEPOUT_LOCAL = [(-24.0, -6.75), (24.0, -6.75), (24.0, -27.75), (-24.0, -27.7
 
 #: Builds a test board with KiCad's own pcbnew, in a child as the asset scripts
 #: run: parts placed, turned and flipped by KiCad (so each footprint's rule area
-#: is saved where KiCad puts it), pours, tracks and named rule areas, then filled.
+#: is saved where KiCad puts it), pours, tracks and named rule areas (with any
+#: cutouts, which KiCad saves as further polygons of the area), then filled.
 _BUILD_SCRIPT = r"""
 import json, os, sys
 import pcbnew
@@ -4756,6 +4757,9 @@ for a in spec.get("areas", []):
     zone.SetDoNotAllowCopperPour(True); zone.SetDoNotAllowFootprints(False)
     o = zone.Outline(); o.NewOutline()
     for p in a["pts"]: o.Append(mm(p[0]), mm(p[1]))
+    for i, hole in enumerate(a.get("holes", [])):
+        o.NewHole()
+        for p in hole: o.Append(mm(p[0]), mm(p[1]), -1, i)
     b.Add(zone)
 pcbnew.SaveBoard(out, b)
 b = pcbnew.LoadBoard(out)
@@ -4896,6 +4900,30 @@ class TheKeepoutIsJudgedOnEveryLayer(unittest.TestCase):
         self.assertEqual(ev["copper_layers"]["radio_board.kicad_pcb"],
                          ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"])
         self.assertEqual(ev["findings"], [])
+
+    def test_a_pass_names_what_was_judged_and_never_says_all_copper(self):
+        """KiCad's keep-out does not report a copper drawing: a filled polygon on
+        In2.Cu, on GND, under the antenna (pcbnew reads it as copper on its net)
+        passes. So the pass and the title name what KiCad reports, and say the
+        drawings are not judged. What slipped through (review of P8): over this
+        board the pass read "nothing on any copper layer in an antenna's
+        keep-out", and the title "No copper on any layer"."""
+        def drawn(tree):
+            tree.append(["gr_poly", ["pts", ["xy", "1", "8"], ["xy", "5", "8"], ["xy", "5", "22"],
+                                     ["xy", "1", "22"]],
+                         ["stroke", ["width", "0.1"], ["type", "solid"]], ["fill", "yes"],
+                         ["layer", K.Q("In2.Cu")], ["net", _net_code(tree, "GND")],
+                         ["uuid", _uid("drawn ground")]])
+        v = self.run_on(_radio_copy(self.root, drawn))
+        self.assertEqual((v.outcome, v.measured), ("pass", 0), v.render())
+        self.assertTrue(v.detail.startswith(
+            "no track, via, other part's pad or zone fill on any copper layer in an antenna's "
+            "keep-out, as stored and as refilled (copper drawings and text not judged): "), v.detail)
+        for words in (v.detail, self.spec.title):
+            self.assertNotIn("nothing on any copper layer", words.lower())
+            self.assertNotIn("no copper", words.lower())
+        self.assertTrue(self.spec.title.startswith(
+            "No track, via, other part's pad or zone fill on any copper layer"), self.spec.title)
 
     def test_plain_drc_sees_nothing_in_the_keepout_of_the_known_bad(self):
         """Nothing cheaper catches it: kicad-cli's own DRC on the known-bad board
@@ -5273,6 +5301,130 @@ class EachRadioIsReadByItsOwnKeepout(unittest.TestCase):
         self.assertIn("U4 (rule area 'AE1 clearance')", v.detail)
 
 
+class ACutoutInAKeepoutStaysACutout(unittest.TestCase):
+    """A chip antenna (KiCad's stock Johanson 2450AT18) on a two-layer board,
+    its clearance a rule area the designer drew on F.Cu and B.Cu with a cutout
+    where the feed runs. KiCad saves the cutout as the area's second polygon and
+    reads it back as a hole. A track in the cutout is not a finding; a track in
+    the area outside it is. What slipped through (review of P8): each polygon
+    became a solid area of its own, so the feed in the cutout read as a finding,
+    and the evidence showed the outline only."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not KEEPOUT_TOOLS or FOOTPRINTS is None:
+            raise unittest.SkipTest(KEEPOUT_SKIP)
+        cls.root = tempfile.mkdtemp(prefix="nopekit-keepout-cutout-")
+        cls.spec, fn = _keepout_gate()
+        cls.fn = staticmethod(fn)
+        cls.board = _build_board(cls.root, "chip", {
+            "layers": 2, "outline": [100, 40],
+            "parts": [{"lib": "RF_Antenna", "name": "Johanson_2450AT18x100", "ref": "AE1",
+                       "value": "2450AT18A100", "at": [75, 12], "nets": {"1": "RF"}}],
+            "areas": [{"name": "AE1 clearance", "layers": ["F.Cu", "B.Cu"],
+                       "pts": [[60, 5], [90, 5], [90, 25], [60, 25]],
+                       "holes": [[[70, 10], [80, 10], [80, 20], [70, 20]]]}],
+            "tracks": [{"layer": "F.Cu", "net": "RF", "pts": [[72, 17], [78, 17]]},
+                       {"layer": "B.Cu", "net": "GND", "pts": [[62, 22], [68, 22]]}]})
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, True)
+
+    def test_the_board_holds_the_cutout_as_kicad_saves_one(self):
+        zone = next(z for z in K.children(K.load_tree(self.board), "zone")
+                    if str(K.value(z, "name", default="")) == "AE1 clearance")
+        self.assertEqual(len(K.children(zone, "polygon")), 2, "the outline, then the cutout")
+
+    def test_a_track_in_the_cutout_is_not_a_finding(self):
+        v = gates_mod.run_gate(self.spec, self.fn, _keepout_ctx(self.root, {
+            "pcb_board": self.board, "pcb_antennas": {"chip": {
+                "ref": "AE1", "value": "2450AT18A100", "keepout": {"rule_area": "AE1 clearance"},
+                "source": "test: the antenna's datasheet clearance, the feed cut out"}}}))
+        self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+        ev = _keepout_evidence(v)
+        self.assertEqual([(f["ref"], f["item"].split(",")[0]) for f in ev["findings"]],
+                         [("AE1", "Track [GND] on B.Cu")])
+        self.assertEqual(ev["own_items_left_out"], [], "AE1's pads sit in the cutout")
+        [judged] = ev["judged"]
+        self.assertEqual(judged["polygons_board_mm"], [[[60, 5], [90, 5], [90, 25], [60, 25]]])
+        self.assertEqual(judged["holes_board_mm"], [[[[70, 10], [80, 10], [80, 20], [70, 20]]]])
+        self.assertIn("AE1 (rule area 'AE1 clearance', 1 cutout)", v.detail)
+        # KiCad's own DRC on the board reads the cutout the same way: the area's
+        # one item is the track outside it.
+        report = os.path.join(self.root, "plain.json")
+        subprocess.run(["kicad-cli", "pcb", "drc", "--severity-all", "--format", "json",
+                        "-o", report, self.board], capture_output=True, timeout=120,
+                       cwd=self.root, check=True)
+        with open(report, encoding="utf-8") as fh:
+            plain = [i["description"].split(",")[0] for x in json.load(fh)["violations"]
+                     if x["type"] == "items_not_allowed" for i in x["items"]]
+        self.assertEqual(plain, ["Track [GND] on B.Cu"])
+
+
+class AHoleWithNoCopperIsListedNotCounted(unittest.TestCase):
+    """KiCad's stock ESP32-S3-WROOM-1 on a four-layer board, with two of KiCad's
+    stock M2 mounting holes in its keep-out: H1 as the library draws it (a
+    non-plated hole, its pad no wider than its drill: no copper, as pcbnew's
+    ``PAD::FlashLayer`` says), and H2 with its pad widened to 3.0 mm (a copper
+    ring on every layer). KiCad's keep-out reports both ("NPTH pad of H1"). H1 is
+    listed and not counted: the rule is copper, and a screw in it is the metal
+    lens's. H2 counts. What slipped through (review of P8): H1 counted, and a
+    hole for a plastic standoff under the antenna failed a sound board."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not KEEPOUT_TOOLS or FOOTPRINTS is None:
+            raise unittest.SkipTest(KEEPOUT_SKIP)
+        cls.root = tempfile.mkdtemp(prefix="nopekit-keepout-holes-")
+        cls.spec, fn = _keepout_gate()
+        cls.fn = staticmethod(fn)
+        hole = {"lib": "MountingHole", "name": "MountingHole_2.2mm_M2", "value": "MountingHole"}
+        built = _build_board(cls.root, "holes", {
+            "layers": 4, "outline": [60, 40],
+            "parts": [{"lib": "RF_Module", "name": "ESP32-S3-WROOM-1", "ref": "U1",
+                       "value": "ESP32-S3-WROOM-1", "at": [30, 25]},
+                      dict(hole, ref="H1", at=[30, 6]), dict(hole, ref="H2", at=[40, 6])]})
+        tree = K.load_tree(built)
+        pad = _pad(tree, "H2", "")
+        cls.stock = [str(x) for x in K.child(pad, "size")[1:]], str(K.child(pad, "drill")[1])
+        K.child(pad, "size")[1:] = ["3", "3"]
+        cls.both = os.path.join(cls.root, "both.kicad_pcb")
+        with open(cls.both, "w", encoding="utf-8") as fh:
+            fh.write(K.dump(tree) + "\n")
+        tree[:] = [c for c in tree if not (isinstance(c, list) and K.head(c) == "footprint"
+                                           and K.footprint_ref(c)[0] == "H2")]
+        cls.bare = os.path.join(cls.root, "bare.kicad_pcb")
+        with open(cls.bare, "w", encoding="utf-8") as fh:
+            fh.write(K.dump(tree) + "\n")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, True)
+
+    def run_on(self, board: str):
+        return gates_mod.run_gate(self.spec, self.fn, _keepout_ctx(self.root, {"pcb_board": board}))
+
+    def test_the_stock_hole_has_no_ring(self):
+        self.assertEqual(self.stock, (["2.2", "2.2"], "2.2"))
+
+    def test_a_hole_with_no_copper_passes_and_is_named(self):
+        v = self.run_on(self.bare)
+        self.assertEqual((v.outcome, v.measured), ("pass", 0), v.render())
+        self.assertIn("holes with no copper in a keep-out, not counted: NPTH pad of H1 (U1) (a "
+                      "metal screw in one is lenses.md's)", v.detail)
+        ev = _keepout_evidence(v)
+        self.assertEqual([(h["ref"], h["item"]) for h in ev["holes_no_copper_left_out"]],
+                         [("U1", "NPTH pad of H1")])
+
+    def test_a_hole_with_a_copper_ring_counts(self):
+        v = self.run_on(self.both)
+        self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+        ev = _keepout_evidence(v)
+        self.assertEqual([(f["ref"], f["item"]) for f in ev["findings"]], [("U1", "NPTH pad of H2")])
+        self.assertEqual([h["item"] for h in ev["holes_no_copper_left_out"]], ["NPTH pad of H1"])
+
+
 class TheFootprintsAntennaAreaIsChosen(unittest.TestCase):
     """Which of a stock footprint's rule areas is its antenna's, read from KiCad
     9.0.9's own library: no KiCad run needed, only its footprints."""
@@ -5301,8 +5453,9 @@ class TheFootprintsAntennaAreaIsChosen(unittest.TestCase):
 class AFindingIsTiedToItsAreaAndItsPart(unittest.TestCase):
     """How a DRC report is read (``_antenna_findings``): an item counts when its
     violation names one of the gate's areas; the area's own part's items are its
-    own copper, listed apart; an item another area names (the project's own
-    keep-outs, which ``pcb.drc`` judges) is not this gate's."""
+    own copper, listed apart; a hole KiCad gives no copper (its id among the
+    refill's ``bare_holes``) is listed apart too; an item another area names
+    (the project's own keep-outs, which ``pcb.drc`` judges) is not this gate's."""
 
     def test_the_report_is_split_by_area_and_owner(self):
         read = _keepout_gate()[1].__globals__["_antenna_findings"]
@@ -5314,7 +5467,8 @@ class AFindingIsTiedToItsAreaAndItsPart(unittest.TestCase):
              "description": "Items not allowed (keepout area 'nopekit_antenna_U1')",
              "items": [item("Pad 41 [GND] of U1 on F.Cu", "a"),
                        item("Pad 1 [3V3] of U10 on F.Cu", "b"),
-                       item("Track [GND] on In2.Cu, length 3.0000 mm", "c")]},
+                       item("Track [GND] on In2.Cu, length 3.0000 mm", "c"),
+                       item("NPTH pad of H1", "g"), item("NPTH pad of H2", "h")]},
             {"type": "items_not_allowed", "description": "Items not allowed (keepout area)",
              "items": [item("Track [GND] on F.Cu, length 1.0000 mm", "d")]},
             {"type": "items_not_allowed",
@@ -5324,12 +5478,19 @@ class AFindingIsTiedToItsAreaAndItsPart(unittest.TestCase):
                                                  "'nopekit_antenna_U1')",
              "items": [item("Via [GND] on F.Cu - B.Cu", "f")]},
         ]}
-        found, own = read(doc, {"nopekit_antenna_U1": "U1", "nopekit_antenna_U2": "U2"})
+        owners = {"nopekit_antenna_U1": "U1", "nopekit_antenna_U2": "U2"}
+        found, own, holes = read(doc, owners, {"g"})
         self.assertEqual([(r[1], r[2]) for r in found],
                          [("U1", "Pad 1 [3V3] of U10 on F.Cu"),
                           ("U1", "Track [GND] on In2.Cu, length 3.0000 mm"),
+                          ("U1", "NPTH pad of H2"),
                           ("U2", "Pad 2 [GND] of U1 on F.Cu")])
         self.assertEqual([(r[1], r[2]) for r in own], [("U1", "Pad 41 [GND] of U1 on F.Cu")])
+        self.assertEqual([(r[1], r[2]) for r in holes], [("U1", "NPTH pad of H1")])
+        # With no list from the refill, no hole is set apart: every item counts.
+        found, _own, holes = read(doc, owners)
+        self.assertIn(("U1", "NPTH pad of H1"), [(r[1], r[2]) for r in found])
+        self.assertEqual(holes, [])
 
 
 class TheKeepoutsToolsAreHeldToTheirWord(unittest.TestCase):

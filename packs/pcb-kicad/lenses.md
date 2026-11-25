@@ -127,6 +127,10 @@ take to close it. A green DRC answers none of them.
   copper text or a logo on a copper layer in the keep-out? The gate allows a
   part with no copper in the area, and KiCad's keep-out does not report text or
   drawings on copper. Look at each layer.
+- Is there a screw or a metal standoff in a hole under the antenna? The gate
+  lists a hole with no copper in the keep-out ("holes with no copper in a
+  keep-out, not counted") and does not count it: the hole is not copper, and
+  what goes in it is metal near the antenna. Use nylon there, or move the hole.
 
 ## Before the money is spent
 

@@ -7,14 +7,15 @@ fab's published limits, a measurement ngspice makes on the project's circuit
 deck, the populated boards' fit in their enclosure, each footprint's land against
 its vendor's drawing, four rules for a board that charges or carries a cell, the
 wrong ways its connectors can meet, each USB-C receptacle's termination, and the
-copper in each radio module's antenna keep-out.
+tracks, vias, pads and pours in each radio module's antenna keep-out.
 
 **Before you trust a Checked claim from this pack,** know what it is: a board that
 breaks none of KiCad's rules, with every connection made, no part shorting two of
 its own nets, no named track running hotter than you allowed, drawn from a
 schematic that breaks none of KiCad's electrical rules and that it matches, inside
 the fab's limits, with a simulated value inside its band, every part clear of
-the enclosure and no copper under an antenna. It is not a
+the enclosure, and no track, via, other part's pad or pour in an antenna's
+keep-out (a copper drawing or text there is not judged). It is not a
 circuit that works. Nothing here has seen the board powered, and nothing here
 has heard its radio.
 
@@ -121,12 +122,17 @@ area only on the layers the footprint names, and 10 of the 31 stock modules that
 carry one name fewer than every copper layer: the ESP32-S3-WROOM-1 and
 ESP32-WROOM-32 areas cover F.Cu, In1.Cu and B.Cu, so a ground pour on In2.Cu runs under the
 antenna with `pcb.drc` clean. This gate copies the area to every copper layer,
-forbids every kind of copper in it, and runs KiCad's DRC twice: on the board as
+forbids tracks, vias, pads and pours in it, and runs KiCad's DRC twice: on the board as
 stored, and after KiCad's own zone refill. kicad-cli judges a pour by its stored
 fill, so a pour moved under the antenna and not refilled reads clean until the
 next refill puts the copper there. The module's own pads are its own copper and
-are listed, not counted. A project that sets `items_not_allowed` to ignore, or
-excludes a finding, does not hide one: the staged copy sets it back.
+are listed, not counted. So is another part's hole with no copper (a mounting
+hole no wider than its drill, as KiCad's pcbnew reads its pad): KiCad's keep-out
+reports it, and a screw in it is `lenses.md`'s. A hole with a copper ring counts.
+An area's cutouts stay cutouts: the added area carries the outline and each
+cutout, as KiCad saved them, so a feed track cut out of a chip antenna's
+clearance is not a finding. A project that sets `items_not_allowed` to ignore,
+or excludes a finding, does not hide one: the staged copy sets it back.
 
 A record (`{id: {board?, ref, value, keepout, source}}`, held to the board's ref
 and value) brings in what the library does not: a module from a project's own
@@ -250,19 +256,22 @@ Read this before you write a claim. Every one of these has passed a "0 violation
 - **RF, signal integrity, EMC.** Antenna detuning, impedance, crosstalk, return
   paths: not modelled.
 - **The antenna beyond the copper on its board.** `pcb.antenna_keepout` judges
-  copper in the keep-out and nothing else. Metal near the antenna once the board
-  is in its case (a battery, a screw, a frame, a display's shield) and a hand
-  around it detune it as surely as copper under it: that is `lenses.md`, "Metal
-  and a hand around the antenna", and a physical claim, a range test in the hand
-  with the case closed and the final battery fitted. Not judged either: whether
-  the antenna sits at the board edge as the vendor asks, the size of the ground
-  plane a chip antenna needs, a part body over the antenna with no copper in the
-  area, and copper text or a drawing on a copper layer (KiCad's keep-out does not
-  report graphics: measured with kicad-cli 9.0.9). A module from a project's own
-  library is found only by a record. A footprint whose one copper keep-out guards
-  something other than its antenna is read as the antenna's: give a record. And
-  a chip antenna's feed must reach it: draw the rule area around the feed, as the
-  vendor's drawing does, or the feed track is a finding.
+  tracks, vias, other parts' pads and zone fills in the keep-out, and nothing
+  else. Metal near the antenna once the board is in its case (a battery, a
+  screw, a frame, a display's shield) and a hand around it detune it as surely
+  as copper under it: that is `lenses.md`, "Metal and a hand around the
+  antenna", and a physical claim, a range test in the hand with the case closed
+  and the final battery fitted. Not judged either: whether the antenna sits at
+  the board edge as the vendor asks, the size of the ground plane a chip antenna
+  needs, a part body over the antenna with no copper in the area, copper text or
+  a drawing on a copper layer (KiCad's keep-out does not report graphics:
+  measured with kicad-cli 9.0.9; the pass says so), and what goes in a hole with
+  no copper in the keep-out (listed, not counted). A module from a project's own
+  library is found only by a record. A footprint whose one copper keep-out
+  guards something other than its antenna is read as the antenna's: give a
+  record. And a chip antenna's feed must reach it: draw the rule area around the
+  feed, or cut the feed out of it, as the vendor's drawing does, or the feed
+  track is a finding.
 - **Fit beyond the solids.** `pcb.enclosure_fit` checks the parts' 3D models
   against the enclosure's solid, and against the other boards in it, at one
   placement. A model drawn wrong, a cable's bend radius, a plug's mating
