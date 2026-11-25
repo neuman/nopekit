@@ -2510,6 +2510,56 @@ are kept outside the repository with the branch's history.
   picture with every part lifted (the carriage then floats over an empty housing,
   and the fit the gates judge is gone); `--quality high` for the routed board's
   top view (its shading draws a shadow of the headers past the board's edge).
+- **Z2, the holdout, run in three rounds** (2026-11-24 and 25). An agent used the
+  packs as a person would, from the docs only, on four outside open designs no
+  pack author had seen: ZSWatch (nRF5340, Zephyr/NCS, KiCad 10), Watchy v3
+  (ESP32-S3, Arduino), Tanmatsu (ESP32-P4, ESP-IDF, KiCad 10) and Sprig (RP2040,
+  two AAA cells). A judge per design classed every result that was not a clean
+  pass, and three refuters checked each call of overfit, doc gap or real defect.
+  Round 1 confirmed about 40 overfit verdicts and as many doc gaps across every
+  pack, and real defects in all four designs: a charger TS pin on two fixed
+  resistors with no thermistor (Tanmatsu), a thermistor turned off in firmware
+  (ZSWatch), a motor modelled 0.084 mm into its pocket (ZSWatch), antenna shorts
+  and board/schematic value mismatches (Watchy), clearance and ERC errors
+  (Sprig). The designs' files never entered the repository (ZSWatch is GPL).
+- **H1-H6, R1, J1-J5, built: the holdout's fixes.** pcb-kicad reads KiCad 10
+  boards (a fixture saved by KiCad 10.0.8; the controls read the pack's own
+  libraries, and each kicad-cli release has a record its controls are keyed on),
+  stages the libraries a project's tables name, counts in parity what is
+  electrical and what is built (board-only drawings not marked so are counted,
+  said apart), decides every value before it is rounded, judges a stored zone
+  fill beside KiCad's refill, keeps each list's order when it writes a board,
+  and runs the antenna keep-out only on a kicad-cli and pcbnew pair it was
+  measured on. Its power rules judge a primary cell, a cell with no datasheet
+  (judged, then skipped, never errored) and one turned cell of a holder; the
+  fit takes any footprint with a body, a part's leads and a round shape;
+  `pcb_model_dirs` replaces an environment read. firmware-ci shares one replay
+  per check, keeps a log on every outcome, removes its containers, reads back
+  the named images, takes one matrix entry, says who holds the replay lock, and
+  skips (never passes) a build it cannot read inside an action or a script;
+  `fw.build` no longer needs `fw.ci_job`, because both cover `firmware-build`,
+  so a claim still waits for both. hand-ergonomics: a grip states its kind, and
+  a slab grip is an honest skip that the testers settle, never a count from a
+  model fitted to handles. fdm-print and cad-solid: walls and floors are two
+  counts, a 45-degree chamfer passes a 45-degree rule within a stated
+  tessellation tolerance, a sliver or a ray that grazes a convex edge is not a
+  wall, a seated contact is not a clash, and each gate has a tag of its own. The
+  spine: `doctor` runs tier-0 controls only and answers in seconds, names each
+  claim tag that binds gates of more than one live pack, reads two control
+  outcomes no current run can reach as history, and names each evaluator its
+  limits row did not compare; a skip reason or an error keeps 500 characters.
+  *Rejected:* a special case for any one design; a pack constant for a limit
+  that is the claim's; widening a test to pass.
+- **Open after the holdout** (written down, not built). Round 3's fixes were
+  checked by each lane's review and the suite, not again on the four designs.
+  Not built: a 'not applicable' state for a gate that covers no claim (it
+  counts as skipped); a better `gap --propose` ranking (word overlap pulls in
+  unrelated packs); `decide --id`; a limit that varies by part, so a per-part
+  minimum still prints 'one number in two places'; per-state skin limits; a
+  replay of every firmware-ci CI template (each unreplayed one is marked);
+  pcb.antenna_keepout and enclosure_fit under KiCad 10 (they skip a KiCad 10
+  board under KiCad 9's tools and are unmeasured under 10's); the full mutation
+  split with every tool present (OrcaSlicer is not on this machine).
 
 ## 9. Retired
 
