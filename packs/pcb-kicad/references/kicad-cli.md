@@ -83,35 +83,115 @@ found".)
 
 KiCad loads the root schematic of the board's project, the board's name with
 `.kicad_sch`, beside it; there is no flag to name another. It matches footprints to
-symbols and lists, under `schematic_parity` (the types KiCad 9.0.9 and 10.0.8
-report, read off both builds):
+symbols and lists, under `schematic_parity`, the types KiCad 9.0.9 and 10.0.8
+report (read off both builds). Every rule `pcb.parity` applies to them is in this
+one table:
 
-| Type | What differs | `pcb.parity` |
+| Item | What differs | `pcb.parity` |
 |---|---|---|
 | `missing_footprint` | a part in the schematic has no footprint | counted |
-| `extra_footprint` | a footprint has no part in the schematic | counted, unless board-only drawing |
-| `duplicate_footprints` | two footprints for one part | counted, unless board-only drawing |
+| `extra_footprint` | a footprint has no part in the schematic | counted |
+| `duplicate_footprints` | two footprints for one part | counted |
 | `footprint_symbol_mismatch` | a value, the footprint (a board whose footprints carry no library name, as `pcbnew.FootprintLoad` leaves them, fails here) or a fitting attribute ("Exclude from bill of materials" settings differ) | counted |
-| `net_conflict` | a pad on a net the schematic does not give it | counted, unless an open pin on a pad with no net |
-| `footprint_symbol_field_mismatch` | a symbol field, "Missing symbol field 'manf#' in footprint" (KiCad 10 only) | said apart |
-| `footprint_filters_mismatch` | a footprint outside its symbol's footprint filters | said apart |
+| `net_conflict` | a pad on a net the schematic does not give it | counted |
+| `extra_footprint` or `duplicate_footprints` on board-only drawing | a mounting hole, a logo or an outline not marked "Not in schematic" (below) | counted, and said apart: "k of n: board-only footprint(s) not marked 'Not in schematic' (...), mark them so in KiCad", with "no part, value, footprint or pad net differs" when it is every difference |
+| `net_conflict` on an open pin | "Pad missing net given by schematic (unconnected-(...))" on a pad the board gives no net (below) | agreement, not counted, said ("open pin(s) sit on pads with no net") |
+| `footprint_symbol_field_mismatch` | a symbol field, "Missing symbol field 'manf#' in footprint" (KiCad 10 only): BOM data | said apart, not counted |
+| `footprint_filters_mismatch` | a footprint outside its symbol's footprint filters: a library rule | said apart, not counted |
+| any item with `"excluded": true` | a person excluded it in KiCad ("Waivers" below) | said apart with the first comment, not counted |
+| a type not in this table | a check a later KiCad added | named, not counted; with nothing counted beside it the gate errors, since it cannot say whether it is a difference in what is built |
 
 Board-only drawing is a footprint with no numbered pad that no bill of materials
 takes (no reference, an unannotated one such as `REF**` or `G***`, or
 `exclude_from_bom`): a mounting hole, a logo, an outline not marked "Not in
 schematic". A footprint with a numbered pad, one a BOM would take, and one the
-report names by an id the board does not keep, all count. A type not in the table
-is named; with nothing counted beside it the gate errors, since it cannot say
-whether a new check of a later KiCad is a difference in what is built. The gate
-quotes KiCad's own words for the first three counted items, as they are: KiCad
-9.0.9's for a value reads "Value (C7) doesn't match symbol value (TBD)", where the
-first parentheses hold the reference and the second the board's value, and the
-schematic's value is not printed (seen in the holdout run). (What
-slipped through, in the holdout run: under KiCad 10.0.8, 32 of a board's 33 parity
-items were BOM fields, and on another board all 16 were mounting holes, each
-counted as a difference.) They are warnings, so the run is at every severity. The
-gate counts `schematic_parity` only: the same run's copper findings are
-`pcb.drc`'s. `--exit-code-violations` counts parity items too (exit 5).
+report names by an id the board does not keep, are no drawing and count as any
+other. KiCad's remedy is the footprint's "Not in schematic" attribute
+(`board_only`), one click; without it, KiCad's own "Update PCB from Schematic"
+with "delete extra footprints" removes the footprint. (What slipped through, in
+the holdout run: under KiCad 10.0.8, 32 of a board's 33 parity items were BOM
+fields, and on another board all 16 were mounting holes, each counted as a
+difference in words that did not show no part differed. The fix that followed
+left the mounting holes out of the count, and round 2 of the holdout read that
+as a regression: round 1 had confirmed each such footprint a real, minor defect,
+three refuters of three on two boards, and asked only for the split line. BOM
+fields stay out of the count on round 1's own confirmed finding: they move no
+part, value, footprint or net.)
+
+The gate quotes KiCad's own words for the first three counted differences in
+what is built, board-only drawing after them, as they are: KiCad 9.0.9's for a
+value reads "Value (C7) doesn't match symbol value (TBD)", where the first
+parentheses hold the reference and the second the board's value, and the
+schematic's value is not printed (seen in the holdout run). They are warnings,
+so the run is at every severity. The gate counts `schematic_parity` only: the
+same run's copper findings are `pcb.drc`'s. `--exit-code-violations` counts
+parity items too (exit 5).
+
+## A stored zone fill, and KiCad's refill
+
+kicad-cli's DRC judges a zone, a teardrop among them, by the fill the file
+stores; a person's DRC run in KiCad refills first. On a board with a zone (a pour
+or a teardrop, on the board or in a footprint; a rule area fills nothing),
+`pcb.drc` and `pcb.fab_rules` run their DRC twice on the same stage: on the board
+as stored, and on a copy refilled under the project's own `.kicad_pro` and
+`.kicad_dru` (in `nopekit-refill/` of the stage), never under the fab's rules
+`pcb.fab_rules` writes. The copy is refilled by:
+
+- kicad-cli 10: `kicad-cli pcb drc --refill-zones --save-board` on the copy (it
+  saves the copy in KiCad 10's format, which kicad-cli 10 then reads);
+- kicad-cli 9.0.9, which has no refill: KiCad's `pcbnew` in a child process
+  (`gates/_keepout_fill.py`, `ZONE_FILLER`, as the keep-out's refill);
+- neither (kicad-cli 9 and no `pcbnew` in nopekit's Python): no refill; the
+  stored fill alone is judged, and the line says so.
+
+A refill side that skips keeps the stored run's findings: the refill or its run
+past `pcb_drc_timeout_s`, a kicad-cli that does not launch, or a refilled copy
+saved in a format the kicad-cli on PATH does not read (a `pcbnew` newer than
+kicad-cli 9). They fail, and the line says "the stored zone fill only: the
+refill side skipped (why), so what a refill pours is not judged". The skip
+stands only where the stored run counts nothing; an error stands always. (What
+slipped through, in review of holdout round 3: the skip took the gate's place,
+so a short the stored run counted read Skipped, "nothing was shown".)
+
+A finding is the same in both runs when its type and the ids of its items are:
+a refill keeps every id the file holds once (measured: the 12 findings a refill
+left on a holdout board kept theirs), and the words move (the actual gap). An
+item with no id, a bad one or one the file holds twice takes a new random id at
+each load, and the refilled copy keeps the one KiCad saved; KiCad 10.0.8 writes
+every teardrop with no id. A finding that names one is matched by its type and
+its other items' ids alone (loosely), counted as often as the run that lists it
+more, and said apart ("k of n name an item KiCad gives a new id at each load"):
+the extra findings one run lists are at least that many the other does not
+show, so a count said apart is the least it can be, never more. (What slipped
+through, in review of holdout round 3: on the baseline with no pad ids, an
+unfilled pour and a via on a pad, kicad-cli 9.0.9 with pcbnew 9.0.9, the 3
+findings read 5, 2 of them "only on the stored zone fill" and 2 "only after
+KiCad's refill". Rejected: such a finding never called either copy's own, which
+took the remedy from the 20 stale teardrops below.) Each finding counts once
+over both. The line says apart how many only the stored fill shows ("k of
+n only on the stored zone fill (18x clearance, 2x hole_clearance), which KiCad's
+refill clears: refill the zones and save the board, since a fab plots the
+stored fill") and how many only the refill shows (the stored fill is out of
+date there). Measured:
+
+| Board | stored | refilled | counted |
+|---|---|---|---|
+| a KiCad 10 holdout board, kicad-cli 10.0.8 | 32, 2 of them excluded in the project: 30 counted (21 errors) | 12, the same 2 excluded: 10 counted (1 error) | 30: 20 only on the stored fill, every one a teardrop KiCad 10 writes with no id, so matched loosely |
+| the baseline with a GND fill stored over three pads and two tracks (tests/test_pcb_kicad.py), 9.0.9 with pcbnew 9.0.9, and 10.0.8 | 9 | 0 | 9, all only on the stored fill |
+| the same with a thermal-relief pad connection | 9 | 1 (`starved_thermal`) | 10: 1 only after the refill |
+
+Why both count: the stored fill is what a fab plots. `kicad-cli pcb export
+gerbers` 9.0.9 has no refill, and 10.0.8 refills only with `--check-zones` (on
+the holdout board the two plots of B.Cu differ); one of that board's stored
+teardrops sat on another net's pad at 0.0000 mm. The remedy is KiCad's "Fill All
+Zones" and a save, after which the two runs agree. (What slipped through,
+holdout round 2: the stored run alone counted 20 of pcb.drc's 21 errors and 13
+of pcb.fab_rules' findings from stored teardrops a refill clears, and the line
+sent a person to fix each clearance; and a pour moved under a track, not
+refilled, read clean.) Rejected: the refilled run alone (the short a fab would
+plot passes); the stored-only findings said apart and not counted (the same);
+refilling under the stage's rules (the fab's clearance would pour less copper
+than the person's refill and hide a gap). A board with no zone runs once.
 
 ## Waivers
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``pcb.antenna_keepout``'s refill, run by the gate in a child process:
+"""``pcb.antenna_keepout``'s refill, and ``pcb.drc``'s and ``pcb.fab_rules``' under
+kicad-cli 9 (``pcb.REFILL_DIR``), run by the gate in a child process:
 
     python3 _keepout_fill.py <board.kicad_pcb> <refilled.kicad_pcb>
     python3 _keepout_fill.py --version

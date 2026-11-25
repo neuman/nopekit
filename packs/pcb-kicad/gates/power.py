@@ -544,13 +544,18 @@ def charge_temperature(ctx: GateContext) -> Verdict:
         return Verdict(gate=gid, passed=False, measured=None, limit=0.0, comparator=">=",
                        units="K", evidence=ev, detail="; ".join(faults) + unjudged)
     seen = [r["headroom"] for r in rows if r["headroom"] is not None]
-    value = round(min(seen), 2) if seen else None
+    # Decided on the computed headroom, reported rounded down to 0.01 K
+    # (``_kicad.toward_fail``): rounded to the nearest and then compared, -0.004 K
+    # read -0.0 and passed ``>= 0`` (holdout round 2 found the pattern in
+    # pcb.net_width).
+    least = min(seen) if seen else None
+    value = None if least is None else K.toward_fail(least, ">=", 0.0, 2)
     # A cell held only by firmware, or one whose window is not stated, skips,
     # unless another cell here fails: a skip beside a fail would hide the
     # fail. (What slipped through this rule's first cut: the skip was returned
     # before the other cells were judged, so a cell charged past its window
     # read Skipped beside a firmware-only one.)
-    if (blind or missing) and (value is None or value >= 0.0):
+    if (blind or missing) and (least is None or least >= 0.0):
         why = []
         if blind:
             why.append(f"only firmware stops charging outside the window ("
@@ -563,7 +568,7 @@ def charge_temperature(ctx: GateContext) -> Verdict:
     detail = "; ".join(r["line"] for r in rows if r["line"])
     if blind:
         detail += f"; firmware only, not judged: {'; '.join(blind)}"
-    return Verdict(gate=gid, passed=value >= 0.0, measured=value, limit=0.0,
+    return Verdict(gate=gid, passed=least >= 0.0, measured=value, limit=0.0,
                    comparator=">=", units="K", detail=detail + unjudged, evidence=ev)
 
 
@@ -636,7 +641,8 @@ def _battery_window(ctx, d, b: Battery, protectors: list) -> dict:
     blind = f"; firmware not judged: {', '.join(row['firmware'])}" if row["firmware"] else ""
     row["line"] = (f"{b.id}: charging allowed {t_cold:.2f}..{t_hot:.2f} C at the corners "
                    f"({edges}) against the cell's {lo:g}..{hi:g} C: "
-                   f"{round(row['headroom'], 2):.2f} K of headroom on the {side} side"
+                   f"{K.toward_fail(row['headroom'], '>=', 0.0, 2):.2f} K of headroom on "
+                   f"the {side} side"
                    f"{note}{blind}")
     return row
 
@@ -901,8 +907,11 @@ def _edges(ntc, ser, par, tol, r_cold, r_hot, who: str, defeat: str) -> dict | s
                                 t = hi_c if side == "cold" else lo_c
                             found.append(t)
         edge[side] = min(found) if side == "cold" else max(found)
-    out = {"model": ntc.model, "cold_c": round(edge["cold"], 4),
-           "hot_c": round(edge["hot"], 4), "flags": []}
+    # Each edge rounded toward the side that protects less (the cold edge down,
+    # the hot edge up), never to the nearest: the headroom is computed from these,
+    # and an edge 0.00004 C past the cell's window read on it and passed.
+    out = {"model": ntc.model, "cold_c": K.round_toward(edge["cold"], 4, up=False),
+           "hot_c": K.round_toward(edge["hot"], 4, up=True), "flags": []}
     for side in ("cold", "hot"):
         if ntc.extrapolated(edge[side]):
             # B rises with temperature, so below its pair the B equation puts a
@@ -1075,18 +1084,22 @@ def charge_limits(ctx: GateContext) -> Verdict:
         return Verdict(gate=gid, passed=False, measured=None, limit=1.0, comparator="<=",
                        units="ratio", evidence=ev,
                        detail="; ".join(faults) + (f"; {said}" if said else ""))
-    value = round(max(r[0] for r in rows), 4) if rows else None
+    # Decided on the computed ratio, reported rounded up to 0.0001
+    # (``_kicad.toward_fail``): rounded to the nearest and then compared, 1.00004
+    # read 1.0 and passed ``<= 1``.
+    worst = max(r[0] for r in rows) if rows else None
+    value = None if worst is None else K.toward_fail(worst, "<=", 1.0, 4)
     # Firmware, or a cell value not stated, skips only beside nothing that
     # fails: a skip would hide a fail the rule can see. (What slipped through
     # this rule's first cut: a charger with a firmware current returned before
     # its voltage was read, so a 4.232 V charger on a 3.65 V LiFePO4 cell read
     # Skipped, not Failing.)
-    if (blind or missing) and (value is None or value <= 1.0):
+    if (blind or missing) and (worst is None or worst <= 1.0):
         why = ([f"set by firmware, which this rule cannot see: {'; '.join(blind)}"]
                if blind else []) + ([_unstated_reason(missing)] if missing else [])
         return Verdict(gate=gid, passed=False, skipped=True, evidence=ev,
                        skip_reason="; ".join(why))
-    return Verdict(gate=gid, passed=value <= 1.0, measured=value, limit=1.0, comparator="<=",
+    return Verdict(gate=gid, passed=worst <= 1.0, measured=value, limit=1.0, comparator="<=",
                    units="ratio", detail=said, evidence=ev)
 
 
@@ -1337,13 +1350,17 @@ def fault_current(ctx: GateContext) -> Verdict:
     if faults:
         return Verdict(gate=gid, passed=False, measured=None, limit=1.0, comparator=">=",
                        units="ratio", evidence=ev, detail="; ".join(faults) + unjudged)
-    value = round(min(r[0] for r in rows), 4) if rows else None
+    # Decided on the computed ratio, reported rounded down to 0.0001
+    # (``_kicad.toward_fail``): rounded to the nearest and then compared, 0.99996
+    # read 1.0 and passed ``>= 1``.
+    least = min(r[0] for r in rows) if rows else None
+    value = None if least is None else K.toward_fail(least, ">=", 1.0, 4)
     # A conductor whose cell lacks a value skips only beside nothing that
     # fails: a skip would hide a fail the rule can see.
-    if missing and (value is None or value >= 1.0):
+    if missing and (least is None or least >= 1.0):
         return Verdict(gate=gid, passed=False, skipped=True, evidence=ev,
                        skip_reason=_unstated_reason(missing))
-    return Verdict(gate=gid, passed=value >= 1.0, measured=value, limit=1.0, comparator=">=",
+    return Verdict(gate=gid, passed=least >= 1.0, measured=value, limit=1.0, comparator=">=",
                    units="ratio", evidence=ev,
                    detail="; ".join(r[1] for r in rows)
                    + " (one conductor carries the whole fault; parallel contacts get no credit)"

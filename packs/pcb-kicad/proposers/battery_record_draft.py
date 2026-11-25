@@ -43,7 +43,10 @@ numbers come from.
   With no pad named ``-``, a net of its pads that a drafted charger's or
   protector's ground pin sits on is its return;
 - a charger: a part with a cell pin (:data:`CELL_PINS`) and a charge-current or a
-  thermistor pin (:data:`CURRENT_PINS`, :data:`THERM_PINS`);
+  thermistor pin (:data:`CURRENT_PINS`, :data:`THERM_PINS`), or a charge input
+  alone (:data:`CHARGE_INPUT_PINS`, a PMIC's way), listed under
+  ``keep_or_delete``; on a KiCad 10 board each pin name is read without the pad
+  number KiCad 10 appends (``_kicad.numbered_pin_names``);
 - a protector: a part with a cutoff pair (:data:`CUTOFF_PAIRS`) and not the
   inputs that pair with it on a data line (:data:`CUTOFF_INPUTS`);
 - a fuse: a two-pad part from KiCad's ``Fuse*`` libraries or with a ref F and a
@@ -125,6 +128,23 @@ CURRENT_PINS = ("PROG", "PROG1", "ISET", "ISET1")
 #: 11). Rejected: TS1, TS2 (a battery monitor's sensors, which stop nothing
 #: themselves).
 THERM_PINS = ("THERM", "TS", "NTC", "TEMP")
+
+#: A charger's input, by pin name: a part with a cell pin and one of these, and
+#: neither a charge-current nor a thermistor pin, is drafted as a charger too,
+#: and listed under ``keep_or_delete``. A PMIC or a charger whose current and
+#: window its registers set has neither pin (holdout round 2: a watch's PMIC,
+#: whose current is set over I2C). Survey, KiCad 9.0.9's stock symbols: of the 58
+#: in ``Battery_Management`` with a cell pin, 23 carry no PROG or thermistor pin,
+#: and 8 of those carry one of these (VIN 3, energy harvesters that charge a
+#: cell; DCIN 4 and IN 1, chargers); none of its gauges or protectors does.
+#: Outside it, 11 symbols carry a cell pin beside one of these and charge
+#: nothing (USB PHYs and MSP430s with VBAT and VBUS, MCU modules with VBAT and
+#: VIN, a touch controller with VBAT and IN): the VBAT there is a backup supply,
+#: which is why a part found this way alone is one to keep or delete.
+#: *Rejected:* SYS (a power path's output, which a charger drives); VCC (a gauge's
+#: supply, BQ78350); CHG (a charger's status pin on 24 symbols, and a protector's
+#: charge switch).
+CHARGE_INPUT_PINS = ("VBUS", "VIN", "IN", "DCIN")
 
 #: A protector's cutoff pins, ``(discharge, charge)``, by the same survey: 8
 #: symbols carry a pair, a one-cell protector's DO and CO (2), another family's
@@ -343,13 +363,17 @@ class Board:
         self.stem = os.path.basename(path)[:-len(".kicad_pcb")]
         self.prefix = ""                         # set by Draft when there are several
         tree = K.load_tree(path)
-        _version, self.problems = K.board_problems(tree)
+        version, self.problems = K.board_problems(tree)
         self.fps: list = []
         self.unfitted: list[str] = []
         self.on: dict[str, list[tuple]] = {}
+        #: Whether the pads carry KiCad 10's names, each ending in its pad's
+        #: number (``_kicad.numbered_pin_names``): read without it.
+        self.numbered = False
         if self.problems:
             return
         board = K.board_from_tree(tree)
+        self.numbered = K.numbered_pin_names(version, board)
         self.fps = sorted((fp for fp in board.footprints if fp.fitted),
                           key=lambda fp: _ref_order(fp.ref))
         self.unfitted = [f"{fp.ref} ({fp.value})" for fp in board.footprints if not fp.fitted]
@@ -358,14 +382,23 @@ class Board:
                 if pad.net:
                     self.on.setdefault(pad.net, []).append((fp, pad))
 
+    def function(self, pad) -> str:
+        """``pad``'s library pin name, without KiCad 10's ``_<pad number>`` on a
+        board that carries it (:attr:`numbered`). What slipped through (holdout
+        round 2): on a KiCad 10 board every name ended in its pad's number
+        (``TS_11``, ``BAT_13``), so no table here matched and no charger was
+        drafted, on a charger with a thermistor pin and on a PMIC alike."""
+        return K.plain_pin_name(pad.pinfunction, pad.number) if self.numbered else pad.pinfunction
+
     def names(self, fp) -> dict[str, list[str]]:
         """``{pin name: [pad numbers]}`` of ``fp``'s numbered pads."""
         out: dict[str, list[str]] = {}
         for pad in fp.pads:
             if pad.number and pad.pinfunction:
-                out.setdefault(pin_name(pad.pinfunction), [])
-                if pad.number not in out[pin_name(pad.pinfunction)]:
-                    out[pin_name(pad.pinfunction)].append(pad.number)
+                name = pin_name(self.function(pad))
+                out.setdefault(name, [])
+                if pad.number not in out[name]:
+                    out[name].append(pad.number)
         return out
 
     @staticmethod
@@ -391,7 +424,7 @@ class Board:
         rows = []
         for number in self.pads_of(fp):
             pad = next(p for p in fp.pads if p.number == number)
-            name = pad.pinfunction.strip()
+            name = self.function(pad).strip()
             rows.append(f"{number}{' ' + name if name and name != '~' else ''} on "
                         f"{self.net(fp, number) or 'no net'}")
         return ", ".join(rows)
@@ -636,21 +669,49 @@ class Draft:
 
     @staticmethod
     def _cell_words() -> dict:
+        """A cell's words, before its chemistry is known: the chemistry is the
+        person's pick, and each cell key says which kind of cell takes it and to
+        drop it for the other kind. What slipped through (holdout round 2): the
+        cell was drafted with a rechargeable cell's keys alone (its charge
+        voltage, current and window) and no open-circuit voltage, so a person
+        drafting an alkaline cell was pointed at a charge voltage that
+        ``pcb.fault_current`` then refuses for a primary cell. And in review of
+        that fix, ``discharge_v_min`` was marked for a rechargeable cell alone,
+        while ``pcb.fault_current`` reads it for any chemistry that gives
+        ``internal_resistance_ohm``, which ``short_a``'s own words offer: a
+        primary cell stated as the draft says was refused for the key. It is
+        drafted for either kind, with the two rules that read it. *Rejected:* a
+        draft per chemistry guessed from the board (no charger on a board says
+        no more than "charged elsewhere"); the rechargeable keys alone with a
+        note (the keys a person fills are the ones the draft holds)."""
+        rechargeable = "for a rechargeable cell (li-ion, li-polymer, lifepo4, lto, nimh)"
+        primary = "for a primary cell (li-primary, alkaline)"
         return {
-            "chemistry": FILL + "one of li-ion, li-polymer, lifepo4, lto, nimh, li-primary, "
-                                "alkaline, from the cell's datasheet",
+            "chemistry": FILL + "one of li-ion, li-polymer, lifepo4, lto, nimh (rechargeable), "
+                                "li-primary, alkaline (primary), from the cell's datasheet; "
+                                "then drop each cell key marked for the other kind",
             "series": FILL + "the cells in series, a whole number (two or more: add "
                              "terminals.taps, the cell-junction pads from the lowest up)",
             "parallel": FILL + "the cells in parallel, a whole number",
             "cell": {
-                "upper_charge_v": FILL + "the cell's upper limit charging voltage, with "
-                                         "its tolerance, V per cell, from its datasheet",
-                "discharge_v_min": FILL + "the cell's end (cut-off) voltage, V per cell, "
-                                          "from its datasheet",
-                "charge_a_max": FILL + "the cell's maximum charge current, A per cell, "
-                                       "from its datasheet",
-                "charge_temp_c": FILL + "[lo, hi], the widest window the cell's datasheet "
-                                        "allows any charge in, C",
+                "upper_charge_v": FILL + f"{rechargeable}: its upper limit charging voltage, "
+                                         f"with its tolerance, V per cell, from its datasheet "
+                                         f"(drop for a primary cell)",
+                "open_circuit_v": FILL + f"{primary}: its fresh open-circuit voltage, V per "
+                                         f"cell, from its datasheet (drop for a rechargeable "
+                                         f"cell, unless its datasheet gives one above its "
+                                         f"charge voltage)",
+                "discharge_v_min": FILL + "for either kind of cell: its end (cut-off) voltage, "
+                                          "V per cell, from its datasheet (pcb.discharge_cutoff "
+                                          "reads it for a li-ion, li-polymer, lifepo4 or lto "
+                                          "cell, and pcb.fault_current wherever "
+                                          "internal_resistance_ohm is given: drop it only for "
+                                          "another cell that keeps short_a)",
+                "charge_a_max": FILL + f"{rechargeable}: its maximum charge current, A per "
+                                       f"cell, from its datasheet (drop for a primary cell)",
+                "charge_temp_c": FILL + f"{rechargeable}: [lo, hi], the widest window its "
+                                        f"datasheet allows any charge in, C (drop for a "
+                                        f"primary cell)",
                 "short_a": FILL + "[least, most] current the pack drives into a short, A, "
                                   "from the cell's and the pack's datasheets (or drop short_a "
                                   "and give internal_resistance_ohm [least, most])"}}
@@ -681,20 +742,29 @@ class Draft:
                 cell = [n for n in CELL_PINS if n in names]
                 cur = [n for n in CURRENT_PINS if n in names]
                 therm = [n for n in THERM_PINS if n in names]
-                if not cell or not (cur or therm):
+                inputs = [n for n in CHARGE_INPUT_PINS if n in names]
+                if not cell or not (cur or therm or inputs):
                     continue
                 functions = {"charge_v": {
                     "v_reg_v": FILL + "[min, max] V from the datasheet: the regulation voltage "
                                       "of this part's voltage option (or replace v_reg_v with "
                                       "divider {vfb_v, top_ref, bottom_ref, tol_pct} where "
-                                      "resistors set it)",
+                                      "resistors set it, or with set_by \"firmware\" where its "
+                                      "registers set it, as a PMIC's do)",
                     "per_cell": FILL + "true when it regulates each cell, false when it "
                                        "regulates the whole pack"}}
                 functions["charge_a"] = self._charge_a(b, fp, names, cur)
                 if therm:
                     functions["charge_temp"] = self._charge_temp(b, fp, names, therm)
                 pid = self.rid(b, fp.ref)
-                said = ", ".join(f"{n} ({', '.join(names[n])})" for n in cell + cur + therm)
+                said = ", ".join(f"{n} ({', '.join(names[n])})"
+                                 for n in cell + cur + therm + ([] if cur or therm else inputs))
+                if not (cur or therm):
+                    self.doubt.append(
+                        f"pcb_protectors.{pid}: {fp.ref} ({fp.value}) was taken for a charger "
+                        f"by its {'/'.join(cell)} and {'/'.join(inputs)} pins alone, which a "
+                        f"USB PHY or a microcontroller carries too (a backup supply's VBAT): "
+                        f"keep it when {fp.ref} charges the cell, else delete it")
                 # What a part is, is the person's word: "charger" lets its
                 # charge_temp stand with no acts (power.py), and a gauge with a
                 # BAT and a TS pin is no charger. (What slipped through: the draft
@@ -718,7 +788,8 @@ class Draft:
         if len(cur) != 1 or len(names[cur[0]]) != 1:
             return {"a_max": FILL + "the most charge current the datasheet guarantees, A (or "
                                     "replace a_max with prog {ref, k_v, r_tol_pct} for the "
-                                    "resistor that sets it)"}
+                                    "resistor that sets it, or with set_by \"firmware\" where "
+                                    "its registers set it)"}
         pad = names[cur[0]][0]
         net = b.net(fp, pad)
         parts = [p for p in b.parts_on(net, {fp.ref}) if len(b.pads_of(p)) == 2] if net else []

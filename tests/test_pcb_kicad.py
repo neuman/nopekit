@@ -627,7 +627,9 @@ class TheHottestTrackIsNamed(unittest.TestCase):
         the same number again: the line names both."""
         a = K.temp_rise_c(0.5, 0.25, 1.0, True)
         b = K.temp_rise_c(0.501, 0.25, 1.0, True)
-        self.assertTrue(b > a and round(a, 1) == round(b, 1), (a, b))
+        # As the line prints a rise: rounded up to 0.1 C (_kicad.toward_fail).
+        self.assertTrue(b > a and K.toward_fail(a, "<=", 10.0, 1) == K.toward_fail(
+            b, "<=", 10.0, 1), (a, b))
         self.params["pcb_net_currents_a"] = {"VBUS": 0.5, "GND": 0.501}
         detail = self._width()
         self.assertTrue(detail.startswith("GND: hottest track 0.25 mm on B.Cu, F.Cu ("), detail)
@@ -640,7 +642,8 @@ class TheHottestTrackIsNamed(unittest.TestCase):
         after the first, counts the other two, and the evidence lists all seven."""
         rise = K.temp_rise_c(0.5, 0.25, 1.0, True)
         inner = round(K.width_for_rise_mm(0.5, rise, 0.5, False), 4)
-        self.assertEqual(round(K.temp_rise_c(0.5, inner, 0.5, False), 1), round(rise, 1))
+        self.assertEqual(K.toward_fail(K.temp_rise_c(0.5, inner, 0.5, False), "<=", 10.0, 1),
+                         K.toward_fail(rise, "<=", 10.0, 1))
         nets = ("DM", "DP", "GND", "VBUS")
         split = ("DM", "DP", "GND")
         self.params["pcb_net_currents_a"] = dict.fromkeys(nets, 0.5)
@@ -1184,6 +1187,41 @@ class APartCachedUnderItsLibNameKeepsItsNames(unittest.TestCase):
                 self.assertIn("U1 COM: GND on 2, VBUS on 5", verdict.detail)
 
 
+class APinNameIsReadWithoutKiCad10sPadNumber(unittest.TestCase):
+    """On a KiCad 10 board updated from its schematic each pad's name ends in its
+    own number (``COM_2``, ``COM_5``: ``_numbered``). With no schematic beside
+    the board, the gates that read pin names read them without it. What slipped
+    through (review of holdout round 3, raised in round 2): read whole, no two
+    pads shared a name, so pcb.pin_names could only pass, and the ESD array's
+    COM on two nets passed."""
+
+    def _run(self, gid: str, text: str, **params):
+        root = tempfile.mkdtemp(prefix="nopekit-pcb-numbered-")
+        self.addCleanup(shutil.rmtree, root, True)
+        board = _board_copy(root, text)
+        return _run(_registry(), gid, root, dict(_baseline(), pcb_board=board, **params))
+
+    def test_the_split_pair_fails_on_numbered_names(self):
+        tree = K.load_tree(BOARD)
+        K.child(_pad(tree, "U1", "5"), "net")[1:] = [_net_code(tree, "VBUS"), K.Q("VBUS")]
+        split = _numbered(K.dump(tree) + "\n")
+        self.assertIn('(pinfunction "COM_5")', split)
+        verdict = self._run("pcb.pin_names", split)
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("U1 COM: GND on 2, VBUS on 5", verdict.detail)
+        self.assertEqual(self._run("pcb.pin_names", _numbered(_board_text())).outcome, "pass")
+
+    def test_the_land_pairs_numbered_names_with_the_drawings_functions(self):
+        drawings = {"U1": os.path.join(ASSETS, "esda6v1bc6_land.json")}
+        plain = self._run("pcb.land_pattern", _by_name(_board_text()),
+                          pcb_land_drawings=drawings)
+        numbered = self._run("pcb.land_pattern", _numbered(_board_text()),
+                             pcb_land_drawings=drawings)
+        self.assertEqual(plain.outcome, "pass", plain.render())
+        self.assertEqual((numbered.outcome, numbered.measured, numbered.detail),
+                         (plain.outcome, plain.measured, plain.detail))
+
+
 @unittest.skipIf(os.name == "nt", "the stand-in kicad-cli is a #! script")
 class AnOpenPinOnAPadWithNoNetIsAgreement(unittest.TestCase):
     """KiCad 9.0.9 names every open schematic pin's net ``unconnected-(...)`` and
@@ -1649,9 +1687,11 @@ class ThePowerRulesReadTheirRecords(_PowerCase):
 
     def test_the_baseline_passes_each_at_its_value(self):
         """The design's numbers, recomputed: 5.34..43.47 C against 0..45 C; 4.232 V
-        of 4.25 V; 1.45 x 1 A against a 1 A trip; 2.85 V against 2.5 V."""
+        of 4.25 V; 1.45 x 1 A against a 1 A trip; 2.85 V against 2.5 V. Each
+        reported rounded toward the side that fails (_kicad.toward_fail): the
+        headroom is 1.5295 K, reported 1.52."""
         for gid, measured, units, said in (
-                ("pcb.charge_temperature", 1.53, "K", "charging allowed 5.34..43.47 C"),
+                ("pcb.charge_temperature", 1.52, "K", "charging allowed 5.34..43.47 C"),
                 ("pcb.charge_limits", 0.9958, "ratio", "holds 4.232 V of the cell's 4.25 V"),
                 ("pcb.fault_current", 1.45, "ratio", "trips by 1 A, against 1.45 x 1 A"),
                 ("pcb.discharge_cutoff", 2.85, "V", "cuts it off at 2.85 V per cell")):
@@ -1941,7 +1981,8 @@ class ChargingStopsOutsideTheWindow(_PowerCase):
                 if beta_tol is not None:
                     ntc["beta_tol_pct"] = beta_tol
             return records
-        for beta_tol, outcome, headroom in ((3, "fail", -0.52), (0, "pass", 0.14)):
+        # Each headroom rounded down to 0.01 K (_kicad.toward_fail).
+        for beta_tol, outcome, headroom in ((3, "fail", -0.52), (0, "pass", 0.13)):
             with self.subTest(beta_tol_pct=beta_tol):
                 verdict = self.run_gate(self.GID, records=table(beta_tol))
                 self.assertEqual(verdict.outcome, outcome, verdict.render())
@@ -1959,14 +2000,14 @@ class ChargingStopsOutsideTheWindow(_PowerCase):
         """thermal-analytic's grade case, grafted: the same network built from a
         coarser grade of the same NTC. Its nominal curve, and so every check
         made at nominal, does not move; at the corners the headroom shrinks from
-        1.53 K (1 %) to 0.17 K (R25 5 %, B 3 %), and a 10 % part charges the cell
-        past its 45 C."""
+        1.52 K (1 %) to 0.17 K (R25 5 %, B 3 %), and a 10 % part charges the cell
+        past its 45 C. Each headroom is reported rounded down to 0.01 K."""
         def grade(r25, beta):
             def records(p):
                 self._ntc(p).update(r25_tol_pct=r25, beta_tol_pct=beta)
             return records
-        for r25, beta, outcome, headroom in ((1, 1, "pass", 1.53), (5, 3, "pass", 0.17),
-                                             (10, 3, "fail", -0.97)):
+        for r25, beta, outcome, headroom in ((1, 1, "pass", 1.52), (5, 3, "pass", 0.17),
+                                             (10, 3, "fail", -0.98)):
             with self.subTest(r25_tol_pct=r25, beta_tol_pct=beta):
                 verdict = self.run_gate(self.GID, records=grade(r25, beta))
                 self.assertEqual(verdict.outcome, outcome, verdict.render())
@@ -2050,7 +2091,7 @@ class ChargingStopsOutsideTheWindow(_PowerCase):
                                                           K.Q("THERM")]
         verdict = self.run_gate(self.GID, therm_pin, records)
         self.assertEqual(verdict.outcome, "pass", verdict.render())
-        self.assertEqual(verdict.measured, 1.53)
+        self.assertEqual(verdict.measured, 1.52)    # 1.5295 K, rounded down
         self.assertIn("on the pack's NTC", verdict.detail)
 
     def test_a_divider_reads_its_pullup_off_the_board(self):
@@ -2150,7 +2191,7 @@ class ChargingStopsOutsideTheWindow(_PowerCase):
         self.assertIn("second: mcu (firmware)", verdict.skip_reason)
         verdict = self.run_gate(self.GID, records=second((10, 3)))
         self.assertEqual(verdict.outcome, "fail", verdict.render())
-        self.assertEqual(verdict.measured, -0.97)
+        self.assertEqual(verdict.measured, -0.98)   # rounded down to 0.01 K
         self.assertIn("firmware only, not judged: second: mcu (firmware)", verdict.detail)
 
     def test_the_most_protective_element_sets_each_edge(self):
@@ -2371,7 +2412,7 @@ class TheChargerIsHeldToTheCell(_PowerCase):
             p["pcb_protectors"]["charger"]["functions"]["charge_v"]["v_reg_v"] = [8.336, 8.464]
         verdict = self.run_gate(self.GID, records=two_s)
         self.assertEqual(verdict.outcome, "fail", verdict.render())
-        self.assertEqual(verdict.measured, round(8.464 / 4.25, 4))
+        self.assertEqual(verdict.measured, 1.9916)  # 8.464 / 4.25 = 1.99153, rounded up
         self.assertIn("holds 8.464 V of the cell's 4.25 V", verdict.detail)
         verdict = self.run_gate(self.GID, lambda t: _set_value(t, "R3", "10"))
         self.assertEqual(verdict.outcome, "fail", verdict.render())
@@ -3010,7 +3051,8 @@ class TheLandFitIsAnchoredPastTheFullSearch(unittest.TestCase):
             _baseline(), pcb_board=board,
             pcb_land_drawings={"U1": os.path.join(ASSETS, "esda6v1bc6_land.json")}))
         self.assertEqual(verdict.outcome, "fail", verdict.render())
-        self.assertEqual(verdict.measured, 1.9, verdict.render())
+        # 1.90004 mm, rounded up to 0.1 um (_kicad.toward_fail).
+        self.assertEqual(verdict.measured, 1.9001, verdict.render())
 
 
 #: The vias pcbnew 9.0.9 wrote for a blind via (F.Cu to In1.Cu), a buried one
@@ -6150,10 +6192,12 @@ class ADraftSettlesNothing(_PowerCase):
         walk(self.records, "")
         self.assertEqual([(p, v) for p, v in leaves if not isinstance(v, str)], [])
         self.assertEqual(self.summary["fill"], fills)
-        # 64 datasheet numbers, flags and words; U1's and U2's kind (charger,
-        # protector, bms or gauge is the person's word: in review of P9 the
-        # draft wrote it); and the 11 records' sources.
-        self.assertEqual(len(fills), 77)
+        # 65 datasheet numbers, flags and words (the cell's open_circuit_v
+        # among them since holdout round 2: a cell is drafted before its
+        # chemistry is known); U1's and U2's kind (charger, protector, bms or
+        # gauge is the person's word: in review of P9 the draft wrote it); and
+        # the 11 records' sources.
+        self.assertEqual(len(fills), 78)
         self.assertEqual(sorted(self.records), sorted(DRAFT_RECORDS))
         sources = 0
         for kind, recs in self.records.items():
@@ -6918,11 +6962,15 @@ class AFileTooNewForTheToolIsAToolLimit(_StandIn):
 
 
 class ParityCountsWhatIsBuilt(_StandIn):
-    """A part, a value, a footprint or a pad's net that differs is counted;
-    BOM fields, footprint filters, board-only drawing and an exclusion are said
-    apart; a type this pack does not know is named, and alone is an error.
-    (What slipped through: under KiCad 10.0.8, 32 of a board's 33 parity items
-    were BOM fields, and on another board all 16 were mounting holes.)"""
+    """A part, a value, a footprint or a pad's net that differs is counted, and
+    so is board-only drawing not marked "Not in schematic", said apart in the
+    line with KiCad's remedy; BOM fields, footprint filters and an exclusion are
+    said apart and not counted; a type this pack does not know is named, and
+    alone is an error. (What slipped through: under KiCad 10.0.8, 32 of a
+    board's 33 parity items were BOM fields, and on another board all 16 were
+    mounting holes, in words that did not show no part differed. The fix that
+    followed left the mounting holes out of the count, and holdout round 2 read
+    it as a regression: round 1 had confirmed each a real, minor defect.)"""
 
     HOLE_ID = "aaaaaaaa-bbbb-4ccc-8ddd-000000000001"
 
@@ -6945,14 +6993,27 @@ class ParityCountsWhatIsBuilt(_StandIn):
         _report_cli(self.bin, _drc_report(parity=items), 5 if items else 0)
         return self.gate("pcb.parity")
 
-    def test_bom_fields_and_board_only_drawing_are_said_apart(self):
+    def test_bom_fields_are_said_apart_and_board_only_drawing_is_counted_apart(self):
         items = [_item("footprint_symbol_field_mismatch", uuid=self.j1) for _ in range(32)]
         items.append(_item("extra_footprint", uuid=self.HOLE_ID))
         verdict = self.parity(items)
-        self.assertEqual((verdict.outcome, verdict.measured), ("pass", 0), verdict.render())
-        self.assertIn("said apart, not counted: 32x footprint_symbol_field_mismatch (symbol "
-                      "field(s) that differ), 1x board-only drawing not marked 'Not in "
-                      "schematic' (REF**)", verdict.detail)
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertTrue(verdict.detail.startswith(
+            "1 difference(s) between board and schematic: 1 of 1: board-only footprint(s) "
+            "not marked 'Not in schematic' (REF**), mark them so in KiCad; no part, value, "
+            "footprint or pad net differs; said apart, not counted: 32x "
+            "footprint_symbol_field_mismatch (symbol field(s) that differ)"), verdict.detail)
+
+    def test_what_is_built_is_quoted_before_the_drawing(self):
+        verdict = self.parity([_item("extra_footprint", uuid=self.HOLE_ID),
+                               _item("footprint_symbol_mismatch", uuid=self.j1,
+                                     description="Value (C7) doesn't match symbol value (TBD)")])
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 2), verdict.render())
+        self.assertTrue(verdict.detail.startswith(
+            "2 difference(s) between board and schematic: Value (C7) doesn't match symbol "
+            "value (TBD); 1 of 2: board-only footprint(s) not marked 'Not in schematic' "
+            "(REF**), mark them so in KiCad;"), verdict.detail)
+        self.assertNotIn("no part, value, footprint or pad net differs", verdict.detail)
 
     def test_what_is_built_is_counted(self):
         for name, item in (("a value", _item("footprint_symbol_mismatch", uuid=self.j1)),
@@ -6964,11 +7025,13 @@ class ParityCountsWhatIsBuilt(_StandIn):
                 self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1),
                                  verdict.render())
 
-    def test_duplicates_with_no_reference_and_no_pins_are_drawing(self):
+    def test_duplicates_with_no_reference_and_no_pins_are_drawing_and_count(self):
         item = _item("duplicate_footprints", uuid=self.HOLE_ID)
         item["items"].append({"description": "Footprint REF**", "uuid": self.HOLE_ID})
         verdict = self.parity([item])
-        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("1 of 1: board-only footprint(s) not marked 'Not in schematic'",
+                      verdict.detail)
 
     def test_a_type_this_pack_does_not_know_is_named(self):
         verdict = self.parity([_item("footprint_new_check")])
@@ -7341,7 +7404,7 @@ class ANetsCurrentMayFollowARoute(unittest.TestCase):
     def test_the_route_is_judged_at_its_current_and_the_rest_at_theirs(self):
         v = self._verdict({"amps": 2.0, "from": "J1.2", "to": "J2.2", "rest_a": 0.1})
         self.assertEqual(v.outcome, "fail", v.render())
-        self.assertEqual(v.measured, round(K.temp_rise_c(2.0, 0.25, 1.0, True), 1))
+        self.assertEqual(v.measured, math.ceil(K.temp_rise_c(2.0, 0.25, 1.0, True) * 10) / 10)
         self.assertIn("GND: 2 track(s) on its route J1.2 to J2.2 at 2 A, 3 off it at 0.1 A",
                       v.detail)
         with open(v.evidence[0], encoding="utf-8") as fh:
@@ -7479,7 +7542,8 @@ class ThePowerRulesTakeWhatAHoldoutCouldNotState(_PowerCase):
                "open_circuit_v": 1.65}
         v = self.run_gate("pcb.fault_current", records=alkaline(ocv))
         watts = 1.65 * (1.65 / 0.15) / 4.0
-        self.assertEqual((v.outcome, v.measured), ("pass", round(15.0 / watts, 4)), v.render())
+        # 15 / 4.5375 = 3.30579, rounded down to 0.0001 (_kicad.toward_fail).
+        self.assertEqual((v.outcome, v.measured), ("pass", 3.3057), v.render())
         self.assertIn("wire_out: nothing protects J6 pin 1", v.detail)
         self.assertIn(f"at most {watts:.3g} W available", v.detail)
         self.assertIn("against IEC 62368-1's PS1 15 W", v.detail)
@@ -8043,7 +8107,7 @@ class ThePartSetHasNoTypeFilter(unittest.TestCase):
         v = _registry().get("pcb.enclosure_fit")[1](
             _fit_ctx(tempfile.mkdtemp(dir=root), dict(_baseline(), pcb_board=board)))
         self.assertEqual(v.outcome, "skipped", v.render())
-        self.assertIn("1 part(s) name no 3D model (U1), 1 one not found here (J1)",
+        self.assertIn("1 part(s) name no 3D model (U1), 1 name a model not found here (J1)",
                       v.skip_reason)
         self.assertLessEqual(len(v.skip_reason), 200)
         self.assertTrue(v.skip_reason.endswith("pcb_enclosure_bodiless"), v.skip_reason)
@@ -8893,6 +8957,741 @@ class AModelInTheProjectsFolderIsFittedByKiCad(unittest.TestCase):
                 v = self._run(dirs)
                 self.assertEqual((v.outcome, v.measured), ("fail", 0.8), v.render())
                 self.assertIn("declared height not used, its model found: U1", v.detail)
+
+
+# --------------------------------------------------------------------------- #
+# general-packs J1: holdout round 3. The writer keeps each list's order, a value
+# is decided before it is rounded, stored fills are judged beside KiCad's
+# refill, board-only drawing counts again, and the draft reads KiCad 10's pin
+# names, a PMIC and a cell of either kind.
+# --------------------------------------------------------------------------- #
+#: A board in KiCad 7's form (format 20221018), cut to one footprint whose
+#: reference text ends in a bare ``hide`` after its child lists, as KiCad 6 and 7
+#: write it. Written here, not copied from a design.
+K7_BOARD = """(kicad_pcb (version 20221018) (generator pcbnew)
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (38 "B.Mask" user)
+    (39 "F.Mask" user)
+    (44 "Edge.Cuts" user)
+    (46 "B.CrtYd" user "B.Courtyard")
+    (47 "F.CrtYd" user "F.Courtyard")
+    (48 "B.Fab" user)
+    (49 "F.Fab" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "A")
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu")
+    (tstamp 11111111-2222-4333-8444-555555555551)
+    (at 10 10)
+    (fp_text reference "R1" (at 0 -1.43) (layer "F.SilkS") hide
+      (effects (font (size 1 1) (thickness 0.15)))
+      (tstamp 11111111-2222-4333-8444-555555555552)
+    )
+    (fp_text value "10k" (at 0 1.43) (layer "F.Fab")
+      (effects (font (size 1 1) (thickness 0.15)))
+      (tstamp 11111111-2222-4333-8444-555555555553)
+    )
+    (pad "1" smd roundrect (at -0.775 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "A") (tstamp 11111111-2222-4333-8444-555555555554))
+    (pad "2" smd roundrect (at 0.775 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (tstamp 11111111-2222-4333-8444-555555555555))
+  )
+  (gr_rect (start 5 5) (end 15 15)
+    (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts")
+    (tstamp 11111111-2222-4333-8444-555555555556))
+)
+"""
+
+
+class TheWriterKeepsEachListsOrder(unittest.TestCase):
+    """``_kicad.dump`` writes every item of a list where ``parse`` read it. What
+    slipped through (holdout round 2): it wrote a list's atoms before its child
+    lists, so a KiCad 6/7 board's ``(fp_text reference ... (layer ...) hide``
+    came back with ``hide`` before ``(at ...)``, and kicad-cli 9.0.9 refused the
+    staged copy the keep-out and the fit's declared heights write: "Failed to
+    load board"."""
+
+    def test_a_trailing_atom_stays_in_its_place(self):
+        tree = K.parse(K7_BOARD)
+        text = K.dump(tree)
+        self.assertEqual(K.parse(text), tree)
+        self.assertRegex(text, r'\(fp_text reference "R1"\s+\(at 0 -1\.43\)\s+'
+                               r'\(layer "F\.SilkS"\)\s+hide\s+\(effects')
+
+    def test_the_pack_boards_write_as_before(self):
+        """No list on a KiCad 9 or 10 board ends in an atom after a child list:
+        their copies, and so every fixture, are written as they were."""
+        for name in ("esd_guard.kicad_pcb", "power_board.kicad_pcb", "radio_board.kicad_pcb",
+                     os.path.join("kicad10", "esd_guard.kicad_pcb")):
+            with self.subTest(board=name):
+                tree = K.load_tree(os.path.join(ASSETS, name))
+                self.assertEqual(K.parse(K.dump(tree)), tree)
+
+    @unittest.skipIf(shutil.which("kicad-cli") is None, "needs the real kicad-cli")
+    def test_kicad_loads_the_written_copy(self):
+        root = tempfile.mkdtemp(prefix="nopekit-k7-")
+        self.addCleanup(shutil.rmtree, root, True)
+        for stem, text in (("given", K7_BOARD), ("written", K.dump(K.parse(K7_BOARD)) + "\n")):
+            with self.subTest(board=stem):
+                path = os.path.join(root, stem + ".kicad_pcb")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                proc = _env.run(["kicad-cli", "pcb", "drc", "--format", "json", "-o",
+                                 os.path.join(root, stem + ".json"), path], cwd=root)
+                self.assertIn(proc.returncode, (0, 5), proc.stdout + proc.stderr)
+
+
+class AValueIsDecidedBeforeItIsRounded(_PowerCase):
+    """A gate decides on the value it computed and reports it rounded toward the
+    side its limit fails on (``_kicad.toward_fail``). What slipped through
+    (holdout round 2): ``pcb.net_width`` rounded a computed 10.0207 C to 10.0 and
+    then compared it with 10 C, so the claim read Checked on a value its own
+    condition rejects; the charge limits, the fault current, the charge
+    headroom, the fit's gap and the land's residual rounded and then compared
+    too."""
+
+    def test_the_figure_is_never_on_the_passing_side(self):
+        cases = [((10.0207, "<=", 10.0, 1), 10.1), ((9.98, "<=", 10.0, 1), 10.0),
+                 ((10.03, "<=", 10.05, 1), 10.03), ((0.3, "<=", 1.0, 1), 0.3),
+                 ((-0.004, ">=", 0.0, 2), -0.01), ((0.49996, ">=", 0.5, 3), 0.499),
+                 ((1.00004, "<=", 1.0, 4), 1.0001), ((0.99996, ">=", 1.0, 4), 0.9999),
+                 ((1.3499999999999999, ">=", 0.5, 3), 1.35)]
+        for args, shown in cases:
+            with self.subTest(args=args):
+                got = K.toward_fail(*args)
+                self.assertEqual(got, shown)
+                value, comparator, limit, _places = args
+                self.assertEqual(K.holds(got, comparator, limit),
+                                 K.holds(value, comparator, limit))
+        self.assertEqual(K.toward_fail(math.inf, "<=", 10.0, 1), math.inf)
+
+    def test_a_rise_a_hair_past_its_limit_fails(self):
+        width = round(K.width_for_rise_mm(2.0, 10.02, 1.0, True), 4)
+        rise = K.temp_rise_c(2.0, width, 1.0, True)
+        self.assertTrue(10.0 < rise < 10.05 and round(rise, 1) == 10.0, rise)
+        tree = K.load_tree(BOARD)
+        code = _net_code(tree, "VBUS")
+        for seg in K.children(tree, "segment"):
+            if K.value(seg, "net") == code:
+                K.child(seg, "width")[1] = f"{width:g}"
+        board = os.path.join(self.root, "w.kicad_pcb")
+        with open(board, "w", encoding="utf-8") as fh:
+            fh.write(K.dump(tree) + "\n")
+        verdict = _run(self.registry, "pcb.net_width", self.root,
+                       dict(_baseline(), pcb_board=board, pcb_net_currents_a={"VBUS": 2.0},
+                            pcb_temp_rise_limit_c=10.0))
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 10.1), verdict.render())
+        self.assertIn(" rises 10.1 C at 2 A ", verdict.detail)
+
+    def test_a_charge_ratio_a_hair_past_one_fails(self):
+        """The charger's 4.232 V against a cell's 4.23183 V: 1.00004, which read
+        1.0 and passed."""
+        def tight(p):
+            p["pcb_batteries"]["main"]["cell"]["upper_charge_v"] = 4.23183
+        verdict = self.run_gate("pcb.charge_limits", records=tight)
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1.0001), verdict.render())
+
+    def test_an_ntc_edge_a_hair_past_the_cells_window_fails(self):
+        """The baseline's NTC edges, as computed: cold 5.340979 C, hot
+        43.470409 C. A cell whose window ends a hair inside either edge is
+        charged past it, so the rule fails. Each edge rounded to the nearest
+        0.0001 C read on the window's own bound (5.341, 43.4704), the headroom
+        read 0, and the rule passed; an edge is rounded toward the side that
+        protects less, and the headroom decided before it is rounded. (Review of
+        holdout round 3: no test had a value near either step.)"""
+        for window in ([5.341, 45.0], [0.0, 43.4704]):
+            with self.subTest(window=window):
+                def tight(p, window=window):
+                    p["pcb_batteries"]["main"]["cell"]["charge_temp_c"] = window
+                verdict = self.run_gate("pcb.charge_temperature", records=tight)
+                self.assertEqual((verdict.outcome, verdict.measured), ("fail", -0.01),
+                                 verdict.render())
+        def roomy(p):
+            p["pcb_batteries"]["main"]["cell"]["charge_temp_c"] = [5.3409, 43.4705]
+        verdict = self.run_gate("pcb.charge_temperature", records=roomy)
+        self.assertEqual((verdict.outcome, verdict.measured), ("pass", 0.0), verdict.render())
+
+    @unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
+    def test_a_fit_gap_a_hair_under_its_limit_fails(self):
+        """Two baseline boards side by side, their bodies 0.4996 mm apart, under
+        a claim of >= 0.5 mm: the gap rounded to the nearest micrometre read 0.5
+        and passed. It is decided as measured and reported rounded down."""
+        out = tempfile.mkdtemp(prefix="nopekit-fit-hair-")
+        self.addCleanup(shutil.rmtree, out, True)
+        box = _enclosure_step(os.path.join(out, "box.step"), "shell",
+                              (-10.0, -30.0, 0.0), (80.0, 10.0, 30.0))
+        base = {k: v for k, v in _baseline().items()
+                if k not in ("pcb_enclosure_step", "pcb_board_placement",
+                             "pcb_enclosure_bodiless")}
+
+        def fit(x):
+            return {"board": _baseline()["pcb_board"], "enclosure_step": box,
+                    "placement": {"x": x, "y": 0.0, "z": 4.0}}
+        params = dict(base, pcb_enclosure_fits={"left": fit(0.0), "right": fit(30.4996)})
+        verdict = gates_mod.run_gate(*self.registry.get("pcb.enclosure_fit"),
+                                     _fit_ctx(tempfile.mkdtemp(dir=out), params,
+                                              _fit_claim(0.5)))
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 0.499), verdict.render())
+        self.assertIn("nearest left:board is 0.499 mm from board right vs >= 0.5 mm",
+                      verdict.detail)
+
+
+def _stale_board(connect: str = "yes") -> str:
+    """The baseline with a GND pour on F.Cu whose stored fill is its whole
+    outline, drawn over J1's DP, DM and VBUS pads and two tracks, as a fill made
+    before the pads and tracks were placed: KiCad's refill clears around them.
+    With ``connect`` "yes" the refill is clean (measured: 9 findings stored, 0
+    refilled, under kicad-cli 9.0.9 with pcbnew 9.0.9 and under 10.0.8); with
+    "thermal" J1's GND pad takes a thermal relief the tracks starve, a finding
+    only the refill shows (1, under both)."""
+    tree = K.load_tree(BOARD)
+    box = [["xy", "2", "5"], ["xy", "8", "5"], ["xy", "8", "14"], ["xy", "2", "14"]]
+    pads = ["connect_pads", ["clearance", "0.5"]]
+    if connect == "yes":
+        pads.insert(1, "yes")
+    tree.append(["zone", ["net", _net_code(tree, "GND")], ["net_name", K.Q("GND")],
+                 ["layer", K.Q("F.Cu")], ["uuid", K.Q("5ea1f111-0000-4000-8000-000000000001")],
+                 ["hatch", "edge", "0.5"], pads, ["min_thickness", "0.25"],
+                 ["filled_areas_thickness", "no"],
+                 ["fill", "yes", ["thermal_gap", "0.5"], ["thermal_bridge_width", "0.5"]],
+                 ["polygon", ["pts", *box]],
+                 ["filled_polygon", ["layer", K.Q("F.Cu")], ["pts", *box]]])
+    return K.dump(tree) + "\n"
+
+
+#: A stand-in kicad-cli for a board with a zone: it names ``release``, writes
+#: ``stored.json`` for the board as given and ``refilled.json`` for one this
+#: stand-in or the stand-in refill marked, saves a refill with
+#: ``--refill-zones --save-board`` (KiCad 10's), and logs every call and the
+#: project file beside the board it refilled. A file ``sleep_save`` or
+#: ``sleep_refilled`` beside it holds the seconds its refill, or its run on a
+#: refilled board, sleeps first; ``exit_refilled`` the code its run on a refilled
+#: board exits with, writing no report.
+_FILL_CLI = r"""
+import json, os, shutil, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+args = sys.argv[1:]
+with open(os.path.join(here, "calls.log"), "a") as fh:
+    fh.write(" ".join(args) + "\n")
+def flag(name):
+    path = os.path.join(here, name)
+    return open(path).read().strip() if os.path.isfile(path) else None
+if args[:1] == ["version"]:
+    print(RELEASE); sys.exit(0)
+board = args[-1]
+if "--save-board" in args:
+    if flag("sleep_save"):
+        time.sleep(float(flag("sleep_save")))
+    with open(board, "a") as fh:
+        fh.write("\n#refilled\n")
+    stem = os.path.splitext(board)[0]
+    shutil.copyfile(stem + ".kicad_pro", os.path.join(here, "refill_project.json"))
+    json.dump({"kicad_version": RELEASE, "violations": []},
+              open(args[args.index("-o") + 1], "w"))
+    sys.exit(0)
+with open(board) as fh:
+    marked = "#refilled" in fh.read()
+if marked and flag("sleep_refilled"):
+    time.sleep(float(flag("sleep_refilled")))
+if marked and flag("exit_refilled"):
+    print("Failed to load board", file=sys.stderr); sys.exit(int(flag("exit_refilled")))
+report = json.load(open(os.path.join(here, "refilled.json" if marked else "stored.json")))
+json.dump(report, open(args[args.index("-o") + 1], "w"))
+counted = [v for v in report["violations"] if not v.get("excluded")]
+sys.exit(5 if report["violations"] else 0)
+"""
+
+#: A stand-in for the refill ``_keepout_fill.py`` runs with KiCad 9's pcbnew: it
+#: names pcbnew 9.0.9 and copies the board, marked as refilled.
+_FILL_HELPER = r"""
+import json, shutil, sys
+if sys.argv[1:] == ["--version"]:
+    print("9.0.9"); sys.exit(0)
+shutil.copyfile(sys.argv[1], sys.argv[2])
+with open(sys.argv[2], "a") as fh:
+    fh.write("\n#refilled\n")
+print(json.dumps({"zones": 1, "filled": True, "bare_holes": []}))
+"""
+
+#: The same stand-in where pcbnew does not import.
+_NO_PCBNEW = "import sys\nprint('ModuleNotFoundError: No module named pcbnew', file=sys.stderr)\n" \
+             "sys.exit(1)\n"
+
+#: The same stand-in whose refill sleeps 30 s first, past a short pcb_drc_timeout_s.
+_SLOW_FILL_HELPER = _FILL_HELPER.replace("shutil.copyfile(", "import time; time.sleep(30)\n"
+                                         "shutil.copyfile(", 1)
+
+#: The same stand-in as a pcbnew newer than kicad-cli 9: it saves the copy in
+#: KiCad 10's board format, which kicad-cli 9.0.9 does not read.
+_NEWER_FILL_HELPER = _FILL_HELPER.replace(
+    'with open(sys.argv[2], "a") as fh:',
+    'import re\ntext = open(sys.argv[2]).read()\n'
+    'open(sys.argv[2], "w").write(re.sub(r"\\(version \\d+\\)", "(version 20260206)", '
+    'text, count=1))\nwith open(sys.argv[2], "a") as fh:', 1)
+
+ZONE_ID = "5ea1f111-0000-4000-8000-000000000001"
+
+
+def _zone_item(kind: str, other: str, severity: str = "error", **more) -> dict:
+    return dict({"type": kind, "severity": severity, "description": f"{kind} (actual 0.0000 mm)",
+                 "items": [{"description": "Zone [GND] on F.Cu", "uuid": ZONE_ID},
+                           {"description": "an item", "uuid": other}]}, **more)
+
+
+@unittest.skipIf(os.name == "nt", "the stand-in kicad-cli is a #! script")
+class AStoredFillIsJudgedBesideKiCadsRefill(_StandIn):
+    """pcb.drc and pcb.fab_rules judge a board with a zone as stored and as
+    KiCad refills it under the project's own settings: each finding once over
+    both, and the line says apart how many only the stored fill shows, with the
+    remedy (refill and save: a fab plots the stored fill), and how many only the
+    refill shows. kicad-cli 10 refills itself; kicad-cli 9 through pcbnew.
+    (What slipped through, holdout round 2: on a KiCad 10 board 20 of pcb.drc's
+    21 errors and 13 of pcb.fab_rules' findings were stored teardrops KiCad's
+    own refill clears, and the line sent a person to fix each clearance.)"""
+
+    def setUp(self):
+        super().setUp()
+        self.board = _board_copy(self.root, _stale_board())
+        self.spec, self.fn = self.registry.get("pcb.drc")
+        self.helper = os.path.join(self.root, "fill.py")
+
+    def cli(self, release: str, stored: list, refilled: list, helper: str = _FILL_HELPER):
+        for name, items in (("stored", stored), ("refilled", refilled)):
+            with open(os.path.join(self.bin, name + ".json"), "w", encoding="utf-8") as fh:
+                json.dump(_drc_report(items, version=release), fh)
+        _stand_in(self.bin, "kicad-cli", f"RELEASE = {release!r}\n" + _FILL_CLI)
+        with open(self.helper, "w", encoding="utf-8") as fh:
+            fh.write(helper)
+
+    def gate(self, gid: str, **params):
+        fn = self.registry.get(gid)[1]
+        with mock.patch.dict(fn.__globals__, {"KEEPOUT_FILL_HELPER": self.helper}):
+            return super().gate(gid, **params)
+
+    def calls(self) -> list[str]:
+        path = os.path.join(self.bin, "calls.log")
+        if not os.path.isfile(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().splitlines()
+
+    def test_a_finding_only_the_stored_fill_shows_counts_said_apart(self):
+        for release in ("10.0.8", "9.0.9"):
+            with self.subTest(release=release):
+                self.cli(release, [_zone_item("clearance", PAD), _zone_item("clearance", SILK_REF),
+                                   _zone_item("hole_clearance", PAD)], [])
+                verdict = self.gate("pcb.drc")
+                self.assertEqual((verdict.outcome, verdict.measured), ("fail", 3),
+                                 verdict.render())
+                self.assertIn("; 3 of 3 only on the stored zone fill (2x clearance, 1x "
+                              "hole_clearance), which KiCad's refill clears: refill the zones "
+                              "and save the board, since a fab plots the stored fill",
+                              verdict.detail)
+
+    def test_kicad_10_refills_and_saves_its_own_copy(self):
+        self.cli("10.0.8", [_zone_item("clearance", PAD)], [])
+        self.gate("pcb.drc")
+        refill = [c for c in self.calls() if "--refill-zones" in c]
+        self.assertEqual(len(refill), 1, self.calls())
+        self.assertIn("--save-board", refill[0])
+
+    def test_a_finding_only_the_refill_shows_counts(self):
+        self.cli("9.0.9", [], [_zone_item("starved_thermal", PAD)])
+        verdict = self.gate("pcb.drc")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("; 1 of 1 only after KiCad's refill: the stored fill is out of date there",
+                      verdict.detail)
+
+    def test_a_finding_both_show_counts_once(self):
+        moved = _zone_item("clearance", PAD, description="clearance (actual 0.0400 mm)")
+        self.cli("10.0.8", [_zone_item("clearance", PAD)], [moved])
+        verdict = self.gate("pcb.drc")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertNotIn("only on the stored zone fill", verdict.detail)
+        self.assertNotIn("only after KiCad's refill", verdict.detail)
+
+    def test_a_board_refilled_and_saved_passes_saying_so(self):
+        self.cli("9.0.9", [], [])
+        verdict = self.gate("pcb.drc")
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertIn("; the zones judged as stored and as refilled (pcbnew 9.0.9)",
+                      verdict.detail)
+
+    def test_with_no_refill_here_the_stored_fill_is_judged_and_said(self):
+        self.cli("9.0.9", [], [_zone_item("starved_thermal", PAD)], helper=_NO_PCBNEW)
+        verdict = self.gate("pcb.drc")
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertIn("; the stored zone fill only: kicad-cli 9.0.9 has no zone refill and "
+                      "KiCad's pcbnew does not import in nopekit's Python here, so what a "
+                      "refill pours is not judged", verdict.detail)
+
+    def test_a_refill_that_fails_is_an_error(self):
+        crash = ("import sys\nif sys.argv[1:] == ['--version']:\n    print('9.0.9'); "
+                 "sys.exit(0)\nsys.exit(3)\n")
+        self.cli("9.0.9", [_zone_item("clearance", PAD)], [], helper=crash)
+        verdict = self.gate("pcb.drc")
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("the zone refill (KiCad's pcbnew, in a child) failed", verdict.error)
+
+    def flag(self, name: str, text: str) -> None:
+        with open(os.path.join(self.bin, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def refill_skips(self, release: str, why: str, helper: str = _FILL_HELPER,
+                     flag: tuple = (), gid: str = "pcb.drc") -> None:
+        """A skip on the refill side keeps the stored run's finding: it fails,
+        and the line says the refill was not judged, and why; with no stored
+        finding the skip stands."""
+        for stored in ([_zone_item("clearance", PAD)], []):
+            with self.subTest(release=release, why=why, gid=gid, stored=len(stored)):
+                if flag:
+                    self.flag(*flag)
+                self.cli(release, stored, [], helper=helper)
+                verdict = self.gate(gid, pcb_drc_timeout_s=3)
+                if stored:
+                    self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1),
+                                     verdict.render())
+                    self.assertIn(f"; the stored zone fill only: the refill side skipped "
+                                  f"({why}), so what a refill pours is not judged",
+                                  verdict.detail)
+                else:
+                    self.assertEqual(verdict.outcome, "skipped", verdict.render())
+                    self.assertIn(why, verdict.skip_reason)
+
+    def test_a_refill_past_its_time_keeps_the_stored_fail(self):
+        """What slipped through (review of holdout round 3): a refill, or the
+        run on the refilled copy, past pcb_drc_timeout_s read Skipped, "nothing
+        was shown", where the stored run alone had failed."""
+        self.refill_skips("9.0.9", "the zone refill exceeded 3 s (pcb_drc_timeout_s) and "
+                                   "was killed", helper=_SLOW_FILL_HELPER)
+        os.remove(os.path.join(self.bin, "calls.log"))
+        self.refill_skips("10.0.8", "kicad-cli's zone refill exceeded 3 s (pcb_drc_timeout_s) "
+                                    "and was killed", flag=("sleep_save", "30"))
+        os.remove(os.path.join(self.bin, "sleep_save"))
+        for release in ("9.0.9", "10.0.8"):
+            self.refill_skips(release, "kicad-cli pcb drc exceeded 3 s (pcb_drc_timeout_s) and "
+                                       "was killed", flag=("sleep_refilled", "30"))
+
+    def test_a_refilled_copy_in_a_newer_format_keeps_the_stored_fail(self):
+        """A pcbnew newer than kicad-cli 9 saves the refilled copy in a format
+        kicad-cli 9 does not load: a tool limit, which skips, beside the stored
+        run's fail, never in its place."""
+        why = ("kicad-cli 9.0.9 reads board formats through 20241229; this board is format "
+               "20260206, saved by a newer KiCad: a tool limit, not a defect "
+               "(references/installing.md)")
+        for gid in ("pcb.drc", "pcb.fab_rules"):
+            self.refill_skips("9.0.9", why, helper=_NEWER_FILL_HELPER,
+                              flag=("exit_refilled", "3"), gid=gid)
+
+    def test_a_kicad_cli_that_does_not_launch_for_the_refill_keeps_the_stored_fail(self):
+        import subprocess
+        import types
+        fake = types.ModuleType("subprocess")
+        fake.__dict__.update(subprocess.__dict__)
+
+        def run(argv, *args, **kwargs):
+            if "--refill-zones" in argv or any(str(a).endswith("drc_refilled.json")
+                                               for a in argv):
+                raise FileNotFoundError(2, "No such file or directory", "kicad-cli")
+            return subprocess.run(argv, *args, **kwargs)
+        fake.run = run
+        globs = self.registry.get("pcb.drc")[1].__globals__
+        with mock.patch.dict(globs, {"subprocess": fake}):
+            self.refill_skips("10.0.8", "could not launch kicad-cli for the zone refill: "
+                                        "[Errno 2] No such file or directory: 'kicad-cli'")
+            self.refill_skips("9.0.9", "could not launch kicad-cli: [Errno 2] No such file or "
+                                       "directory: 'kicad-cli'")
+
+    #: Three random ids KiCad gave one item with no id at three loads.
+    LOADS = tuple(f"{n}{n}{n}{n}0000-0000-4000-8000-000000000000" for n in "abc")
+    LOOSE = ("name an item KiCad gives a new id at each load (%s): matched by kind and "
+             "their other items alone, so each count apart is the least it can be")
+
+    def test_a_pad_with_no_id_is_matched_by_its_other_items(self):
+        """On a board whose pads have no id, KiCad names a pad by a new random
+        id at each load, and the refilled copy by the one it saved: matched by
+        every id, one finding read as two, one "only on the stored zone fill"
+        and one "only after KiCad's refill" (review of holdout round 3, measured
+        under kicad-cli 9.0.9 with pcbnew 9.0.9). It is matched by its type and
+        its other items' ids, and said apart."""
+        tree = K.parse(_stale_board())
+        for fp in K.children(tree, "footprint"):
+            for pad in K.children(fp, "pad"):
+                pad[:] = [x for x in pad if K.head(x) != "uuid"]
+        self.board = _board_copy(self.root, K.dump(tree) + "\n", stem="noid")
+        one, two, three = self.LOADS
+        for release in ("10.0.8", "9.0.9"):
+            with self.subTest(release=release):
+                self.cli(release, [_zone_item("holes_co_located", one),
+                                   _zone_item("clearance", SILK_REF)],
+                         [_zone_item("holes_co_located", two)])
+                verdict = self.gate("pcb.drc")
+                self.assertEqual((verdict.outcome, verdict.measured), ("fail", 2),
+                                 verdict.render())
+                self.assertIn("; 1 of 2 " + self.LOOSE % "1x holes_co_located", verdict.detail)
+                self.assertNotIn("only after KiCad's refill", verdict.detail)
+                # J1's reference keeps its id: a finding on it is matched by every id.
+                self.assertIn("1 of 2 only on the stored zone fill (1x clearance)",
+                              verdict.detail)
+        # Two in the stored run, one in the refilled: at least one is the stored
+        # fill's alone, and two are counted, never three.
+        self.cli("9.0.9", [_zone_item("holes_co_located", one),
+                           _zone_item("holes_co_located", three)],
+                 [_zone_item("holes_co_located", two)])
+        verdict = self.gate("pcb.drc")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 2), verdict.render())
+        self.assertIn("1 of 2 only on the stored zone fill (1x holes_co_located)",
+                      verdict.detail)
+        self.assertIn("2 of 2 " + self.LOOSE % "2x holes_co_located", verdict.detail)
+        self.assertNotIn("only after KiCad's refill", verdict.detail)
+
+    def test_a_teardrop_with_no_id_keeps_the_refills_remedy(self):
+        """KiCad 10.0.8 writes a teardrop zone with no id (measured on a holdout
+        board: each of its 20 stale teardrop findings named an id the file does
+        not hold). A teardrop only the stored fill shows is still the stored
+        fill's, with the remedy; one both show counts once."""
+        def tear(load: str) -> dict:
+            return {"type": "clearance", "severity": "error",
+                    "description": "clearance (actual 0.0000 mm)",
+                    "items": [{"description": "Pad 1 [DP] of J1", "uuid": PAD},
+                              {"description": "Teardrop [GND] on F.Cu", "uuid": load}]}
+        one, two, _three = self.LOADS
+        self.cli("10.0.8", [tear(one)], [])
+        verdict = self.gate("pcb.drc")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("; 1 of 1 only on the stored zone fill (1x clearance), which KiCad's "
+                      "refill clears: refill the zones and save the board", verdict.detail)
+        self.assertIn("; 1 of 1 " + self.LOOSE % "1x clearance", verdict.detail)
+        self.cli("10.0.8", [tear(one)], [tear(two)])
+        verdict = self.gate("pcb.drc")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("; the zones judged as stored and as refilled (kicad-cli 10.0.8); 1 of 1 "
+                      + self.LOOSE % "1x clearance", verdict.detail)
+
+    def test_a_board_with_no_zone_runs_once(self):
+        self.board = _board_copy(self.root, _board_text(), stem="flat")
+        self.cli("10.0.8", [], [])
+        self.assertEqual(self.gate("pcb.drc").outcome, "pass")
+        self.assertEqual(len([c for c in self.calls() if c.startswith("pcb drc")]), 1,
+                         self.calls())
+
+    def test_the_fab_refills_under_the_projects_own_settings(self):
+        """The fab's run zeroes the project's minimums and writes the fab's rules
+        into its stage; the refill reads the project's own file, as a person's
+        KiCad would. Its findings count once over both copies too."""
+        self.cli("10.0.8", [_zone_item("clearance", PAD)], [])
+        verdict = self.gate("pcb.fab_rules")
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("1 of 1 only on the stored zone fill (1x clearance)", verdict.detail)
+        with open(os.path.join(self.bin, "refill_project.json"), "rb") as fh:
+            refilled_under = fh.read()
+        with open(os.path.join(self.root, "b.kicad_pro"), "rb") as fh:
+            self.assertEqual(refilled_under, fh.read())
+
+
+@unittest.skipIf(shutil.which("kicad-cli") is None, "needs the real kicad-cli")
+class KiCadRefillsAStaleFill(unittest.TestCase):
+    """The stale fill on the real kicad-cli on PATH (9.0.9 here, with pcbnew; the
+    kicad/kicad:10.0 wrapper reads the same, measured): 9 findings, every one
+    only on the stored fill, until the board is refilled and saved."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-stale-fill-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.registry = _registry()
+
+    def test_the_stale_fill_fails_said_apart_and_a_refilled_one_passes(self):
+        release = _kicad_cli_release()
+        if release.startswith("9.") and importlib.util.find_spec("pcbnew") is None:
+            self.skipTest("kicad-cli 9 refills through pcbnew, which does not import here")
+        board = _board_copy(self.root, _stale_board())
+        verdict = _run(self.registry, "pcb.drc", self.root, dict(_baseline(), pcb_board=board))
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 9), verdict.render())
+        self.assertIn("; 9 of 9 only on the stored zone fill (", verdict.detail)
+        fab = _run(self.registry, "pcb.fab_rules", self.root, dict(_baseline(), pcb_board=board))
+        self.assertEqual(fab.outcome, "fail", fab.render())
+        self.assertIn(f"of {fab.measured} only on the stored zone fill (", fab.detail)
+        refilled = os.path.join(self.root, "out", "pcb.drc", "pcb-kicad", "pcb_drc", REFILL_DIR)
+        saved = next(os.path.join(d, f) for d, _s, files in os.walk(refilled) for f in files
+                     if f == "b.kicad_pcb" and (release.startswith("1") or
+                                                d.endswith("refilled")))
+        with open(saved, encoding="utf-8") as fh:
+            clean = _board_copy(self.root, fh.read(), stem="c")
+        verdict = _run(self.registry, "pcb.drc", self.root, dict(_baseline(), pcb_board=clean))
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+
+    def test_a_pad_with_no_id_is_counted_once(self):
+        """A GND pour never filled and a via on J2's pad 1, on the baseline with
+        its pad ids and with none: the same findings, counted once each. (Review
+        of holdout round 3, measured under kicad-cli 9.0.9 with pcbnew 9.0.9:
+        3 with pad ids, 5 without, 2 of them "only on the stored zone fill" and
+        2 "only after KiCad's refill", since KiCad gives an id-less pad a new id
+        at each load and the refilled copy the one it saved.)"""
+        release = _kicad_cli_release()
+        if release.startswith("9.") and importlib.util.find_spec("pcbnew") is None:
+            self.skipTest("kicad-cli 9 refills through pcbnew, which does not import here")
+        got = {}
+        for ids in (True, False):
+            tree = K.parse(_board_text() if ids else _pad_ids_rewritten(lambda _u: ""))
+            box = [["xy", "2", "5"], ["xy", "8", "5"], ["xy", "8", "14"], ["xy", "2", "14"]]
+            tree.append(["zone", ["net", _net_code(tree, "GND")], ["net_name", K.Q("GND")],
+                         ["layer", K.Q("F.Cu")],
+                         ["uuid", K.Q("5ea1f111-0000-4000-8000-000000000002")],
+                         ["hatch", "edge", "0.5"], ["connect_pads", "yes", ["clearance", "0.5"]],
+                         ["min_thickness", "0.25"], ["filled_areas_thickness", "no"],
+                         ["fill", "yes", ["thermal_gap", "0.5"],
+                          ["thermal_bridge_width", "0.5"]],
+                         ["polygon", ["pts", *box]]])
+            _via((26, 4), net="DP")(tree)
+            board = _board_copy(self.root, K.dump(tree) + "\n", stem="ids" if ids else "noids")
+            got[ids] = _run(self.registry, "pcb.drc", self.root,
+                            dict(_baseline(), pcb_board=board))
+        self.assertEqual(got[True].outcome, "fail", got[True].render())
+        self.assertEqual((got[False].outcome, got[False].measured),
+                         (got[True].outcome, got[True].measured), got[False].render())
+        self.assertNotIn("only on the stored zone fill", got[False].detail)
+        self.assertNotIn("only after KiCad's refill", got[False].detail)
+        self.assertIn("name an item KiCad gives a new id at each load (2x holes_co_located): "
+                      "matched by kind and their other items alone", got[False].detail)
+
+
+REFILL_DIR = "nopekit-refill"
+
+
+def _numbered(text: str) -> str:
+    """The board as KiCad 10.0.8 writes it when updated from its schematic: by
+    net name (``_by_name``) and every named pad's pinfunction its pin's name, an
+    underscore and the pad's number (``TS_11``); an unnamed pin's ``~`` written
+    as no name (measured on two KiCad 10 boards: every named pad so, 1022 of
+    1022 and 342 of 342)."""
+    tree = K.parse(_by_name(text))
+    for fp in K.children(tree, "footprint"):
+        for pad in K.children(fp, "pad"):
+            pf = K.child(pad, "pinfunction")
+            if pf is None:
+                continue
+            name, number = str(pf[1]), str(pad[1])
+            pf[1] = K.Q("" if name == "~" else f"{name}_{number}")
+    return K.dump(tree) + "\n"
+
+
+class ADraftReadsKiCad10sPinNames(_PowerCase):
+    """On a KiCad 10 board each pad's name ends in its own number; the draft
+    reads the name without it, and only on such a board. What slipped through
+    (holdout round 2): on two KiCad 10 boards no pin table matched, and no
+    charger was drafted, a PMIC's included."""
+
+    def _drafted(self, text: str, stem: str, *more: str):
+        path = os.path.join(self.root, stem + ".kicad_pcb")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        proc, records, summary = _draft_args(self.root, "--board", stem + ".kicad_pcb", *more)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return records, summary
+
+    def power_text(self) -> str:
+        with open(POWER_BOARD, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_charger_is_drafted_from_numbered_names(self):
+        plain, _s = self._drafted(self.power_text(), "plain")
+        numbered, summary = self._drafted(_numbered(self.power_text()), "numbered")
+        self.assertIn("u1", numbered["pcb_protectors"])
+        self.assertEqual(sorted(numbered["pcb_protectors"]), sorted(plain["pcb_protectors"]))
+        self.assertEqual(numbered["pcb_protectors"]["u1"]["functions"]["charge_temp"]["sense"]["pin"],
+                         plain["pcb_protectors"]["u1"]["functions"]["charge_temp"]["sense"]["pin"])
+        found = next(c for c in summary["candidates"] if c["record"] == "pcb_protectors.u1")
+        self.assertIn("VBAT (9, 10)", found["found_by"])
+
+    def test_a_name_is_read_whole_on_any_other_board(self):
+        board = K.board_from_tree(K.load_tree(BOARD))
+        self.assertFalse(K.numbered_pin_names(20241229, board))
+        k10 = K.load_tree(K10_BOARD)
+        self.assertFalse(K.numbered_pin_names(K.board_problems(k10)[0], K.board_from_tree(k10)),
+                         "a KiCad 10 file upgraded, never updated from its schematic: J1's "
+                         "Pin_1 is a name")
+        tree = K.parse(_numbered(_board_text()))
+        self.assertTrue(K.numbered_pin_names(K.board_problems(tree)[0], K.board_from_tree(tree)))
+        self.assertEqual(K.plain_pin_name("TS_11", "11"), "TS")
+        self.assertEqual(K.plain_pin_name("Pin_1_1", "1"), "Pin_1")
+        self.assertEqual(K.plain_pin_name("VC_1", "9"), "VC_1")
+
+    def test_a_charger_with_only_an_input_pin_is_drafted_to_keep_or_delete(self):
+        """U1 with its PROG and THERM pins renamed and its V_DD named VBUS: a
+        PMIC whose current and window its registers set. Drafted, with set_by
+        firmware offered, and listed under keep_or_delete."""
+        def pmic(tree):
+            for number, name in (("1", "VBUS"), ("2", "VBUS"), ("6", "SDA"), ("8", "SCL")):
+                K.child(_pad(tree, "U1", number), "pinfunction")[1] = K.Q(name)
+        with open(self.board(pmic, stem="pmic"), encoding="utf-8") as fh:
+            records, summary = self._drafted(fh.read(), "pmic2")
+        u1 = records["pcb_protectors"]["u1"]
+        self.assertIn('set_by "firmware"', u1["functions"]["charge_a"]["a_max"])
+        self.assertIn('set_by "firmware"', u1["functions"]["charge_v"]["v_reg_v"])
+        self.assertTrue(any(d.startswith("pcb_protectors.u1: U1 (MCP73833-AMI/UN) was taken for "
+                                         "a charger by its VBAT and VBUS pins alone")
+                            for d in summary["keep_or_delete"]), summary["keep_or_delete"])
+
+    def test_a_cell_is_drafted_before_its_chemistry_is_known(self):
+        """Each cell key says which kind of cell takes it, and an open-circuit
+        voltage is drafted for a primary cell. (What slipped through, holdout
+        round 2: only a rechargeable cell's keys were drafted, so an alkaline
+        cell was pointed at a charge voltage the fault rule refuses.)"""
+        records, _s = self._drafted(self.power_text(), "cell")
+        cell = records["pcb_batteries"]["bt1"]["cell"]
+        self.assertIn("open_circuit_v", cell)
+        self.assertTrue(cell["open_circuit_v"].startswith("FILL: for a primary cell"))
+        for key in ("upper_charge_v", "charge_a_max", "charge_temp_c"):
+            with self.subTest(key=key):
+                self.assertTrue(cell[key].startswith("FILL: for a rechargeable cell"))
+                self.assertIn("(drop for a primary cell)", cell[key])
+        # The fault rule reads it for either kind (review of holdout round 3).
+        self.assertTrue(cell["discharge_v_min"].startswith("FILL: for either kind of cell"))
+        self.assertIn("then drop each cell key marked for the other kind",
+                      records["pcb_batteries"]["bt1"]["chemistry"])
+
+    def test_a_primary_cell_stated_as_the_draft_says_is_judged(self):
+        """An alkaline cell stated as the draft says: each key marked for a
+        rechargeable cell dropped, and short_a's other road taken
+        (internal_resistance_ohm). pcb.fault_current judges it. What slipped
+        through (review of holdout round 3): discharge_v_min was marked for a
+        rechargeable cell alone, and the fault rule, which reads it beside an
+        internal resistance for any chemistry, refused the cell for it."""
+        records, _s = self._drafted(self.power_text(), "primary")
+        drafted = records["pcb_batteries"]["bt1"]["cell"]
+        keys = [k for k, words in drafted.items()
+                if not words.startswith("FILL: for a rechargeable cell")]
+        self.assertIn("internal_resistance_ohm", drafted["short_a"])
+        keys = [k for k in keys if k != "short_a"] + ["internal_resistance_ohm"]
+        numbers = {"open_circuit_v": 1.65, "discharge_v_min": 0.8,
+                   "internal_resistance_ohm": [0.15, 0.3]}
+
+        def alkaline(p):
+            p["pcb_batteries"]["main"]["chemistry"] = "alkaline"
+            p["pcb_batteries"]["main"]["cell"] = {k: numbers[k] for k in keys}
+            p["pcb_conductors"]["wire_out"]["protected_by"] = []
+        v = self.run_gate("pcb.fault_current", records=alkaline)
+        self.assertEqual(v.outcome, "pass", v.render())
+
+
+class AFootprintWithNoReferenceIsNamed(unittest.TestCase):
+    """The fit names a footprint with an empty reference, never a blank. What
+    slipped through (holdout round 2): "not fitted (no type, no 3D model): ,
+    G***"."""
+
+    def test_the_word_for_it(self):
+        g = _registry().get("pcb.enclosure_fit")[1].__globals__
+        self.assertEqual(g["_ref_word"](""), "(no reference)")
+        self.assertEqual(g["_ref_word"]("G***"), "G***")
+        fit = g["_Fit"]("b2", "x.kicad_pcb", "e.step", {}, set(), {}, {})
+        self.assertEqual(fit.name(""), "b2:(no reference)")
 
 
 if __name__ == "__main__":

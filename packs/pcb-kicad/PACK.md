@@ -24,14 +24,14 @@ has heard its radio.
 | Gate | Tier | Basis | Settles |
 |---|---|---|---|
 | `pcb.board_readable` | 0 | model-only | the board is a KiCad 6-10 file whose every track names a defined net (the guard); nets read by code and by name; a newer file is skipped, never failed |
-| `pcb.pin_names` | 0 | sourced | pins the library gives one name (a TVS array's two `COM`, a part's several `GND`) carry one net, except the ends of a series element stated per ref (`pcb_pin_names_series`); the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` |
+| `pcb.pin_names` | 0 | sourced | pins the library gives one name (a TVS array's two `COM`, a part's several `GND`) carry one net, except the ends of a series element stated per ref (`pcb_pin_names_series`); the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` (on a KiCad 10 board, read without the pad number it appends: `COM_5` is `COM`) |
 | `pcb.land_pattern` | 0 | model-only | each footprint `pcb_land_drawings` names fits its vendor's drawing: pads paired by pin function (anchored on the pads of a function of their own when the pairings are too many to try), one rigid fit with no mirror, every centre within half its smaller pad's smaller side |
-| `pcb.net_width` | 0 | sourced | every track of each named net stays inside its temperature-rise limit, IPC-2221, at the net's current, or at a route's current on the tracks of its route between two pads and the rest's elsewhere; the detail names the hottest stretch |
-| `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing a person did not exclude in KiCad, at every severity by default, and every custom rule in the board's `.kicad_dru`, and every property its conditions read, is shown to select something; the line names the errors first |
+| `pcb.net_width` | 0 | sourced | every track of each named net stays inside its temperature-rise limit, IPC-2221, at the net's current, or at a route's current on the tracks of its route between two pads and the rest's elsewhere; decided on the computed rise, reported rounded up to 0.1 C; the detail names the hottest stretch |
+| `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing a person did not exclude in KiCad, at every severity by default, on the board as stored and as KiCad refills its zones, each finding once (the line says apart what only the stored fill shows), and every custom rule in the board's `.kicad_dru`, and every property its conditions read, is shown to select something; the line names the errors first |
 | `pcb.unconnected` | 1 | established | KiCad finds no connection the netlist asks for and the copper does not make |
 | `pcb.erc` | 1 | established | `kicad-cli sch erc` finds nothing in the schematic a person did not exclude, at every severity by default |
-| `pcb.parity` | 1 | established | KiCad finds no difference between the board and its schematic in what is built: parts, values, footprints, pad nets (an open pin on a pad with no net is agreement; symbol fields, footprint filters and board-only drawing are said apart) |
-| `pcb.fab_rules` | 1 | sourced | KiCad's DRC with the named fab's published minimums, for the service the board is ordered on, as the only custom rules finds nothing past them; a dielectric or via kind the service does not list skips |
+| `pcb.parity` | 1 | established | KiCad finds no difference between the board and its schematic in what is built: parts, values, footprints, pad nets (an open pin on a pad with no net is agreement; symbol fields and footprint filters are said apart, not counted; board-only drawing not marked "Not in schematic" counts, said apart with its remedy) |
+| `pcb.fab_rules` | 1 | sourced | KiCad's DRC with the named fab's published minimums, for the service the board is ordered on, as the only custom rules finds nothing past them, on the board as stored and as KiCad refills its zones under the project's own settings; a dielectric or via kind the service does not list skips |
 | `pcb.spice` | 1 | established | a `.meas` result of `ngspice -b` on the project's deck stays inside `pcb_spice_min` / `pcb_spice_max`; an option name ngspice does not know (on a `.options` card or an `option` command), a measure two `.meas` cards define, or a `.meas tran` window outside the run, is refused first |
 | `pcb.enclosure_fit` | 1 | established | each board, every part's 3D model (any footprint that shows one, whatever its type), or its declared height where its model is not on this host, in place and turned to any orientation, shares no volume with its enclosure or with another board in it, and each part keeps the clearance of the claim tagged `enclosure-fit`, but against a feature a by-design contact names (OpenCascade) |
 | `pcb.charge_temperature` | 0 | sourced | charging stops outside each cell's charge temperature window at the tolerance corners of its sensing network (the comparator's datasheet trips, the NTC's R/T table or B equation, every resistor), wherever the stop lives: the charger, a protector or BMS that acts on it, or the pack; headroom in K. A charger that senses nothing, or whose sense pin sees only a fixed divider, fails without the cell's window |
@@ -58,7 +58,11 @@ release within the spine's 500 characters, and cuts the findings' own words
 first. `pcb.spice` runs `ngspice -b` the same way, `pcb.enclosure_fit` runs
 `kicad-cli pcb export step` and then OpenCascade (through CadQuery) in a child
 process, and `pcb.antenna_keepout` refills the board's zones with KiCad's own
-`pcbnew` in a child process before its two DRC runs. They read inside
+`pcbnew` in a child process before its two DRC runs. `pcb.drc` and
+`pcb.fab_rules` judge a board with a zone (a pour or a teardrop) twice too: as
+stored and as KiCad refills it under the project's own settings (kicad-cli 10's
+`--refill-zones`, or `pcbnew` under kicad-cli 9), each finding once over both
+(below, "A stored fill"). They read inside
 subprocesses the trace cannot see into, so they are **opaque**: they re-run on every check where their tools exist (about a second
 each on a small board; the fit about 4 s, the keep-out about 2 s a board) and
 skip where they do not.
@@ -82,7 +86,7 @@ person enters), the mis-mating rule (its own rule on the modes a person states:
 model-only) and the USB-C rule (pad nets against the Type-C specification's
 tables). Each has a known-bad control it fails on: `split_pin_pair`,
 `mirrored_land` (1.9 mm against 0.3 mm), `ntc_swapped` (a 100 kOhm NTC in the
-10 kOhm's place: -64.83 K), `lfp_cell` (a LiFePO4 cell on the 4.2 V charger:
+10 kOhm's place: -64.84 K), `lfp_cell` (a LiFePO4 cell on the 4.2 V charger:
 1.1595), `fuse_trips_late` (a PTC of twice the trip current: 0.725),
 `cutoff_drives_nothing` (the protector's DO on a net of its own: 2.30 V against
 2.5 V), `ground_beside_vbus` (GND moved beside VBUS on both FFC housings: 1
@@ -122,6 +126,34 @@ netted, not routed), which only these six rules read, and its schematic
 `power_board.kicad_sch` sits beside it (`make_power_schematic.py`), where
 `pcb.charge_temperature` reads the NTC's symbol. `references/battery.md`,
 `references/mismate.md` and `references/usb-c.md` hold every field.
+
+**A stored fill, and KiCad's refill.** kicad-cli judges a zone, a teardrop
+among them, by the fill the file stores, while a person's DRC run in KiCad
+refills first. So on a board with a zone, `pcb.drc` and `pcb.fab_rules` run
+KiCad's DRC on the board as stored and again on a copy KiCad refilled under the
+project's own `.kicad_pro` and `.kicad_dru` (never under the fab's rules
+`pcb.fab_rules` writes into its stage: they would pour to the fab's clearance),
+and count each finding once over both, by its type and the ids of its items
+that a reload keeps. A finding that names an item KiCad gives a new id at each
+load (no id, a bad one or one held twice; every teardrop KiCad 10 writes) is
+matched by its type and its other items' ids, counted as often as the run that
+lists it more, and said apart: a count said apart is then the least it can be.
+The line says apart how many only the stored fill shows, "k of n only on the
+stored zone fill (...), which KiCad's refill clears: refill the zones and save
+the board, since a fab plots the stored fill", and how many only the refill
+shows (a pour moved and not refilled since). Both count: `kicad-cli pcb export
+gerbers` 9.0.9 cannot refill and 10.0.8 refills only when asked
+(`--check-zones`), so a fab that plots the file plots the stored copper (holdout
+round 2: a stored teardrop sat on another net's pad at 0.0000 mm). The fix is
+KiCad's "Fill All Zones" (B) and a save. kicad-cli 10 refills its copy itself
+(`pcb drc --refill-zones --save-board`); under kicad-cli 9 the copy is refilled
+by `pcbnew` in a child process, as the keep-out's is. Where neither can (kicad-cli
+9 and no `pcbnew` in nopekit's Python), the stored fill alone is judged and the
+line says so. A refill side that skips (past `pcb_drc_timeout_s`, a kicad-cli that
+does not launch, a refilled copy in a format the kicad-cli on PATH does not read)
+keeps the stored run's findings, which fail, and the line says why the refill was
+not judged; the skip stands only where the stored run finds nothing. A board with
+no zone runs once, as before.
 
 **The antenna's keep-out, on every copper layer.** `pcb.antenna_keepout` finds
 each radio module by itself: every footprint from KiCad's `RF_Module` library on
@@ -257,7 +289,10 @@ on a net a cell drives. It finds a battery by `--battery REF` (or
 connector whose value or footprint names a cell (Battery, LiPo, cell, AAA,
 CR2032, 18650) or whose pins are named + and - (each of the last two
 listed under `keep_or_delete`); a charger by a cell pin (BAT, VBAT, BATT) beside a
-PROG, ISET or thermistor pin; a protector by DO and CO (or DOUT and COUT, or DSG
+PROG, ISET or thermistor pin, or beside a charge input alone (VBUS, VIN, IN or
+DCIN: a PMIC whose current and window its registers set has neither, and a USB
+PHY or an MCU with a backup VBAT has the same pins, so such a charger is listed
+under `keep_or_delete`); a protector by DO and CO (or DOUT and COUT, or DSG
 and CHG); a fuse by the `Fuse*` libraries or an F ref; a USB-C receptacle as
 `pcb.usbc_receptacle` does; another USB connector's VBUS (micro-B, mini-B) as a
 rail on its VBUS pin's net; a rail by a regulator's output and input pins, each
@@ -265,7 +300,19 @@ name's pins on one net; and a mating for every connector on a net that a cell, a
 VBUS or a drafted rail drives, as `pcb.mismate`'s coverage rule asks. A cell
 drives the nets of its pads, but not its `-` pad's or its thermistor pad's. When
 no pad is named `-`, a net where a drafted charger's or protector's ground pin
-sits is the cell's return, and drives nothing.
+sits is the cell's return, and drives nothing. On a KiCad 10 board updated from
+its schematic, every pad's name ends in its own number (`TS_11`, `BAT_13`): the
+draft reads the name without it, and only there (`_kicad.numbered_pin_names`), so a
+KiCad 9 connector's `Pin_1` stays a name. (What slipped through, holdout round 2:
+no pin table matched on two KiCad 10 boards, and no charger was drafted.)
+`pcb.pin_names` and `pcb.land_pattern` read a pad's name the same way where no
+schematic names the part (review of holdout round 3: read whole, `COM_2` and
+`COM_5` were two names, and a TVS array's COM on two nets passed). A
+cell is drafted before its chemistry is known: each `cell` key says which kind
+of cell takes it, a rechargeable cell's charge voltage, current and window and a
+primary cell's `open_circuit_v`, and you drop the other kind's. `discharge_v_min`
+is either kind's: `pcb.fault_current` reads it beside `internal_resistance_ohm`
+for any chemistry.
 
 **It never fills a datasheet number, a flag or a choice that is yours** (a
 chemistry, a cell count, what kind of element a part is, a role, a mating's far
