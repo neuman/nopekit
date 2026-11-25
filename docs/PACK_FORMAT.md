@@ -265,6 +265,11 @@ Rules, all enforced:
   that describes what they actually assert.** Say so in `PACK.md` and give the
   vocabulary explicitly, because a pack that publishes its tag names is a pack
   whose claims can be written correctly by someone who has never read its code.
+  Your tag table is read beside other packs' tables: a broad word another pack
+  also lists (`connectivity`, `clearance`, `manufacturability`) covers a claim
+  with the gates of both. `nopekit doctor` names each tag that gates of two or
+  more installed packs bind (its `pack-tags` row), and `nopekit check` notes
+  each one a claim carries.
 
   The one gate that *should* bind broadly and narrowly at once is a **validity
   guard** — a slenderness check protecting beam theory, a Biot check protecting

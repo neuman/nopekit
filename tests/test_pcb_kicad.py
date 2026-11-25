@@ -4292,7 +4292,8 @@ class AContactRegionIsHeldToWhatItsPartCanReach(unittest.TestCase):
         self.assertEqual(error, "main:J1 against lid: the region reaches more than 2 mm past "
                                 "J1's own box (2 times the claim's limit). Draw it within "
                                 "[[0.73, -14.89, 2.395], [7.27, -0.73, 17.935]]")
-        self.assertLessEqual(len(error), 200, "a verdict's error keeps 200 characters")
+        self.assertLessEqual(len(error), 200, "the refusal stays one short line, well "
+                                              "inside a verdict's error budget")
         self.assertIn("the region takes out enclosure material from (-4, -19, -2) to "
                       "(34, 4, 18.4) mm", detail)
         self.assertIn("J1's own box, as placed, is (2.73, -12.89, 4.395) to "
@@ -4458,7 +4459,8 @@ class AFitRecordIsReadStrictly(unittest.TestCase):
         self.assertEqual(v.outcome, "skipped", v.render())
         self.assertIn("1 placed part(s) name no 3D model: U1", v.skip_reason)
         self.assertIn("pcb_part_heights_mm", v.skip_reason)
-        # Every choice is shown: a skip reason keeps 200 characters.
+        # Every choice is shown: a skip reason keeps 500 characters (the spine's
+        # budget for detail, since the holdout's H6; 200 before it).
         self.assertTrue(v.skip_reason.endswith("list a part with no body in "
                                                "pcb_enclosure_bodiless"), v.skip_reason)
 
@@ -4726,8 +4728,8 @@ class BoardsSitInAnyOrientationAndBesideEachOther(unittest.TestCase):
         self.assertEqual(apart.outcome, "skipped", apart.render())
         self.assertIn("fit broken: kicad-cli left out U1", apart.skip_reason)
         # The advice is one the gate accepts, and is shown: a part that names a
-        # model and a declared height is refused, and a skip reason keeps 200
-        # characters (review of P7).
+        # model and a declared height is refused, and a skip reason keeps 500
+        # characters (review of P7; 200 until the holdout's H6).
         self.assertTrue(apart.skip_reason.endswith(
             "or hide it and state a height in pcb_part_heights_mm"), apart.skip_reason)
 

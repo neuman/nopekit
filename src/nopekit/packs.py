@@ -90,6 +90,8 @@ __all__ = [
     "key_scope",
     "key_vocabulary",
     "key_collisions",
+    "TagCollision",
+    "tag_collisions",
     "PROPOSERS_DIR",
     "PROPOSER_KEYS",
     "Proposer",
@@ -2736,4 +2738,100 @@ def key_collisions(names: Sequence[str], root: str | None = None, *,
             primary={name: vocabularies[name][key]["primary"] for name in owners},
             live=key in published,
         ))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# claim tags:  two packs, one tag, gates the claim's author never meant
+# --------------------------------------------------------------------------- #
+# A gate lists every tag it bears on, and a claim carries the narrowest one
+# (docs/PACK_FORMAT.md, "Tag bindings are a two-sided contract"). Each pack's
+# PACK.md lists its own tags as if it were the only pack installed. So a broad
+# word two packs both list binds a claim to the gates of both: a claim tagged
+# `connectivity` to mean "every net is routed" is covered by a CAD assembly
+# check too, and a fail there reads on it. What slipped through (holdout,
+# general packs, in three projects): `connectivity`, `clearance`,
+# `interference`, `packaging` and `manufacturability` each bound gates of two or
+# three live packs, and `doctor` warned only on param keys.
+
+#: How many gate ids of one pack a tag collision names before ``+n more``. Why
+#: 3: the seal row's budget (``_SEAL_PATHS_SHOWN``), for the same reason — one
+#: line a person reads to the end, and enough to tell one gate from a family.
+#: *Rejected:* every id (`manufacturability` binds seven gates of one pack);
+#: one (cannot tell one gate from a family).
+_TAG_GATES_SHOWN = 3
+
+
+@dataclasses.dataclass(frozen=True)
+class TagCollision:
+    """One claim tag that gates of two or more live packs bind.
+
+    ``tag``      the word, exactly as the gates declare it: ``claims.covers``,
+                 the one coverage rule, matches it exactly, so this does too.
+    ``gates``    ``((pack, (gate id, ...)), ...)``: each pack whose gates bind
+                 it, sorted by pack, and its gate ids sorted.
+    ``carried``  the ids of the claims that carry it now, sorted: each is
+                 covered by every one of those gates.
+    """
+
+    tag: str
+    gates: tuple[tuple[str, tuple[str, ...]], ...]
+    carried: tuple[str, ...] = ()
+
+    @property
+    def packs(self) -> tuple[str, ...]:
+        """The packs whose gates bind the tag, sorted."""
+        return tuple(pack for pack, _ids in self.gates)
+
+    def binds(self) -> str:
+        """``cad-solid (cad.clash) and pcb-kicad (pcb.drc, pcb.fab_rules)``:
+        each pack with the gates of it that bind the tag."""
+        parts = []
+        for pack, ids in self.gates:
+            shown = ", ".join(ids[:_TAG_GATES_SHOWN])
+            more = len(ids) - _TAG_GATES_SHOWN
+            parts.append(f"{pack} ({shown}" + (f" +{more} more" if more > 0 else "") + ")")
+        return ", ".join(parts[:-1]) + f" and {parts[-1]}" if len(parts) > 1 else "".join(parts)
+
+
+def tag_collisions(registry: Any, claims: Iterable[Claim] = ()) -> list[TagCollision]:
+    """Every claim tag that gates of two or more of ``registry``'s packs bind.
+
+    ``registry`` is the project's own (`_registry`): its pack gates are the
+    gates of the packs this project installed, so a tag two packs nobody
+    installed share is not named. A project gate (no ``spec.pack``) is the
+    project's own wiring and is left out: it binds what its author wrote it
+    for. Each entry of a gate's ``claims`` list is read as a tag — an id is a
+    tag no other pack declares. ``claims`` are the project's: a claim whose id
+    or one of whose tags is the tag carries it, as ``claims.covers`` decides.
+
+    Sorted with the carried tags first, then by tag: a tag a claim carries is
+    binding gates of two packs on it now, and is the one a person acts on.
+    *Rejected:* folding case, as ``Registry.for_claim`` does (a status reads
+    ``covers``, which does not, so a folded match would name a binding no
+    status makes).
+
+    A diagnostic: it moves no status and no exit code. It reads only the specs
+    already registered, so it runs no gate and costs nothing.
+    """
+    by_tag: dict[str, dict[str, set[str]]] = {}
+    for spec in registry.specs():
+        pack = (spec.pack or "").strip()
+        if not pack:
+            continue
+        for tag in spec.claims or ():
+            if isinstance(tag, str) and tag.strip():
+                by_tag.setdefault(tag, {}).setdefault(pack, set()).add(spec.id)
+    claim_list = list(claims or ())
+    out: list[TagCollision] = []
+    for tag, owners in by_tag.items():
+        if len(owners) < 2:
+            continue
+        carried = sorted(c.id for c in claim_list
+                         if c.id == tag or tag in (getattr(c, "tags", None) or ()))
+        out.append(TagCollision(
+            tag=tag,
+            gates=tuple((pack, tuple(sorted(ids))) for pack, ids in sorted(owners.items())),
+            carried=tuple(carried)))
+    out.sort(key=lambda c: (not c.carried, c.tag))
     return out

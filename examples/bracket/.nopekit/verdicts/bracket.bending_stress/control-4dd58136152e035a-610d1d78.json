@@ -2,10 +2,10 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.bending_stress",
-  "rho": "f123bc7e8ea6c166a65e1cf787366773cb598aa3902ddfef683c75044817040a",
-  "static": "a144dea18dec0f05baf4375ec3271fd306fa92b4cb922100c8796c221b986b4a",
+  "rho": "4dd58136152e035a43d7d4751b75cdeb2eedab4ca8585771a9d4b4d1520d939a",
+  "static": "d3ee4893677fc8aeba2d9aa87bd37cfc0f5a19c502829487dd47dbf488d0b8b7",
   "static_parts": {
-    "spine": "b9c5046a0430346c084cc073ce23a13dab1788c34c118bdc75b3a3aabc9cee29",
+    "spine": "9814dfd748adb421d69563472f0fca5604e466f16217c82a7c4d9ea058c00b7a",
     "code": {
       "digest": "d331da46a69cea9f2332749e77cb340e7268fb7e438030c67231c3a34fa60d1e",
       "files": [
@@ -163,5 +163,5 @@
   "measured": 3.75,
   "limit": 1.0,
   "units": "utilisation",
-  "digest": "b16f9f08601f8485c8b40f1afff716201813054774d5819fa3f29452d65e4fc1"
+  "digest": "4f8c161b0df2d213602d75ad8f4277bc397913c20e7636604fd3a9b877e703ca"
 }
