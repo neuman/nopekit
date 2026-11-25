@@ -7,7 +7,8 @@ rule.
 
 ## The anchor
 
-For subject `i` holding grip `g`, the wrist point (the stylion, wrist straight) is
+For subject `i` holding grip `g` of kind `handle`, the wrist point (the stylion, wrist
+straight) is
 
     S_ig = G_g - (WCG_i + (D - 31.75) / 2) * u_g
 
@@ -24,9 +25,10 @@ rounds toward the fail, and a share one subject short of the limit never rounds 
 it.
 
 The survey measured wrist-centre of grip length with the dowel square to the fist and
-the fist in line with the forearm. So the gate refuses a grip whose hand axis is more
-than 20 deg from perpendicular to its handle axis. No survey measured the obliquity of
-a power grip, so 20 deg is the pack's, and an open question.
+the fist in line with the forearm. So the gate refuses a handle grip whose hand axis is
+more than 20 deg from perpendicular to its handle axis. No survey measured the
+obliquity of a power grip, so 20 deg is the pack's, and an open question. A slab grip
+is not asked it: the anchor is never applied to one (Slab grips, below).
 
 ## The girth term
 
@@ -41,8 +43,8 @@ no term (every handle read as the dowel) the count is 99.14%, and with the handl
 declared as 36 mm it is 97.96%. A device with two different handles states the larger
 diameter: that puts every wrist farther back, which is conservative.
 
-`ergo.layout_agrees` holds the declared diameter to the drawn handles: at each grip,
-the outer loop of the housing's section through the grip centre, square to the handle
+`ergo.layout_agrees` holds the declared diameter to the drawn handles: at each handle
+grip, the outer loop of the housing's section through the grip centre, square to the handle
 axis, is at most the declared diameter + 1.0 mm across (perimeter / pi, scaled back
 for what a tessellated loop hides). One millimetre of diameter moves every wrist point
 0.5 mm, the same as the gate's tolerance on a cap. The check is one-sided, so a larger
@@ -60,6 +62,9 @@ an approximate full-extension bound.
   of the tip.
 - **Short** by about 1 to 3 mm: the thumb's base joint is not on the stylion's line,
   so the true reach can pass the sphere.
+- **Short** on a wide cap that actuates along its length: a control is a point, judged
+  at the centre of its pressed surface, and the cap's nearest point is closer. An
+  extent is not read (PACK.md, "A control is a point").
 - **Generous** in direction: the sphere does not know the palm, the other fingers or
   the joint limits. A point behind the hand is "in reach" by the sphere and not by
   the thumb. So the gate refuses a judged control that lies behind the centre of a
@@ -70,10 +75,11 @@ an approximate full-extension bound.
   its grip, where the known-bad cluster read 100% in reach.
 
 Both length errors are smaller than the spread of reach beyond the grip in each sex
-(SD 5.6 to 5.8 mm). A control within a few mm of the edge for the limiting subjects is
-the testers' to settle, not the screen's. **Rejected:** a slack added to the radius,
-or a tighter rule from a thumb-pad or base-joint model. No public survey measures
-either offset, and a guessed correction launders an assumption into a number.
+(SD 5.6 to 5.8 mm). The testers check a control within a few mm of the edge for the
+limiting subjects: a miss in their hands fails REACH-HELD, and a press does not clear
+a fail of the count. **Rejected:** a slack added to the radius, or a tighter rule from
+a thumb-pad or base-joint model. No public survey measures either offset, and a
+guessed correction launders an assumption into a number.
 
 ## Controls that are not judged
 
@@ -93,13 +99,55 @@ owned `fallback`. A fail still counts. Rejected: a guard gate (the spine already
 this, with no extra gate); a fail outside (it would say the design is bad when only
 the data does not apply).
 
-## The slab-grip gap
+The context is for a handle whose rule applies and whose data is extrapolated, as on
+a 60 mm handle. A slab grip is not outside it: the rule does not apply at all, and
+the gate skips before it reads the diameter (Slab grips, below).
 
-A phone, an e-reader or a flat remote is held flat in the palm, not around a handle.
-The anchor above does not apply, and the gate reads Gap. The candidate for v0.2 is the
-functional-area model of Bergstrom-Lehtovirta and Oulasvirta (2014), a parabola fitted
-to the thumb's reach on a tablet. It is not shipped, for three reasons found when it
-was read:
+## Slab grips
+
+A phone, an e-reader, a flat remote or a board held at its short ends is held flat or
+at its edges, not in a fist round a handle. The anchor above does not apply: the
+survey measured wrist-centre of grip length on a dowel in a closed fist, and no public
+survey measures where the wrist sits behind a slab. So each grip states its kind,
+`kind: handle` or `kind: slab`. On a control pressed from a slab grip,
+`ergo.digit_reach` makes no count. It skips, names the slab grips and names the
+physical claim, and the reach claim reads Skipped.
+
+Why a skip, and not the operating context. Outside the context a pass does not count,
+and a fail still counts. That is right where the rule applies. On a slab the rule does
+not apply, so a fail is no more the design's than a pass. What slipped through while
+the context stood in for a kind: a handheld terminal and a game console board, each a
+slab held at its short ends, stated the slab's perimeter / pi as the handle diameter
+(95 to 134 mm), as PACK.md asked. The girth term put each wrist 32 to 51 mm behind its
+grip. The count read 0 to 80%, the fail counted, and the reach claim read Failing,
+where this page had said the count does not apply. `ergo.layout_agrees` failed both
+devices too:
+the section square to the held edge is the whole device, and each end grip read 66 mm
+off its centroid.
+
+What a slab device gets:
+
+- **The physical test.** REACH-HELD in `scaffold/`: two testers, chosen by reach
+  beyond the grip, press every control on the first full print without a regrip
+  (`skills/reach-testing/SKILL.md`). A person records it. This is the reach claim of
+  a slab device; REACH, the count, is left out.
+- **The layout guard, through a claim of its own.** `ergo.layout_agrees` covers the
+  tags `digit-reach` and `control-layout`, and REACH was the claim that carried one.
+  With REACH left out, the guard runs as a row, covers no claim, and its fail moves
+  no status. A claim tagged `control-layout` (PACK.md gives it) makes it count: it
+  holds every control the testers press, and every cap, to the scene. It measures no
+  section at a slab grip.
+- **The testers' numbers.** The proposer writes `design_range.json` alone: the design
+  ranges, the testers' thresholds and a tester's percentile.
+
+A slab device states no `hand_grip_diameter_mm`. Rejected: a slab detected from the
+scene (the reach gate is tier 0 and reads no scene, and a threshold on a section's
+shape guesses what the person meant); a default of `handle` (a person who never read
+the kinds gets the false fail back).
+
+The candidate slab model is the functional-area model of Bergstrom-Lehtovirta and
+Oulasvirta (2014), a parabola fitted to the thumb's reach on a tablet. It is not
+shipped, for three reasons found when it was read:
 
 - The paper's text puts the vertex at -16 mm, and its own vertex form puts it at
   +16 mm. Its 57.9 mm worked example could not be reproduced with either sign.
@@ -108,8 +156,8 @@ was read:
 - No public survey measures the span it needs, so its population would be the 20
   people or a scaling of ANSUR that nobody measured.
 
-Until its worked example is reproduced, the honest answer for a slab grip is Gap, an
-owned fallback, and the physical claim.
+Until its worked example is reproduced, a slab grip gets no count, and the testers
+settle its reach.
 
 ## Sources
 

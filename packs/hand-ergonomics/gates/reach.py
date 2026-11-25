@@ -9,14 +9,18 @@ share, in %, against the claim tagged ``digit-reach``.
 
 **Which object it judges.** The device as the user holds it, in the device
 frame: x to the right as the user sees the face, y toward the top edge, z out of
-the face toward the user, mm. A grip is where the middle finger wraps the handle
-(``centre``), the direction from wrist to hand with the wrist straight
-(``hand_axis``) and the handle's long axis (``handle_axis``). A control is the
-centre of its pressed top surface (``at``) and the digits that press it.
+the face toward the user, mm. A grip is its kind (``handle`` or ``slab``), where
+the middle finger wraps the handle (``centre``), the direction from wrist to hand
+with the wrist straight (``hand_axis``) and the handle's long axis
+(``handle_axis``). A control is the centre of its pressed top surface (``at``) and
+the digits that press it: a point.
 
-**What it is not.** Comfort, force, fatigue, width or a slab grip. A pass says no
-subject is shown out of reach at full extension; a person holding the print
-settles the rest (``skills/reach-testing/SKILL.md``).
+**What it is not.** Comfort, force, fatigue, width or a slab grip. On a control
+pressed from a ``slab`` grip it makes no count and skips, naming the physical
+claim that settles it: the rule has a source only for a fist round a handle, so
+neither a pass nor a fail would be the design's. A pass says no subject is shown
+out of reach at full extension; a person holding the print settles the rest
+(``skills/reach-testing/SKILL.md``).
 
 What slipped through before the pack (its origin, told in
 ``references/what-slipped-through.md``): a printed handheld that passed every
@@ -46,13 +50,29 @@ REACH_TAG = "digit-reach"
 #: Where the survey and the anchor apply. Handle diameter: Kong and Lowe (2005)
 #: measured power grips on cylinders of 25 to 50 mm, and the girth term is this
 #: pack's extrapolation from the survey's 31.75 mm dowel, so it is held to their
-#: range. Rejected: an open top (a slab grip such as a phone or a flat remote is
-#: not a power grip, and the anchor would place its wrist by a rule nobody
-#: measured). Age: the survey's subjects are 17 to 51 (TR89-044 Table 1, p. 4);
-#: a child's hand is not in it. Both keys are read under their primary spelling
-#: only, with no alias, because the spine judges the context on the spelling the
-#: run read. Outside, a pass does not count (Gap) and a fail still does.
+#: range. Rejected: an open top (the anchor would place a wrist behind a handle
+#: no one measured). Age: the survey's subjects are 17 to 51 (TR89-044 Table 1,
+#: p. 4); a child's hand is not in it. Both keys are read under their primary
+#: spelling only, with no alias, because the spine judges the context on the
+#: spelling the run read. Outside, a pass does not count (Gap) and a fail still
+#: does. A slab grip is not outside this context: it is a grip the rule has no
+#: source for, so the gate skips on it before it reads the diameter
+#: (:data:`SLAB_WORDS`). What slipped through while the context stood in for it
+#: (holdout, general-packs H4): a slab's perimeter / pi, 95 to 134 mm, fell
+#: outside 25 to 50, the count failed, and that fail counted.
 CONTEXT = {"hand_grip_diameter_mm": (25.0, 50.0), "hand_user_age_min_years": (17.0, None)}
+
+#: The skip on a control pressed from a slab grip (``A.GRIP_KINDS``): what is
+#: missing (a rule with a source), what settles reach instead (the scaffold's
+#: physical claim), then the grips. That order, because the spine cuts a skip
+#: reason at 200 characters, and many grip ids must cut the ids, never the
+#: remedy (holdout finding D03). Rejected: "outside the operating context" (a
+#: fail there still counts, and here neither outcome is the design's); Gap (only
+#: the spine says Gap, on a pass outside the context; a skip is the gate's own
+#: word for a judgment it cannot make).
+SLAB_WORDS = ("no count on a slab grip: the reach rule has a source only for a fist round "
+              "a handle; two testers on the print settle reach (the scaffold's REACH-HELD); "
+              "slab grips: {grips}")
 
 #: The comparators a share can be held to: at least, or more than. Rejected:
 #: ``<=`` (a claim that at most 95% reach is not a reach claim), ``between``.
@@ -102,14 +122,16 @@ def _evidence(ctx: GateContext, payload: dict) -> list[str]:
 def digit_reach(ctx: GateContext) -> Verdict:
     """The worst-sex share of subjects who reach every judged control.
 
-    Skips when the projection carries no layout, or when no control is pressed
-    from a grip by a thumb or an index finger (checked before the claim is
-    read). Errors on a layout it cannot judge: a grip id no grip declares, a zero
-    or non-finite vector, a hand axis more than 20 deg from perpendicular to its
-    handle, a judged control behind the centre of its grip along the hand axis (a
-    reversed or swapped axis), a regrip control with no reason, a claim not held
-    as ``>=`` or ``>`` in %. Each share is floored to 0.01% before it is judged
-    (``_anthro.share_pct``)."""
+    Skips when the projection carries no layout, when no control is pressed from
+    a grip by a thumb or an index finger, or when a judged control is pressed from
+    a ``slab`` grip (each checked before the claim is read; the last before the
+    diameter is, which a device with only slab grips does not state). Errors on a
+    layout it cannot judge: a grip with no kind or another kind, a key no gate
+    reads, a grip id no grip declares, a zero or non-finite vector, a handle grip's
+    hand axis more than 20 deg from perpendicular to its handle, a judged control
+    behind the centre of its grip along the hand axis (a reversed or swapped
+    axis), a regrip control with no reason, a claim not held as ``>=`` or ``>`` in
+    %. Each share is floored to 0.01% before it is judged (``_anthro.share_pct``)."""
     raw_controls = ctx.param("hand_controls")
     if raw_controls is None:
         return _skip("no hand_controls: the controls and the digits that press them "
@@ -125,11 +147,19 @@ def digit_reach(ctx: GateContext) -> Verdict:
                      "the reach rule has nothing to judge (regrip and other-digit "
                      "controls are listed, not judged)")
     raw_grips = ctx.param("hand_grips")
-    diameter = ctx.param("hand_grip_diameter_mm")
-    age = ctx.param("hand_user_age_min_years")
     if raw_grips is None:
         return _skip("no hand_grips: where each hand holds the device "
-                     "[{id, centre, hand_axis, handle_axis}] in the device frame")
+                     "[{id, kind, centre, hand_axis, handle_axis}] in the device frame")
+    try:
+        grips = A.parse_grips(raw_grips)
+        A.check_grip_ids(controls, grips)
+    except A.LayoutError as exc:
+        return _error(str(exc))
+    slabs = A.slab_grips(controls, grips)
+    if slabs:
+        return _skip(SLAB_WORDS.format(grips=", ".join(slabs)))
+    diameter = ctx.param("hand_grip_diameter_mm")
+    age = ctx.param("hand_user_age_min_years")
     if diameter is None:
         return _skip("no hand_grip_diameter_mm: the largest handle's perimeter / pi "
                      "through its grip centre, mm")
@@ -137,8 +167,6 @@ def digit_reach(ctx: GateContext) -> Verdict:
         return _error(f"hand_grip_diameter_mm is {diameter!r}; it is a handle diameter "
                       f"in mm, more than 0")
     try:
-        grips = A.parse_grips(raw_grips)
-        A.check_grip_ids(controls, grips)
         A.check_distal(controls, grips)
     except A.LayoutError as exc:
         return _error(str(exc))

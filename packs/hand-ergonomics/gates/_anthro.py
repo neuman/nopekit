@@ -23,7 +23,9 @@ WTT_i`` (wrist-thumbtip length), and of the index finger when ``|P - S_ig| <=
 WIF_i`` (wrist-index finger length). A subject is accommodated only when every
 judged control is in reach of one of the digits that presses it. A judged control
 lies at or beyond the centre of each grip it is pressed from, along that grip's
-hand axis (:data:`DISTAL_MIN_MM`); one behind it is refused.
+hand axis (:data:`DISTAL_MIN_MM`); one behind it is refused. The rule holds only
+for a grip of kind ``handle`` (:data:`GRIP_KINDS`): a control pressed from a
+``slab`` grip is never counted (:func:`slab_grips`).
 
 **It counts subjects; it never adds percentiles.** What slipped through the
 percentile habit, measured on this table: the women's P5 of wrist-thumbtip minus
@@ -36,6 +38,7 @@ from __future__ import annotations
 import bisect
 import collections
 import csv
+import difflib
 import hashlib
 import io
 import json
@@ -85,6 +88,45 @@ HAND_AXIS_TOLERANCE_DEG = 20.0
 #: no sign: only the controls pressed from it do).
 DISTAL_MIN_MM = 0.0
 
+#: The kinds of grip a layout states, one per grip, with no default.
+#: ``handle``: a fist closed round a handle, the posture TR89-044 measured
+#: wrist-centre of grip length in (on a 31.75 mm dowel), and the one grip the reach
+#: rule has a source for. ``slab``: any other hold, a device held flat or at its
+#: edges (a phone, an e-reader, a flat remote, a board held at its short ends).
+#: No public survey measures where the wrist sits behind a slab, so no gate counts
+#: a control pressed from one: ``ergo.digit_reach`` skips, naming the physical
+#: claim that settles it. What slipped through before a grip stated its kind
+#: (holdout, general-packs H4): a handheld terminal and a game console board, each
+#: a slab held at its short ends, stated the slab's perimeter / pi as the handle
+#: diameter (95 to 134 mm), as PACK.md asked. The girth term put every wrist 32 to
+#: 51 mm behind its grip, the count read 0 to 80%, and the fail counted outside the
+#: operating context, so the reach claim read Failing where PACK.md and
+#: reach-model.md promised Gap. Rejected: a default of ``handle`` (a person who
+#: never read the kinds gets the false fail back); a slab read from the scene, as a
+#: section several times longer than thick (the reach gate is tier 0 and reads no
+#: scene, and a threshold on shape guesses what the person meant); a slab treated
+#: as outside the operating context (a fail outside still counts, invariant 9,
+#: which is right where the rule applies and only its data is extrapolated, and
+#: wrong here, where the rule does not apply at all); a slab anchor (the 2014
+#: functional-area model, whose worked example does not reproduce:
+#: ``references/reach-model.md``).
+GRIP_KINDS = ("handle", "slab")
+HANDLE = "handle"
+
+#: The keys a grip and a control may hold. Any other key is refused, naming the
+#: nearest known one: a key no gate reads is a declaration that changes nothing,
+#: and its author believes it does. What slipped through (holdout finding D08): a
+#: control is a point, judged at ``at``, so a wide cap is judged at its centre,
+#: and an ``extent`` added to a control would have been dropped without a word.
+#: Rejected: ignoring unknown keys (that silence); reading an extent, judged at
+#: the cap's nearest point (whether a wide cap actuates at its end is a fact of
+#: its switch and its stabiliser, which no scene shows, so a stated extent would
+#: pass on a number nothing holds). Judged at its centre, a wide cap that
+#: actuates anywhere is judged conservatively: its nearest point is never
+#: farther from the wrist than its centre.
+GRIP_KEYS = ("id", "kind", "centre", "hand_axis", "handle_axis")
+CONTROL_KEYS = ("id", "at", "normal", "operated_by", "regrip_reason")
+
 #: The digits a control may name. ``thumb`` and ``index`` are judged; ``other``
 #: (a paddle under the middle finger) is counted and not judged, because no
 #: survey here measured that reach. Rejected: erroring ``other`` (a sound design
@@ -108,7 +150,9 @@ PROVENANCE_PATH = os.path.join(DATA_DIR, "PROVENANCE.json")
 Subject = collections.namedtuple(
     "Subject", "hand_length hand_breadth thumb_breadth wtt wif wcg wrist_circ")
 Table = collections.namedtuple("Table", "sha256 subjects")
-Grip = collections.namedtuple("Grip", "id centre hand_axis handle_axis")
+#: ``handle_axis`` is None on a slab grip that states none; ``kind`` is last, so
+#: a reader that unpacks the first four fields reads what it always read.
+Grip = collections.namedtuple("Grip", "id centre hand_axis handle_axis kind")
 Control = collections.namedtuple("Control", "id at pairs mode reason named")
 
 
@@ -197,10 +241,25 @@ def angle_deg(a: tuple, b: tuple) -> float:
     return math.degrees(math.acos(dot))
 
 
+def _known_keys(entry: dict, known: tuple, what: str, why: str) -> None:
+    """:class:`LayoutError` for the first key of ``entry`` not in ``known``, naming
+    the nearest known key (:data:`GRIP_KEYS`, :data:`CONTROL_KEYS`). ``why`` comes
+    before the list of keys: an error is cut at 200 characters, and the reason is
+    what the person needs."""
+    stray = [key for key in entry if key not in known]
+    if stray:
+        near = difflib.get_close_matches(str(stray[0]), known, n=1)
+        hint = f" (did you mean {near[0]!r}?)" if near else ""
+        raise LayoutError(f"{what} has key {stray[0]!r}{hint}: {why}; it takes "
+                          f"{', '.join(known)}")
+
+
 def parse_controls(raw) -> list[Control]:
     """The controls as declared, before their grips are known.
 
-    Each is ``{id, at, operated_by: [{grip, digit}], regrip_reason}``. A control
+    Each is ``{id, at, operated_by: [{grip, digit}], regrip_reason}``, and may give
+    the ``normal`` ``ergo.layout_agrees`` reads; any other key is refused
+    (:data:`CONTROL_KEYS`). A control
     with an empty ``operated_by`` is a regrip control and must give its reason; one
     pressed only by ``other`` is counted and not judged. Grip ids are checked
     against the grips by :func:`check_grip_ids`."""
@@ -219,6 +278,8 @@ def parse_controls(raw) -> list[Control]:
         if cid in seen:
             raise LayoutError(f"control {cid!r} is declared twice")
         seen.add(cid)
+        _known_keys(entry, CONTROL_KEYS, f"control {cid!r}",
+                    "a control is a point, judged at its at, and no gate here reads that")
         at = point(entry.get("at"), f"control {cid!r} at")
         ops = entry.get("operated_by")
         if not isinstance(ops, (list, tuple)):
@@ -256,33 +317,60 @@ def parse_controls(raw) -> list[Control]:
 
 
 def parse_grips(raw) -> dict[str, Grip]:
-    """The grips as declared: ``{id, centre, hand_axis, handle_axis}``, the axes
-    made unit, the hand axis within :data:`HAND_AXIS_TOLERANCE_DEG` of
-    perpendicular to the handle axis."""
+    """The grips as declared: ``{id, kind, centre, hand_axis, handle_axis}``, the
+    axes made unit; any other key is refused (:data:`GRIP_KEYS`).
+
+    ``kind`` is required, one of :data:`GRIP_KINDS`. A ``handle`` grip states all
+    three vectors, its hand axis within :data:`HAND_AXIS_TOLERANCE_DEG` of
+    perpendicular to its handle axis. A ``slab`` grip states its centre and hand
+    axis (where and which way the hand holds: the testers' marks) and may leave
+    the handle axis out; the 20 deg rule is the anchor's, and a slab grip is never
+    anchored, so it is not asked of one. Every vector given is read strictly."""
     if not isinstance(raw, (list, tuple)):
         raise LayoutError(f"hand_grips must be a list of grips, not {type(raw).__name__}")
     grips: dict[str, Grip] = {}
     for n, entry in enumerate(raw):
         where = f"hand_grips[{n}]"
         if not isinstance(entry, dict):
-            raise LayoutError(f"{where} must be an object with id, centre, hand_axis and "
-                              f"handle_axis")
+            raise LayoutError(f"{where} must be an object with id, kind, centre, hand_axis "
+                              f"and handle_axis")
         gid = entry.get("id")
         if not isinstance(gid, str) or not gid.strip():
             raise LayoutError(f"{where} has no id")
         if gid in grips:
             raise LayoutError(f"grip {gid!r} is declared twice")
+        _known_keys(entry, GRIP_KEYS, f"grip {gid!r}", "no gate here reads that")
+        kind = entry.get("kind")
+        if kind is None:
+            raise LayoutError(f"grip {gid!r} states no kind: 'handle' (a fist round a handle, "
+                              f"the one grip the reach count has a source for) or 'slab' "
+                              f"(held flat or at its edges)")
+        if kind not in GRIP_KINDS:
+            raise LayoutError(f"grip {gid!r} kind is {kind!r}; it is 'handle' (a fist round a "
+                              f"handle) or 'slab' (held flat or at its edges)")
         centre = point(entry.get("centre"), f"grip {gid!r} centre")
         hand = unit(entry.get("hand_axis"), f"grip {gid!r} hand_axis")
+        if kind != HANDLE and entry.get("handle_axis") is None:
+            grips[gid] = Grip(gid, centre, hand, None, kind)
+            continue
         handle = unit(entry.get("handle_axis"), f"grip {gid!r} handle_axis")
         lean = abs(90.0 - angle_deg(hand, handle))
-        if lean > HAND_AXIS_TOLERANCE_DEG:
+        if kind == HANDLE and lean > HAND_AXIS_TOLERANCE_DEG:
             raise LayoutError(
                 f"grip {gid!r}: the hand axis is {lean:.1f} deg from perpendicular to the "
                 f"handle axis (at most {HAND_AXIS_TOLERANCE_DEG:g}): wrist-centre of grip "
                 f"length was measured with the handle square to the fist")
-        grips[gid] = Grip(gid, centre, hand, handle)
+        grips[gid] = Grip(gid, centre, hand, handle, kind)
     return grips
+
+
+def slab_grips(controls: list[Control], grips: dict[str, Grip]) -> list[str]:
+    """The grips, sorted, that a judged control is pressed from and that are not
+    handles: where the reach rule has no source, so no count is made. Run after
+    :func:`check_grip_ids`. A slab grip that no judged control is pressed from
+    moves nothing: the count runs on the handles."""
+    return sorted({grip for control in controls for grip, _digit in control.pairs
+                   if grips[grip].kind != HANDLE})
 
 
 def check_grip_ids(controls: list[Control], grips: dict[str, Grip]) -> None:
